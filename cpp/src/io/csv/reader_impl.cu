@@ -24,6 +24,7 @@
 
 #include <io/comp/io_uncomp.hpp>
 #include <io/utilities/column_buffer.hpp>
+#include <io/utilities/config_utils.hpp>
 #include <io/utilities/hostdevice_vector.hpp>
 #include <io/utilities/parsing_utils.cuh>
 
@@ -243,6 +244,9 @@ std::pair<rmm::device_uvector<char>, selected_rows_offsets> load_data_and_gather
   size_t header_rows = (reader_opts.get_header() >= 0) ? reader_opts.get_header() + 1 : 0;
   uint64_t ctx       = 0;
 
+  auto const use_pinned_bounce_buffer = detail::io_config::is_pinned_enabled();
+  cudf::detail::pinned_host_vector<char> pinned_data(use_pinned_bounce_buffer ? buffer_size : 0);
+
   // For compatibility with the previous parser, a row is considered in-range if the
   // previous row terminator is within the given range
   range_end += (range_end < data.size());
@@ -253,13 +257,21 @@ std::pair<rmm::device_uvector<char>, selected_rows_offsets> load_data_and_gather
   d_data.resize(0, stream);
   rmm::device_uvector<uint64_t> all_row_offsets{0, stream};
   do {
-    size_t target_pos = std::min(pos + max_chunk_bytes, data.size());
-    size_t chunk_size = target_pos - pos;
-
+    size_t target_pos             = std::min(pos + max_chunk_bytes, data.size());
+    size_t chunk_size             = target_pos - pos;
     auto const previous_data_size = d_data.size();
+
+    if (use_pinned_bounce_buffer) {
+      std::memcpy(pinned_data.data(),
+                  data.begin() + buffer_pos + previous_data_size,
+                  target_pos - buffer_pos - previous_data_size);
+    }
+    auto const data_src = use_pinned_bounce_buffer ? pinned_data.data()
+                                                   : data.begin() + buffer_pos + previous_data_size;
+
     d_data.resize(target_pos - buffer_pos, stream);
     CUDF_CUDA_TRY(cudaMemcpyAsync(d_data.begin() + previous_data_size,
-                                  data.begin() + buffer_pos + previous_data_size,
+                                  data_src,
                                   target_pos - buffer_pos - previous_data_size,
                                   cudaMemcpyDefault,
                                   stream.value()));

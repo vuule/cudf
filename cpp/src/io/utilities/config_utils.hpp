@@ -83,7 +83,12 @@ namespace io_config {
 /**
  * @brief Returns true if memory mapping of input files is disabled.
  */
-bool is_memory_mapping_disabled();
+bool is_memory_mapping_enabled();
+
+/**
+ * @brief Returns true if pinned memory bounce buffer is enabled.
+ */
+bool is_pinned_enabled();
 
 }  // namespace io_config
 

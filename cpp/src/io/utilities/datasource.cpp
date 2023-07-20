@@ -322,7 +322,7 @@ std::unique_ptr<datasource> datasource::create(std::string const& filepath,
                                                size_t offset,
                                                size_t size)
 {
-  auto const use_direct_reads = detail::io_config::is_memory_mapping_disabled();
+  auto const use_direct_reads = not detail::io_config::is_memory_mapping_enabled();
   if (detail::cufile_integration::is_always_enabled() or use_direct_reads) {
     // avoid mmap as GDS is expected to be used for most reads
     return std::make_unique<direct_read_source>(filepath.c_str());

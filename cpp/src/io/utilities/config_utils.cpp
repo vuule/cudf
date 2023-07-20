@@ -86,22 +86,31 @@ namespace {
 /**
  * @brief Defines which nvCOMP usage to enable.
  */
-enum class policy : uint8_t { MEMORY_MAPPED, PAGEABLE };
+enum class policy : uint8_t { MMAP_PAGEABLE, MMAP_PINNED, DIRECT_PAGEABLE, DIRECT_PINNED };
 
 /**
  * @brief Get the current usage policy.
  */
 policy get_env_policy()
 {
-  static auto const env_val = getenv_or<std::string>("LIBCUDF_IO_POLICY", "MEMORY_MAPPED");
-  if (env_val == "MEMORY_MAPPED") return policy::MEMORY_MAPPED;
-  if (env_val == "PAGEABLE") return policy::PAGEABLE;
+  static auto const env_val = getenv_or<std::string>("LIBCUDF_IO_POLICY", "MMAP_PAGEABLE");
+  if (env_val == "MMAP_PAGEABLE") return policy::MMAP_PAGEABLE;
+  if (env_val == "MMAP_PINNED") return policy::MMAP_PINNED;
+  if (env_val == "DIRECT_PAGEABLE") return policy::DIRECT_PAGEABLE;
+  if (env_val == "DIRECT_PINNED") return policy::DIRECT_PINNED;
   CUDF_FAIL("Invalid LIBCUDF_IO_POLICY value: " + env_val);
 }
 }  // namespace
 
-bool is_memory_mapping_disabled() { return get_env_policy() != policy::MEMORY_MAPPED; }
+bool is_memory_mapping_enabled()
+{
+  return get_env_policy() == policy::MMAP_PAGEABLE or get_env_policy() == policy::MMAP_PINNED;
+}
 
+bool is_pinned_enabled()
+{
+  return get_env_policy() == policy::MMAP_PINNED or get_env_policy() == policy::DIRECT_PINNED;
+}
 }  // namespace io_config
 
 }  // namespace cudf::io::detail
