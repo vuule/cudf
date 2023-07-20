@@ -80,4 +80,28 @@ bool is_stable_enabled() { return is_all_enabled() or get_env_policy() == usage_
 
 }  // namespace nvcomp_integration
 
+namespace io_config {
+
+namespace {
+/**
+ * @brief Defines which nvCOMP usage to enable.
+ */
+enum class policy : uint8_t { MEMORY_MAPPED, PAGEABLE };
+
+/**
+ * @brief Get the current usage policy.
+ */
+policy get_env_policy()
+{
+  static auto const env_val = getenv_or<std::string>("LIBCUDF_IO_POLICY", "MEMORY_MAPPED");
+  if (env_val == "MEMORY_MAPPED") return policy::MEMORY_MAPPED;
+  if (env_val == "PAGEABLE") return policy::PAGEABLE;
+  CUDF_FAIL("Invalid LIBCUDF_IO_POLICY value: " + env_val);
+}
+}  // namespace
+
+bool is_memory_mapping_disabled() { return get_env_policy() != policy::MEMORY_MAPPED; }
+
+}  // namespace io_config
+
 }  // namespace cudf::io::detail

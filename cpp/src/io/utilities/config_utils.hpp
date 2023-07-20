@@ -78,4 +78,13 @@ bool is_stable_enabled();
 
 }  // namespace nvcomp_integration
 
+namespace io_config {
+
+/**
+ * @brief Returns true if memory mapping of input files is disabled.
+ */
+bool is_memory_mapping_disabled();
+
+}  // namespace io_config
+
 }  // namespace cudf::io::detail
