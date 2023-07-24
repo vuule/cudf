@@ -692,3 +692,6 @@ std::vector<cudf::type_id> mix_dtypes(std::pair<cudf::type_id, cudf::type_id> co
  */
 std::pair<rmm::device_buffer, cudf::size_type> create_random_null_mask(
   cudf::size_type size, std::optional<double> null_probability = std::nullopt, unsigned seed = 1);
+
+void test_io(bool use_mmap, bool use_pinned);
+void test_io_options();

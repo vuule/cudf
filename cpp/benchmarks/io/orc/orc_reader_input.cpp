@@ -33,27 +33,7 @@ void orc_read_common(cudf::io::orc_writer_options const& opts,
                      cuio_source_sink_pair& source_sink,
                      nvbench::state& state)
 {
-  cudf::io::write_orc(opts);
-
-  cudf::io::orc_reader_options read_opts =
-    cudf::io::orc_reader_options::builder(source_sink.make_source_info());
-
-  auto mem_stats_logger = cudf::memory_stats_logger();  // init stats logger
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
-  state.exec(nvbench::exec_tag::sync | nvbench::exec_tag::timer,
-             [&](nvbench::launch& launch, auto& timer) {
-               try_drop_l3_cache();
-
-               timer.start();
-               cudf::io::read_orc(read_opts);
-               timer.stop();
-             });
-
-  auto const time = state.get_summary("nv/cold/time/gpu/mean").get_float64("value");
-  state.add_element_count(static_cast<double>(data_size) / time, "bytes_per_second");
-  state.add_buffer_size(
-    mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
-  state.add_buffer_size(source_sink.size(), "encoded_file_size", "encoded_file_size");
+  test_io_options();
 }
 
 template <data_type DataType, cudf::io::io_type IOType>
@@ -107,17 +87,9 @@ void BM_orc_read_io_compression(
   orc_read_common(opts, source_sink, state);
 }
 
-using d_type_list = nvbench::enum_type_list<data_type::INTEGRAL_SIGNED,
-                                            data_type::FLOAT,
-                                            data_type::DECIMAL,
-                                            data_type::TIMESTAMP,
-                                            data_type::STRING,
-                                            data_type::LIST,
-                                            data_type::STRUCT>;
+using d_type_list = nvbench::enum_type_list<data_type::INTEGRAL_SIGNED>;
 
-using io_list = nvbench::enum_type_list<cudf::io::io_type::FILEPATH,
-                                        cudf::io::io_type::HOST_BUFFER,
-                                        cudf::io::io_type::DEVICE_BUFFER>;
+using io_list = nvbench::enum_type_list<cudf::io::io_type::DEVICE_BUFFER>;
 
 using compression_list =
   nvbench::enum_type_list<cudf::io::compression_type::SNAPPY, cudf::io::compression_type::NONE>;
@@ -128,12 +100,5 @@ NVBENCH_BENCH_TYPES(BM_orc_read_data,
   .set_name("orc_read_decode")
   .set_type_axes_names({"data_type", "io"})
   .set_min_samples(4)
-  .add_int64_axis("cardinality", {0, 1000})
-  .add_int64_axis("run_length", {1, 32});
-
-NVBENCH_BENCH_TYPES(BM_orc_read_io_compression, NVBENCH_TYPE_AXES(io_list, compression_list))
-  .set_name("orc_read_io_compression")
-  .set_type_axes_names({"io", "compression"})
-  .set_min_samples(4)
-  .add_int64_axis("cardinality", {0, 1000})
-  .add_int64_axis("run_length", {1, 32});
+  .add_int64_axis("cardinality", {0})
+  .add_int64_axis("run_length", {1});

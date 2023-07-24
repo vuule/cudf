@@ -20,6 +20,7 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/gather.hpp>
+#include <cudf/detail/utilities/pinned_host_vector.hpp>
 #include <cudf/detail/valid_if.cuh>
 #include <cudf/filling.hpp>
 #include <cudf/null_mask.hpp>
@@ -60,6 +61,11 @@
 #include <random>
 #include <utility>
 #include <vector>
+
+#include <fstream>
+#include <iostream>
+#include <sys/mman.h>
+#include <unistd.h>
 
 /**
  * @brief Mersenne Twister pseudo-random engine.
@@ -943,4 +949,76 @@ std::vector<cudf::type_id> get_type_or_group(std::vector<int32_t> const& ids)
     all_type_ids.insert(std::end(all_type_ids), std::cbegin(type_ids), std::cend(type_ids));
   }
   return all_type_ids;
+}
+
+constexpr size_t data_size_bytes = 512 * 1024 * 1024;
+
+void fill_random_data(int* data, size_t size)
+{
+  // Replace this function with your data generation logic if needed.
+  for (size_t i = 0; i < size / sizeof(int); ++i) {
+    data[i] = rand();
+  }
+}
+
+void test_io_options()
+{
+  test_io(false, false);
+  test_io(false, true);
+  test_io(true, false);
+  test_io(true, true);
+}
+
+void test_io(bool use_mmap, bool use_pinned)
+{
+  std::cout << "test_io: use_mmap=" << use_mmap << ", use_pinned=" << use_pinned << std::endl;
+
+  std::string file_path = "datafile.bin";
+  auto stream           = cudf::get_default_stream();
+
+  std::vector<char> data;
+  data.reserve(data_size_bytes);
+  fill_random_data(reinterpret_cast<int*>(data.data()), data_size_bytes);
+
+  std::ofstream file(file_path, std::ios::binary);
+  file.write(data.data(), data_size_bytes);
+  file.close();
+
+  auto const fd = open(file_path.c_str(), O_RDONLY);
+  CUDF_EXPECTS(fd != -1, "Error opening the file.");
+
+  char const* h_data = nullptr;
+  char* mapped_data  = nullptr;
+  std::vector<char> read_data;
+  if (use_mmap) {
+    mapped_data = static_cast<char*>(mmap(nullptr, data_size_bytes, PROT_READ, MAP_PRIVATE, fd, 0));
+    CUDF_EXPECTS(mapped_data != MAP_FAILED, "Error mapping the file into memory.");
+    h_data = mapped_data;
+  } else {
+    read_data.resize(data_size_bytes);
+    CUDF_EXPECTS(read(fd, read_data.data(), data_size_bytes) == data_size_bytes, "read failed");
+    h_data = read_data.data();
+  }
+
+  // copy to GPU
+  auto const chunk_size = 64ul * 1024 * 1024;
+  cudf::detail::pinned_host_vector<char> pinned_data(use_pinned ? chunk_size : 0);
+
+  rmm::device_uvector<char> d_data{chunk_size, stream};
+  for (size_t chunk = 0; chunk < (data_size_bytes + chunk_size - 1) / chunk_size; ++chunk) {
+    auto const offset = chunk * chunk_size;
+    auto const size   = std::min(chunk_size, data_size_bytes - offset);
+
+    auto src = h_data + offset;
+    if (use_pinned) {
+      std::memcpy(pinned_data.data(), src, size);
+      src = pinned_data.data();
+    }
+
+    cudaMemcpyAsync(d_data.data(), src, size, cudaMemcpyDefault, stream);
+    stream.synchronize();
+  }
+
+  close(fd);
+  munmap(mapped_data, data_size_bytes);
 }
