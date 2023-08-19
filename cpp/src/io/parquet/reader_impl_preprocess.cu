@@ -41,7 +41,11 @@
 #include <thrust/transform.h>
 #include <thrust/unique.h>
 
+#include <cstdint>
+#include <fstream>
+#include <iostream>
 #include <numeric>
+#include <vector>
 
 namespace cudf::io::detail::parquet {
 namespace {
@@ -377,6 +381,20 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
   return level_type_size;
 }
 
+void saveVectorToBinaryFile(const std::vector<uint8_t>& data, const std::string& filename)
+{
+  std::ofstream file(filename, std::ios::out | std::ios::binary);
+  if (!file.is_open()) {
+    std::cerr << "Error opening file: " << filename << std::endl;
+    return;
+  }
+
+  // Write the vector data to the file
+  file.write(reinterpret_cast<const char*>(data.data()), data.size());
+
+  file.close();
+}
+
 /**
  * @brief Decompresses the page data, at page granularity.
  *
@@ -497,6 +515,16 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
       decomp_offset += page.uncompressed_page_size;
     });
 
+    {
+      int idx = 0;
+      for (auto& in : comp_in) {
+        std::vector<uint8_t> in_data(in.size());
+        cudaMemcpy(in_data.data(), in.data(), in.size(), cudaMemcpyDeviceToHost);
+        saveVectorToBinaryFile(in_data, "in_data" + std::to_string(idx) + ".bin");
+        idx++;
+      }
+    }
+
     host_span<device_span<uint8_t const> const> comp_in_view{comp_in.data() + start_pos,
                                                              codec.num_pages};
     auto const d_comp_in = cudf::detail::make_device_uvector_async(
@@ -550,6 +578,7 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
                               comp_res.begin(),
                               comp_res.end(),
                               [] __device__(auto const& res) {
+                                printf("res.bytes_written = %lu\n", res.bytes_written);
                                 return res.status == compression_status::SUCCESS;
                               }),
                "Error during decompression");
@@ -568,6 +597,15 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
   // Update the page information in device memory with the updated value of
   // page_data; it now points to the uncompressed data buffer
   pages.host_to_device_async(stream);
+
+  stream.synchronize();
+  int idx = 0;
+  for (auto& out : comp_out) {
+    std::vector<uint8_t> out_data(out.size());
+    cudaMemcpy(out_data.data(), out.data(), out.size(), cudaMemcpyDeviceToHost);
+    saveVectorToBinaryFile(out_data, "out_data" + std::to_string(idx) + ".bin");
+    idx++;
+  }
 
   return decomp_pages;
 }
@@ -1672,7 +1710,7 @@ void reader::impl::preprocess_pages(size_t skip_rows,
     // - we will be doing a chunked read
     gpu::ComputePageSizes(pages,
                           chunks,
-                          0,                     // 0-max size_t. process all possible rows
+                          0,  // 0-max size_t. process all possible rows
                           std::numeric_limits<size_t>::max(),
                           true,                  // compute num_rows
                           chunk_read_limit > 0,  // compute string sizes
