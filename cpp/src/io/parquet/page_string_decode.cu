@@ -326,6 +326,7 @@ __device__ thrust::pair<int, int> page_bounds(page_state_s* const s,
     }
   }
   // already filtered out unwanted pages, so need to count all non-null values in this page
+  // test
   else {
     int num_nulls = 0;
     while (processed < s->page.num_input_values) {
