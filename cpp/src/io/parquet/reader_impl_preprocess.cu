@@ -41,7 +41,11 @@
 #include <thrust/transform.h>
 #include <thrust/unique.h>
 
+#include <cstdint>
+#include <fstream>
+#include <iostream>
 #include <numeric>
+#include <vector>
 
 namespace cudf::io::detail::parquet {
 namespace {
@@ -378,6 +382,20 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
   return level_type_size;
 }
 
+void saveVectorToBinaryFile(const std::vector<uint8_t>& data, const std::string& filename)
+{
+  std::ofstream file(filename, std::ios::out | std::ios::binary);
+  if (!file.is_open()) {
+    std::cerr << "Error opening file: " << filename << std::endl;
+    return;
+  }
+
+  // Write the vector data to the file
+  file.write(reinterpret_cast<const char*>(data.data()), data.size());
+
+  file.close();
+}
+
 /**
  * @brief Decompresses the page data, at page granularity.
  *
@@ -476,7 +494,7 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
   int32_t start_pos    = 0;
   for (auto const& codec : codecs) {
     if (codec.num_pages == 0) { continue; }
-
+    auto pg_idx = 0;
     for_each_codec_page(codec.compression_type, [&](size_t page_idx) {
       auto const dst_base = static_cast<uint8_t*>(decomp_pages.data()) + decomp_offset;
       auto& page          = pages[page_idx];
@@ -490,6 +508,8 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
         copy_in.emplace_back(page.page_data, offset);
         copy_out.emplace_back(dst_base, offset);
       }
+      std::cout << pg_idx++ << ": " << std::endl;
+      std::cout << page << std::endl;
       comp_in.emplace_back(page.page_data + offset,
                            static_cast<size_t>(page.compressed_page_size - offset));
       comp_out.emplace_back(dst_base + offset,
@@ -497,6 +517,19 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
       page.page_data = dst_base;
       decomp_offset += page.uncompressed_page_size;
     });
+
+    {
+      static int g_idx = 0;
+      int idx          = 0;
+      for (auto& in : comp_in) {
+        std::vector<uint8_t> in_data(in.size());
+        cudaMemcpy(in_data.data(), in.data(), in.size(), cudaMemcpyDeviceToHost);
+        saveVectorToBinaryFile(
+          in_data, "in_data_" + std::to_string(g_idx) + "_" + std::to_string(idx) + ".bin");
+        idx++;
+      }
+      g_idx++;
+    }
 
     host_span<device_span<uint8_t const> const> comp_in_view{comp_in.data() + start_pos,
                                                              codec.num_pages};
@@ -546,7 +579,6 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
     }
     start_pos += codec.num_pages;
   }
-
   CUDF_EXPECTS(thrust::all_of(rmm::exec_policy(stream),
                               comp_res.begin(),
                               comp_res.end(),
@@ -569,6 +601,20 @@ int decode_page_headers(cudf::detail::hostdevice_vector<gpu::ColumnChunkDesc>& c
   // Update the page information in device memory with the updated value of
   // page_data; it now points to the uncompressed data buffer
   pages.host_to_device_async(stream);
+
+  {
+    stream.synchronize();
+    int idx          = 0;
+    static int g_idx = 0;
+    for (auto& out : comp_out) {
+      std::vector<uint8_t> out_data(out.size());
+      cudaMemcpy(out_data.data(), out.data(), out.size(), cudaMemcpyDeviceToHost);
+      saveVectorToBinaryFile(
+        out_data, "out_data_" + std::to_string(g_idx) + "_" + std::to_string(idx) + ".bin");
+      idx++;
+    }
+    g_idx++;
+  }
 
   return decomp_pages;
 }
