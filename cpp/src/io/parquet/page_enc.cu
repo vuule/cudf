@@ -84,8 +84,8 @@ struct page_enc_state_s {
   uint32_t rle_rpt_count;
   uint32_t page_start_val;
   uint32_t chunk_start_val;
-  volatile uint32_t rpt_map[4];
-  volatile uint32_t scratch_red[32];
+  uint32_t rpt_map[4];
+  uint32_t scratch_red[32];
   EncPage page;
   EncColumnChunk ck;
   parquet_column_device_view col;

@@ -67,22 +67,16 @@ template <typename ReturnType, typename InternalType>
 struct t_array_stats {
   InternalType const* ptr;  //!< ptr to data
   size_type length;         //!< length of data
-  __host__ __device__ __forceinline__ volatile t_array_stats& operator=(
-    ReturnType const& val) volatile
+  __host__ __device__ __forceinline__ t_array_stats& operator=(ReturnType const& val)
   {
     ptr    = val.data();
     length = val.size_bytes();
     return *this;
   }
-  __host__ __device__ __forceinline__ operator ReturnType() volatile
-  {
-    return ReturnType(ptr, length);
-  }
   __host__ __device__ __forceinline__ operator ReturnType() const
   {
     return ReturnType(ptr, length);
   }
-  __host__ __device__ __forceinline__ operator ReturnType() { return ReturnType(ptr, length); }
 };
 using string_stats     = t_array_stats<string_view, char>;
 using byte_array_view  = statistics::byte_array_view;

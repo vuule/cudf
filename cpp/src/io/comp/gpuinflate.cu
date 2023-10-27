@@ -108,9 +108,9 @@ struct prefetch_queue_s {
 };
 
 template <typename T>
-inline __device__ volatile uint32_t* prefetch_addr32(volatile prefetch_queue_s& q, T* ptr)
+inline __device__ uint32_t* prefetch_addr32(prefetch_queue_s& q, T* ptr)
 {
-  return reinterpret_cast<volatile uint32_t*>(&q.pref_data[(prefetch_size - 4) & (size_t)(ptr)]);
+  return reinterpret_cast<uint32_t*>(&q.pref_data[(prefetch_size - 4) & (size_t)(ptr)]);
 }
 
 #endif  // ENABLE_PREFETCH
@@ -140,9 +140,9 @@ struct inflate_state_s {
   uint16_t first_slow_dist;
   uint16_t index_slow_dist;
 
-  volatile xwarp_s x;
+  xwarp_s x;
 #if ENABLE_PREFETCH
-  volatile prefetch_queue_s pref;
+  prefetch_queue_s pref;
 #endif
 
   int16_t lencnt[max_bits + 1];
@@ -516,11 +516,11 @@ __device__ void decode_symbols(inflate_state_s* s)
   int32_t sym, batch_len;
 
   do {
-    volatile uint32_t* b = &s->x.u.symqueue[batch * batch_size];
+    uint32_t* b = &s->x.u.symqueue[batch * batch_size];
     // Wait for the next batch entry to be empty
 #if ENABLE_PREFETCH
     // Wait for prefetcher to fetch a worst-case of 48 bits per symbol
-    while ((*(volatile int32_t*)&s->pref.cur_p - (int32_t)(size_t)cur < batch_size * 6) ||
+    while ((*(int32_t*)&s->pref.cur_p - (int32_t)(size_t)cur < batch_size * 6) ||
            (s->x.batch_len[batch] != 0)) {}
 #else
     while (s->x.batch_len[batch] != 0) {}
@@ -663,7 +663,7 @@ __device__ void decode_symbols(inflate_state_s* s)
     } while (batch_len < batch_size - 1);
     s->x.batch_len[batch] = batch_len;
 #if ENABLE_PREFETCH
-    ((volatile inflate_state_s*)s)->cur = cur;
+    ((inflate_state_s*)s)->cur = cur;
 #endif
     if (batch_len != 0) batch = (batch + 1) & (batch_count - 1);
   } while (sym != 256);
@@ -779,8 +779,8 @@ __device__ void process_symbols(inflate_state_s* s, int t)
   int batch              = 0;
 
   do {
-    volatile uint32_t* b = &s->x.u.symqueue[batch * batch_size];
-    int batch_len        = 0;
+    uint32_t* b   = &s->x.u.symqueue[batch * batch_size];
+    int batch_len = 0;
     if (t == 0) {
       while ((batch_len = s->x.batch_len[batch]) == 0) {}
     }
@@ -945,14 +945,14 @@ __device__ void init_prefetcher(inflate_state_s* s, int t)
   }
 }
 
-__device__ void prefetch_warp(volatile inflate_state_s* s, int t)
+__device__ void prefetch_warp(inflate_state_s* s, int t)
 {
   uint8_t const* cur_p = s->pref.cur_p;
   uint8_t const* end   = s->end;
   while (shuffle((t == 0) ? s->pref.run : 0)) {
     auto cur_lo = (int32_t)(size_t)cur_p;
     int do_pref =
-      shuffle((t == 0) ? (cur_lo - *(volatile int32_t*)&s->cur < prefetch_size - 32 * 4 - 4) : 0);
+      shuffle((t == 0) ? (cur_lo - *(int32_t*)&s->cur < prefetch_size - 32 * 4 - 4) : 0);
     if (do_pref) {
       uint8_t const* p             = cur_p + 4 * t;
       *prefetch_addr32(s->pref, p) = (p < end) ? *reinterpret_cast<uint32_t const*>(p) : 0;
@@ -1156,9 +1156,9 @@ __global__ void __launch_bounds__(1024)
   copy_uncompressed_kernel(device_span<device_span<uint8_t const> const> inputs,
                            device_span<device_span<uint8_t> const> outputs)
 {
-  __shared__ uint8_t const* volatile src_g;
-  __shared__ uint8_t* volatile dst_g;
-  __shared__ uint32_t volatile copy_len_g;
+  __shared__ uint8_t const* src_g;
+  __shared__ uint8_t* dst_g;
+  __shared__ uint32_t copy_len_g;
 
   uint32_t t = threadIdx.x;
   uint32_t z = blockIdx.x;

@@ -650,7 +650,7 @@ __global__ void __launch_bounds__(decode_block_size)
       } else {
         gpuInitStringDescriptors<false>(s, sb, src_target_pos, t & 0x1f);
       }
-      if (t == 32) { *(volatile int32_t*)&s->dict_pos = src_target_pos; }
+      if (t == 32) { *(int32_t*)&s->dict_pos = src_target_pos; }
     } else {
       int const me = t - out_thread0;
 
@@ -733,7 +733,7 @@ __global__ void __launch_bounds__(decode_block_size)
         }
       }
 
-      if (t == out_thread0) { *(volatile int32_t*)&s->src_pos = target_pos; }
+      if (t == out_thread0) { *(int32_t*)&s->src_pos = target_pos; }
     }
     __syncthreads();
   }

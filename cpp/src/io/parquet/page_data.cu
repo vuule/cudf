@@ -42,10 +42,7 @@ constexpr int rolling_buf_size  = decode_block_size * 2;
  * @param[in] dstv Pointer to row output data (string descriptor or 32-bit hash)
  */
 template <typename state_buf>
-inline __device__ void gpuOutputString(volatile page_state_s* s,
-                                       volatile state_buf* sb,
-                                       int src_pos,
-                                       void* dstv)
+inline __device__ void gpuOutputString(page_state_s* s, state_buf* sb, int src_pos, void* dstv)
 {
   auto [ptr, len] = gpuGetStringData(s, sb, src_pos);
   // make sure to only hash `BYTE_ARRAY` when specified with the output type size
@@ -72,7 +69,7 @@ inline __device__ void gpuOutputString(volatile page_state_s* s,
  * @param[in] dst Pointer to row output data
  */
 template <typename state_buf>
-inline __device__ void gpuOutputBoolean(volatile state_buf* sb, int src_pos, uint8_t* dst)
+inline __device__ void gpuOutputBoolean(state_buf* sb, int src_pos, uint8_t* dst)
 {
   *dst = sb->dict_idx[rolling_index<state_buf::dict_buf_size>(src_pos)];
 }
@@ -146,8 +143,8 @@ inline __device__ void gpuStoreOutput(uint2* dst,
  * @param[out] dst Pointer to row output data
  */
 template <typename state_buf>
-inline __device__ void gpuOutputInt96Timestamp(volatile page_state_s* s,
-                                               volatile state_buf* sb,
+inline __device__ void gpuOutputInt96Timestamp(page_state_s* s,
+                                               state_buf* sb,
                                                int src_pos,
                                                int64_t* dst)
 {
@@ -221,8 +218,8 @@ inline __device__ void gpuOutputInt96Timestamp(volatile page_state_s* s,
  * @param[in] dst Pointer to row output data
  */
 template <typename state_buf>
-inline __device__ void gpuOutputInt64Timestamp(volatile page_state_s* s,
-                                               volatile state_buf* sb,
+inline __device__ void gpuOutputInt64Timestamp(page_state_s* s,
+                                               state_buf* sb,
                                                int src_pos,
                                                int64_t* dst)
 {
@@ -304,10 +301,7 @@ __device__ void gpuOutputByteArrayAsInt(char const* ptr, int32_t len, T* dst)
  * @param[in] dst Pointer to row output data
  */
 template <typename T, typename state_buf>
-__device__ void gpuOutputFixedLenByteArrayAsInt(volatile page_state_s* s,
-                                                volatile state_buf* sb,
-                                                int src_pos,
-                                                T* dst)
+__device__ void gpuOutputFixedLenByteArrayAsInt(page_state_s* s, state_buf* sb, int src_pos, T* dst)
 {
   uint32_t const dtype_len_in = s->dtype_len_in;
   uint8_t const* data         = s->dict_base ? s->dict_base : s->data_start;
@@ -341,10 +335,7 @@ __device__ void gpuOutputFixedLenByteArrayAsInt(volatile page_state_s* s,
  * @param[in] dst Pointer to row output data
  */
 template <typename T, typename state_buf>
-inline __device__ void gpuOutputFast(volatile page_state_s* s,
-                                     volatile state_buf* sb,
-                                     int src_pos,
-                                     T* dst)
+inline __device__ void gpuOutputFast(page_state_s* s, state_buf* sb, int src_pos, T* dst)
 {
   uint8_t const* dict;
   uint32_t dict_pos, dict_size = s->dict_size;
@@ -374,7 +365,7 @@ inline __device__ void gpuOutputFast(volatile page_state_s* s,
  */
 template <typename state_buf>
 static __device__ void gpuOutputGeneric(
-  volatile page_state_s* s, volatile state_buf* sb, int src_pos, uint8_t* dst8, int len)
+  page_state_s* s, state_buf* sb, int src_pos, uint8_t* dst8, int len)
 {
   uint8_t const* dict;
   uint32_t dict_pos, dict_size = s->dict_size;
@@ -509,7 +500,7 @@ __global__ void __launch_bounds__(decode_block_size)
                  (s->col.data_type & 7) == FIXED_LEN_BYTE_ARRAY) {
         gpuInitStringDescriptors<false>(s, sb, src_target_pos, t & 0x1f);
       }
-      if (t == 32) { *(volatile int32_t*)&s->dict_pos = src_target_pos; }
+      if (t == 32) { *(int32_t*)&s->dict_pos = src_target_pos; }
     } else {
       // WARP1..WARP3: Decode values
       int const dtype = s->col.data_type & 7;
@@ -598,7 +589,7 @@ __global__ void __launch_bounds__(decode_block_size)
         }
       }
 
-      if (t == out_thread0) { *(volatile int32_t*)&s->src_pos = target_pos; }
+      if (t == out_thread0) { *(int32_t*)&s->src_pos = target_pos; }
     }
     __syncthreads();
   }

@@ -36,9 +36,9 @@ struct snap_state_s {
   uint8_t* dst_base;                  ///< Base ptr to output compressed data
   uint8_t* dst;                       ///< Current ptr to uncompressed data
   uint8_t* end;                       ///< End of uncompressed data buffer
-  volatile uint32_t literal_length;   ///< Number of literal bytes
-  volatile uint32_t copy_length;      ///< Number of copy bytes
-  volatile uint32_t copy_distance;    ///< Distance for copy bytes
+  uint32_t literal_length;            ///< Number of literal bytes
+  uint32_t copy_length;               ///< Number of copy bytes
+  uint32_t copy_distance;             ///< Distance for copy bytes
   uint16_t hash_map[1 << hash_bits];  ///< Low 16-bit offset from hash
 };
 
@@ -291,7 +291,7 @@ __global__ void __launch_bounds__(128)
     s->copy_distance  = 0;
   }
   for (uint32_t i = t; i < sizeof(s->hash_map) / sizeof(uint32_t); i += 128) {
-    *reinterpret_cast<volatile uint32_t*>(&s->hash_map[i * 2]) = 0;
+    *reinterpret_cast<uint32_t*>(&s->hash_map[i * 2]) = 0;
   }
   __syncthreads();
   src = s->src;
