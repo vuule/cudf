@@ -5563,11 +5563,11 @@ TEST_P(ParquetSizedTest, DictionaryTest)
   auto const col0     = cudf::test::strings_column_wrapper(elements, elements + nrows);
   auto const expected = table_view{{col0}};
 
-  auto const filepath = temp_env->get_temp_filepath("DictionaryTest.parquet");
+  std::vector<char> out_buffer;
   // set row group size so that there will be only one row group
   // no compression so we can easily read page data
   cudf::io::parquet_writer_options out_opts =
-    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, expected)
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&out_buffer}, expected)
       .compression(cudf::io::compression_type::NONE)
       .stats_level(cudf::io::statistics_freq::STATISTICS_COLUMN)
       .dictionary_policy(cudf::io::dictionary_policy::ALWAYS)
@@ -5575,14 +5575,16 @@ TEST_P(ParquetSizedTest, DictionaryTest)
       .row_group_size_bytes(512 * 1024 * 1024);
   cudf::io::write_parquet(out_opts);
 
-  cudf::io::parquet_reader_options default_in_opts =
-    cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath});
+  cudf::io::parquet_reader_options default_in_opts = cudf::io::parquet_reader_options::builder(
+    cudf::io::source_info{out_buffer.data(), out_buffer.size()});
   auto const result = cudf::io::read_parquet(default_in_opts);
 
   CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result.tbl->view());
 
   // make sure dictionary was used
-  auto const source = cudf::io::datasource::create(filepath);
+  auto const out_buffer_span = cudf::host_span<std::byte const>(
+    reinterpret_cast<std::byte const*>(out_buffer.data()), out_buffer.size());
+  auto const source = cudf::io::datasource::create(out_buffer_span);
   cudf::io::parquet::detail::FileMetaData fmd;
 
   read_footer(source, &fmd);
