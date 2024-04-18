@@ -94,15 +94,6 @@ class column_buffer_base {
   // construct without a known size. call create() later to actually allocate memory
   column_buffer_base(data_type _type, bool _is_nullable) : type(_type), is_nullable(_is_nullable) {}
 
-  column_buffer_base(data_type _type,
-                     size_type _size,
-                     bool _is_nullable,
-                     rmm::cuda_stream_view stream,
-                     rmm::device_async_resource_ref mr)
-    : column_buffer_base(_type, _is_nullable)
-  {
-  }
-
   // move constructor
   column_buffer_base(column_buffer_base&& col)            = default;
   column_buffer_base& operator=(column_buffer_base&& col) = default;
@@ -177,7 +168,7 @@ class gather_column_buffer : public column_buffer_base<gather_column_buffer> {
                        bool _is_nullable,
                        rmm::cuda_stream_view stream,
                        rmm::device_async_resource_ref mr)
-    : column_buffer_base<gather_column_buffer>(_type, _size, _is_nullable, stream, mr)
+    : column_buffer_base<gather_column_buffer>(_type, _is_nullable)
   {
     create(_size, stream, mr);
   }
@@ -211,7 +202,7 @@ class inline_column_buffer : public column_buffer_base<inline_column_buffer> {
                        bool _is_nullable,
                        rmm::cuda_stream_view stream,
                        rmm::device_async_resource_ref mr)
-    : column_buffer_base<inline_column_buffer>(_type, _size, _is_nullable, stream, mr)
+    : column_buffer_base<inline_column_buffer>(_type, _is_nullable)
   {
     create(_size, stream, mr);
   }
