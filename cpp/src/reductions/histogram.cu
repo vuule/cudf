@@ -21,12 +21,13 @@
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/structs/structs_column_view.hpp>
 
-#include <thrust/copy.h>
-#include <thrust/iterator/zip_iterator.h>
-#include <thrust/tuple.h>
+#include <rmm/resource_ref.hpp>
 
 #include <cuda/atomic>
 #include <cuda/functional>
+#include <thrust/copy.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/tuple.h>
 
 #include <optional>
 
@@ -115,7 +116,7 @@ auto gather_histogram(table_view const& input,
                       device_span<size_type const> distinct_indices,
                       std::unique_ptr<column>&& distinct_counts,
                       rmm::cuda_stream_view stream,
-                      rmm::mr::device_memory_resource* mr)
+                      rmm::device_async_resource_ref mr)
 {
   auto distinct_rows = cudf::detail::gather(input,
                                             distinct_indices,
@@ -153,7 +154,7 @@ std::pair<std::unique_ptr<rmm::device_uvector<size_type>>, std::unique_ptr<colum
 compute_row_frequencies(table_view const& input,
                         std::optional<column_view> const& partial_counts,
                         rmm::cuda_stream_view stream,
-                        rmm::mr::device_memory_resource* mr)
+                        rmm::device_async_resource_ref mr)
 {
   auto const has_nested_columns = cudf::detail::has_nested_columns(input);
 
@@ -237,7 +238,7 @@ compute_row_frequencies(table_view const& input,
 
 std::unique_ptr<cudf::scalar> histogram(column_view const& input,
                                         rmm::cuda_stream_view stream,
-                                        rmm::mr::device_memory_resource* mr)
+                                        rmm::device_async_resource_ref mr)
 {
   // Empty group should be handled before reaching here.
   CUDF_EXPECTS(input.size() > 0, "Input should not be empty.", std::invalid_argument);
@@ -250,7 +251,7 @@ std::unique_ptr<cudf::scalar> histogram(column_view const& input,
 
 std::unique_ptr<cudf::scalar> merge_histogram(column_view const& input,
                                               rmm::cuda_stream_view stream,
-                                              rmm::mr::device_memory_resource* mr)
+                                              rmm::device_async_resource_ref mr)
 {
   // Empty group should be handled before reaching here.
   CUDF_EXPECTS(input.size() > 0, "Input should not be empty.", std::invalid_argument);

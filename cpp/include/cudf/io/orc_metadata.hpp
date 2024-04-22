@@ -154,6 +154,21 @@ struct timestamp_statistics : minmax_statistics<int64_t> {
   std::optional<uint32_t> maximum_nanos;  ///< nanoseconds part of the maximum
 };
 
+/**
+ * @brief Variant type for ORC type-specific column statistics.
+ *
+ * The variant can hold any of the supported column statistics types.
+ */
+using statistics_type = std::variant<no_statistics,
+                                     integer_statistics,
+                                     double_statistics,
+                                     string_statistics,
+                                     bucket_statistics,
+                                     decimal_statistics,
+                                     date_statistics,
+                                     binary_statistics,
+                                     timestamp_statistics>;
+
 //! Orc I/O interfaces
 namespace orc {
 // forward declare the type that ProtobufReader uses. The `cudf::io::column_statistics` objects,
@@ -171,16 +186,7 @@ struct column_statistics;
 struct column_statistics {
   std::optional<uint64_t> number_of_values;  ///< number of statistics
   std::optional<bool> has_null;              ///< column has any nulls
-  std::variant<no_statistics,
-               integer_statistics,
-               double_statistics,
-               string_statistics,
-               bucket_statistics,
-               decimal_statistics,
-               date_statistics,
-               binary_statistics,
-               timestamp_statistics>
-    type_specific_stats;  ///< type-specific statistics
+  statistics_type type_specific_stats;       ///< type-specific statistics
 
   /**
    * @brief Construct a new column statistics object
@@ -331,7 +337,7 @@ class orc_metadata {
    * @param num_rows number of rows
    * @param num_stripes number of stripes
    */
-  orc_metadata(orc_schema schema, size_type num_rows, size_type num_stripes)
+  orc_metadata(orc_schema schema, uint64_t num_rows, size_type num_stripes)
     : _schema{std::move(schema)}, _num_rows{num_rows}, _num_stripes{num_stripes}
   {
   }
@@ -362,7 +368,7 @@ class orc_metadata {
 
  private:
   orc_schema _schema;
-  size_type _num_rows;
+  uint64_t _num_rows;
   size_type _num_stripes;
 };
 

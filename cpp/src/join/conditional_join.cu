@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,6 +14,11 @@
  * limitations under the License.
  */
 
+#include "join/conditional_join.hpp"
+#include "join/conditional_join_kernels.cuh"
+#include "join/join_common_utils.cuh"
+#include "join/join_common_utils.hpp"
+
 #include <cudf/ast/detail/expression_parser.hpp>
 #include <cudf/ast/expressions.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
@@ -23,12 +28,9 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
-#include <join/conditional_join.hpp>
-#include <join/conditional_join_kernels.cuh>
-#include <join/join_common_utils.cuh>
-#include <join/join_common_utils.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <optional>
 
@@ -43,7 +45,7 @@ conditional_join(table_view const& left,
                  join_kind join_type,
                  std::optional<std::size_t> output_size,
                  rmm::cuda_stream_view stream,
-                 rmm::mr::device_memory_resource* mr)
+                 rmm::device_async_resource_ref mr)
 {
   // We can immediately filter out cases where the right table is empty. In
   // some cases, we return all the rows of the left table with a corresponding
@@ -196,7 +198,7 @@ std::size_t compute_conditional_join_output_size(table_view const& left,
                                                  ast::expression const& binary_predicate,
                                                  join_kind join_type,
                                                  rmm::cuda_stream_view stream,
-                                                 rmm::mr::device_memory_resource* mr)
+                                                 rmm::device_async_resource_ref mr)
 {
   // Until we add logic to handle the number of non-matches in the right table,
   // full joins are not supported in this function. Note that this does not
@@ -292,7 +294,7 @@ conditional_inner_join(table_view const& left,
                        table_view const& right,
                        ast::expression const& binary_predicate,
                        std::optional<std::size_t> output_size,
-                       rmm::mr::device_memory_resource* mr)
+                       rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::conditional_join(left,
@@ -310,7 +312,7 @@ conditional_left_join(table_view const& left,
                       table_view const& right,
                       ast::expression const& binary_predicate,
                       std::optional<std::size_t> output_size,
-                      rmm::mr::device_memory_resource* mr)
+                      rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::conditional_join(left,
@@ -327,7 +329,7 @@ std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
 conditional_full_join(table_view const& left,
                       table_view const& right,
                       ast::expression const& binary_predicate,
-                      rmm::mr::device_memory_resource* mr)
+                      rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::conditional_join(left,
@@ -344,7 +346,7 @@ std::unique_ptr<rmm::device_uvector<size_type>> conditional_left_semi_join(
   table_view const& right,
   ast::expression const& binary_predicate,
   std::optional<std::size_t> output_size,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return std::move(detail::conditional_join(left,
@@ -362,7 +364,7 @@ std::unique_ptr<rmm::device_uvector<size_type>> conditional_left_anti_join(
   table_view const& right,
   ast::expression const& binary_predicate,
   std::optional<std::size_t> output_size,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return std::move(detail::conditional_join(left,
@@ -378,7 +380,7 @@ std::unique_ptr<rmm::device_uvector<size_type>> conditional_left_anti_join(
 std::size_t conditional_inner_join_size(table_view const& left,
                                         table_view const& right,
                                         ast::expression const& binary_predicate,
-                                        rmm::mr::device_memory_resource* mr)
+                                        rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::compute_conditional_join_output_size(
@@ -388,7 +390,7 @@ std::size_t conditional_inner_join_size(table_view const& left,
 std::size_t conditional_left_join_size(table_view const& left,
                                        table_view const& right,
                                        ast::expression const& binary_predicate,
-                                       rmm::mr::device_memory_resource* mr)
+                                       rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::compute_conditional_join_output_size(
@@ -398,7 +400,7 @@ std::size_t conditional_left_join_size(table_view const& left,
 std::size_t conditional_left_semi_join_size(table_view const& left,
                                             table_view const& right,
                                             ast::expression const& binary_predicate,
-                                            rmm::mr::device_memory_resource* mr)
+                                            rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return std::move(detail::compute_conditional_join_output_size(left,
@@ -412,7 +414,7 @@ std::size_t conditional_left_semi_join_size(table_view const& left,
 std::size_t conditional_left_anti_join_size(table_view const& left,
                                             table_view const& right,
                                             ast::expression const& binary_predicate,
-                                            rmm::mr::device_memory_resource* mr)
+                                            rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return std::move(detail::compute_conditional_join_output_size(left,

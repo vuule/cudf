@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,13 +24,13 @@
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
+#include <cuda/functional>
 #include <thrust/extrema.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
 #include <thrust/transform.h>
-
-#include <cuda/functional>
 
 namespace cudf {
 namespace detail {
@@ -51,7 +51,7 @@ std::unique_ptr<column> create_collect_offsets(size_type input_size,
                                                FollowingIter following_begin,
                                                size_type min_periods,
                                                rmm::cuda_stream_view stream,
-                                               rmm::mr::device_memory_resource* mr)
+                                               rmm::device_async_resource_ref mr)
 {
   // Materialize offsets column.
   auto static constexpr size_data_type = data_type{type_to_id<size_type>()};
@@ -149,7 +149,7 @@ std::pair<std::unique_ptr<column>, std::unique_ptr<column>> purge_null_entries(
   column_view const& offsets,
   size_type num_child_nulls,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr);
+  rmm::device_async_resource_ref mr);
 
 template <typename PrecedingIter, typename FollowingIter>
 std::unique_ptr<column> rolling_collect_list(column_view const& input,
@@ -159,7 +159,7 @@ std::unique_ptr<column> rolling_collect_list(column_view const& input,
                                              size_type min_periods,
                                              null_policy null_handling,
                                              rmm::cuda_stream_view stream,
-                                             rmm::mr::device_memory_resource* mr)
+                                             rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(default_outputs.is_empty(),
                "COLLECT_LIST window function does not support default values.");

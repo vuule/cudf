@@ -31,6 +31,8 @@
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/mr/device/device_memory_resource.hpp>
+#include <rmm/mr/device/per_device_resource.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <memory>
 #include <optional>
@@ -57,7 +59,7 @@ class reader::impl {
   explicit impl(std::vector<std::unique_ptr<datasource>>&& sources,
                 parquet_reader_options const& options,
                 rmm::cuda_stream_view stream,
-                rmm::mr::device_memory_resource* mr);
+                rmm::device_async_resource_ref mr);
 
   /**
    * @brief Read an entire set or a subset of data and returns a set of columns
@@ -108,7 +110,7 @@ class reader::impl {
                 std::vector<std::unique_ptr<datasource>>&& sources,
                 parquet_reader_options const& options,
                 rmm::cuda_stream_view stream,
-                rmm::mr::device_memory_resource* mr);
+                rmm::device_async_resource_ref mr);
 
   /**
    * @copydoc cudf::io::chunked_parquet_reader::has_next
@@ -311,10 +313,12 @@ class reader::impl {
   /**
    * @brief Converts the page data and outputs to columns.
    *
+   * @param uses_custom_row_bounds Whether or not num_rows and skip_rows represents user-specific
+   *        bounds
    * @param skip_rows Minimum number of rows from start
    * @param num_rows Number of rows to output
    */
-  void decode_page_data(size_t skip_rows, size_t num_rows);
+  void decode_page_data(bool uses_custom_row_bounds, size_t skip_rows, size_t num_rows);
 
   /**
    * @brief Creates file-wide parquet chunk information.
@@ -344,7 +348,7 @@ class reader::impl {
 
  private:
   rmm::cuda_stream_view _stream;
-  rmm::mr::device_memory_resource* _mr = nullptr;
+  rmm::device_async_resource_ref _mr{rmm::mr::get_current_device_resource()};
 
   std::vector<std::unique_ptr<datasource>> _sources;
   std::unique_ptr<aggregate_reader_metadata> _metadata;
@@ -365,6 +369,10 @@ class reader::impl {
   std::unique_ptr<table_metadata> _output_metadata;
 
   bool _strings_to_categorical = false;
+
+  // are there usable page indexes available
+  bool _has_page_index = false;
+
   std::optional<std::vector<reader_column_schema>> _reader_column_schema;
   data_type _timestamp_type{type_id::EMPTY};
 

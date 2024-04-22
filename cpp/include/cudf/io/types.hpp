@@ -100,6 +100,26 @@ enum statistics_freq {
 };
 
 /**
+ * @brief Valid encodings for use with `column_in_metadata::set_encoding()`
+ */
+enum class column_encoding {
+  // Common encodings:
+  USE_DEFAULT = -1,  ///< No encoding has been requested, use default encoding
+  DICTIONARY,        ///< Use dictionary encoding
+  // Parquet encodings:
+  PLAIN,                    ///< Use plain encoding
+  DELTA_BINARY_PACKED,      ///< Use DELTA_BINARY_PACKED encoding (only valid for integer columns)
+  DELTA_LENGTH_BYTE_ARRAY,  ///< Use DELTA_LENGTH_BYTE_ARRAY encoding (only
+                            ///< valid for BYTE_ARRAY columns)
+  DELTA_BYTE_ARRAY,         ///< Use DELTA_BYTE_ARRAY encoding (only valid for
+                            ///< BYTE_ARRAY and FIXED_LEN_BYTE_ARRAY columns)
+  // ORC encodings:
+  DIRECT,         ///< Use DIRECT encoding
+  DIRECT_V2,      ///< Use DIRECT_V2 encoding
+  DICTIONARY_V2,  ///< Use DICTIONARY_V2 encoding
+};
+
+/**
  * @brief Statistics about compression performed by a writer.
  */
 class writer_compression_statistics {
@@ -582,9 +602,11 @@ class column_in_metadata {
   bool _list_column_is_map  = false;
   bool _use_int96_timestamp = false;
   bool _output_as_binary    = false;
+  bool _skip_compression    = false;
   std::optional<uint8_t> _decimal_precision;
   std::optional<int32_t> _parquet_field_id;
   std::vector<column_in_metadata> children;
+  column_encoding _encoding = column_encoding::USE_DEFAULT;
 
  public:
   column_in_metadata() = default;
@@ -702,6 +724,35 @@ class column_in_metadata {
   }
 
   /**
+   * @brief Specifies whether this column should not be compressed regardless of the compression
+   * codec specified for the file.
+   *
+   * @param skip If `true` do not compress this column
+   * @return this for chaining
+   */
+  column_in_metadata& set_skip_compression(bool skip) noexcept
+  {
+    _skip_compression = skip;
+    return *this;
+  }
+
+  /**
+   * @brief Sets the encoding to use for this column.
+   *
+   * This is just a request, and the encoder may still choose to use a different encoding
+   * depending on resource constraints. Use the constants defined in the `parquet_encoding`
+   * struct.
+   *
+   * @param encoding The encoding to use
+   * @return this for chaining
+   */
+  column_in_metadata& set_encoding(column_encoding encoding) noexcept
+  {
+    _encoding = encoding;
+    return *this;
+  }
+
+  /**
    * @brief Get reference to a child of this column
    *
    * @param i Index of the child to get
@@ -806,6 +857,20 @@ class column_in_metadata {
    * @return Boolean indicating whether to encode this column as binary data
    */
   [[nodiscard]] bool is_enabled_output_as_binary() const noexcept { return _output_as_binary; }
+
+  /**
+   * @brief Get whether to skip compressing this column
+   *
+   * @return Boolean indicating whether to skip compression of this column
+   */
+  [[nodiscard]] bool is_enabled_skip_compression() const noexcept { return _skip_compression; }
+
+  /**
+   * @brief Get the encoding that was set for this column.
+   *
+   * @return The encoding that was set for this column
+   */
+  [[nodiscard]] column_encoding get_encoding() const { return _encoding; }
 };
 
 /**

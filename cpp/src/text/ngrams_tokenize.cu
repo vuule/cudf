@@ -14,10 +14,7 @@
  * limitations under the License.
  */
 
-#include <text/utilities/tokenize_ops.cuh>
-
-#include <nvtext/detail/tokenize.hpp>
-#include <nvtext/ngrams_tokenize.hpp>
+#include "text/utilities/tokenize_ops.cuh"
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_device_view.cuh>
@@ -31,15 +28,18 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 
+#include <nvtext/detail/tokenize.hpp>
+#include <nvtext/ngrams_tokenize.hpp>
+
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
+#include <cuda/functional>
 #include <thrust/for_each.h>
 #include <thrust/functional.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
-
-#include <cuda/functional>
 
 namespace nvtext {
 namespace detail {
@@ -142,7 +142,7 @@ std::unique_ptr<cudf::column> ngrams_tokenize(cudf::strings_column_view const& s
                                               cudf::string_scalar const& delimiter,
                                               cudf::string_scalar const& separator,
                                               rmm::cuda_stream_view stream,
-                                              rmm::mr::device_memory_resource* mr)
+                                              rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(delimiter.is_valid(stream), "Parameter delimiter must be valid");
   cudf::string_view d_delimiter(delimiter.data(), delimiter.size());
@@ -249,7 +249,7 @@ std::unique_ptr<cudf::column> ngrams_tokenize(cudf::strings_column_view const& s
                                               cudf::string_scalar const& delimiter,
                                               cudf::string_scalar const& separator,
                                               rmm::cuda_stream_view stream,
-                                              rmm::mr::device_memory_resource* mr)
+                                              rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::ngrams_tokenize(strings, ngrams, delimiter, separator, stream, mr);

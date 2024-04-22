@@ -16,13 +16,14 @@
 
 #pragma once
 
-#include <benchmark/benchmark.h>
 #include <rmm/cuda_device.hpp>
 #include <rmm/mr/device/cuda_memory_resource.hpp>
 #include <rmm/mr/device/owning_wrapper.hpp>
 #include <rmm/mr/device/per_device_resource.hpp>
 #include <rmm/mr/device/pool_memory_resource.hpp>
 #include <rmm/mr/device/statistics_resource_adaptor.hpp>
+
+#include <benchmark/benchmark.h>
 
 namespace cudf {
 
@@ -119,6 +120,7 @@ class memory_stats_logger {
   }
 
  private:
+  // TODO change to resource_ref once set_current_device_resource supports it
   rmm::mr::device_memory_resource* existing_mr;
   rmm::mr::statistics_resource_adaptor<rmm::mr::device_memory_resource> statistics_mr;
 };

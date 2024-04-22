@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 
+#include "io/fst/logical_stack.cuh"
+#include "io/fst/lookup_tables.cuh"
+#include "io/utilities/parsing_utils.cuh"
+#include "io/utilities/string_parsing.hpp"
 #include "nested_json.hpp"
-
-#include <io/fst/logical_stack.cuh>
-#include <io/fst/lookup_tables.cuh>
-#include <io/utilities/parsing_utils.cuh>
-#include <io/utilities/string_parsing.hpp>
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/nvtx/ranges.hpp>
@@ -37,6 +36,7 @@
 #include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/device_vector.h>
 #include <thrust/iterator/discard_iterator.h>
@@ -1532,7 +1532,7 @@ std::pair<rmm::device_uvector<PdaTokenT>, rmm::device_uvector<SymbolOffsetT>> ge
   device_span<SymbolT const> json_in,
   cudf::io::json_reader_options const& options,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   check_input_size(json_in.size());
 
@@ -1584,6 +1584,9 @@ std::pair<rmm::device_uvector<PdaTokenT>, rmm::device_uvector<SymbolOffsetT>> ge
                                         thrust::make_discard_iterator(),
                                         fix_stack_of_excess_chars::start_state,
                                         stream);
+
+    // Make sure memory of the FST's lookup tables isn't freed before the FST completes
+    stream.synchronize();
   }
 
   constexpr auto max_translation_table_size =
@@ -1662,7 +1665,7 @@ void make_json_column(json_column& root_column,
                       cudf::io::json_reader_options const& options,
                       bool include_quote_char,
                       rmm::cuda_stream_view stream,
-                      rmm::mr::device_memory_resource* mr)
+                      rmm::device_async_resource_ref mr)
 {
   // Range of encapsulating function that parses to internal columnar data representation
   CUDF_FUNC_RANGE();
@@ -2043,7 +2046,8 @@ void make_json_column(json_column& root_column,
  * options
  * @param stream The CUDA stream to which kernels are dispatched
  */
-auto parsing_options(cudf::io::json_reader_options const& options, rmm::cuda_stream_view stream)
+cudf::io::parse_options parsing_options(cudf::io::json_reader_options const& options,
+                                        rmm::cuda_stream_view stream)
 {
   auto parse_opts = cudf::io::parse_options{',', '\n', '\"', '.'};
 
@@ -2061,7 +2065,7 @@ std::pair<std::unique_ptr<column>, std::vector<column_name_info>> json_column_to
   cudf::io::json_reader_options const& options,
   std::optional<schema_element> schema,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   // Range of orchestrating/encapsulating function
   CUDF_FUNC_RANGE();
@@ -2219,7 +2223,7 @@ std::pair<std::unique_ptr<column>, std::vector<column_name_info>> json_column_to
 table_with_metadata host_parse_nested_json(device_span<SymbolT const> d_input,
                                            cudf::io::json_reader_options const& options,
                                            rmm::cuda_stream_view stream,
-                                           rmm::mr::device_memory_resource* mr)
+                                           rmm::device_async_resource_ref mr)
 {
   // Range of orchestrating/encapsulating function
   CUDF_FUNC_RANGE();

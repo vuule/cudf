@@ -14,9 +14,7 @@
  * limitations under the License.
  */
 
-#include <text/utilities/tokenize_ops.cuh>
-
-#include <nvtext/tokenize.hpp>
+#include "text/utilities/tokenize_ops.cuh"
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_device_view.cuh>
@@ -35,18 +33,19 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 
+#include <nvtext/tokenize.hpp>
+
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/resource_ref.hpp>
 
+#include <cub/cub.cuh>
 #include <cuco/static_map.cuh>
-
 #include <thrust/copy.h>
 #include <thrust/distance.h>
 #include <thrust/execution_policy.h>
 #include <thrust/functional.h>
 #include <thrust/logical.h>
 #include <thrust/transform.h>
-
-#include <cub/cub.cuh>
 
 namespace nvtext {
 namespace detail {
@@ -93,14 +92,16 @@ struct vocab_equal {
   }
 };
 
-using probe_scheme        = cuco::experimental::linear_probing<1, vocab_hasher>;
-using vocabulary_map_type = cuco::experimental::static_map<cudf::size_type,
-                                                           cudf::size_type,
-                                                           cuco::experimental::extent<std::size_t>,
-                                                           cuda::thread_scope_device,
-                                                           vocab_equal,
-                                                           probe_scheme,
-                                                           cudf::detail::cuco_allocator>;
+using probe_scheme        = cuco::linear_probing<1, vocab_hasher>;
+using cuco_storage        = cuco::storage<1>;
+using vocabulary_map_type = cuco::static_map<cudf::size_type,
+                                             cudf::size_type,
+                                             cuco::extent<std::size_t>,
+                                             cuda::thread_scope_device,
+                                             vocab_equal,
+                                             probe_scheme,
+                                             cudf::detail::cuco_allocator,
+                                             cuco_storage>;
 }  // namespace
 }  // namespace detail
 
@@ -115,7 +116,7 @@ struct tokenize_vocabulary::tokenize_vocabulary_impl {
   col_device_view const d_vocabulary;
   std::unique_ptr<detail::vocabulary_map_type> vocabulary_map;
 
-  auto get_map_ref() const { return vocabulary_map->ref(cuco::experimental::op::find); }
+  auto get_map_ref() const { return vocabulary_map->ref(cuco::op::find); }
 
   tokenize_vocabulary_impl(std::unique_ptr<cudf::column>&& vocab,
                            col_device_view&& d_vocab,
@@ -134,7 +135,7 @@ struct key_pair {
 
 tokenize_vocabulary::tokenize_vocabulary(cudf::strings_column_view const& input,
                                          rmm::cuda_stream_view stream,
-                                         rmm::mr::device_memory_resource* mr)
+                                         rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(not input.is_empty(), "vocabulary must not be empty");
   CUDF_EXPECTS(not input.has_nulls(), "vocabulary must not have nulls");
@@ -149,6 +150,8 @@ tokenize_vocabulary::tokenize_vocabulary(cudf::strings_column_view const& input,
     cuco::empty_value{-1},
     detail::vocab_equal{*d_vocabulary},
     detail::probe_scheme{detail::vocab_hasher{*d_vocabulary}},
+    cuco::thread_scope_device,
+    detail::cuco_storage{},
     cudf::detail::cuco_allocator{stream},
     stream.value());
 
@@ -163,7 +166,7 @@ tokenize_vocabulary::~tokenize_vocabulary() { delete _impl; }
 
 std::unique_ptr<tokenize_vocabulary> load_vocabulary(cudf::strings_column_view const& input,
                                                      rmm::cuda_stream_view stream,
-                                                     rmm::mr::device_memory_resource* mr)
+                                                     rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return std::make_unique<tokenize_vocabulary>(input, stream, mr);
@@ -356,7 +359,7 @@ std::unique_ptr<cudf::column> tokenize_with_vocabulary(cudf::strings_column_view
                                                        cudf::string_scalar const& delimiter,
                                                        cudf::size_type default_id,
                                                        rmm::cuda_stream_view stream,
-                                                       rmm::mr::device_memory_resource* mr)
+                                                       rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(delimiter.is_valid(stream), "Parameter delimiter must be valid");
 
@@ -465,7 +468,7 @@ std::unique_ptr<cudf::column> tokenize_with_vocabulary(cudf::strings_column_view
                                                        cudf::string_scalar const& delimiter,
                                                        cudf::size_type default_id,
                                                        rmm::cuda_stream_view stream,
-                                                       rmm::mr::device_memory_resource* mr)
+                                                       rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::tokenize_with_vocabulary(input, vocabulary, delimiter, default_id, stream, mr);

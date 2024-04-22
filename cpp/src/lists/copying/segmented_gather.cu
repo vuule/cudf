@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,12 +21,12 @@
 #include <cudf/lists/detail/gather.cuh>
 #include <cudf/utilities/default_stream.hpp>
 
-#include <thrust/binary_search.h>
-#include <thrust/execution_policy.h>
+#include <rmm/cuda_stream_view.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <cuda/functional>
-
-#include <rmm/cuda_stream_view.hpp>
+#include <thrust/binary_search.h>
+#include <thrust/execution_policy.h>
 
 namespace cudf {
 namespace lists {
@@ -36,7 +36,7 @@ std::unique_ptr<column> segmented_gather(lists_column_view const& value_column,
                                          lists_column_view const& gather_map,
                                          out_of_bounds_policy bounds_policy,
                                          rmm::cuda_stream_view stream,
-                                         rmm::mr::device_memory_resource* mr)
+                                         rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(is_index_type(gather_map.child().type()),
                "Gather map should be list column of index type");
@@ -121,7 +121,7 @@ std::unique_ptr<column> segmented_gather(lists_column_view const& source_column,
                                          lists_column_view const& gather_map_list,
                                          out_of_bounds_policy bounds_policy,
                                          rmm::cuda_stream_view stream,
-                                         rmm::mr::device_memory_resource* mr)
+                                         rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::segmented_gather(source_column, gather_map_list, bounds_policy, stream, mr);

@@ -37,13 +37,12 @@
 #include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
-
-#include <thrust/copy.h>
-#include <thrust/iterator/counting_iterator.h>
+#include <rmm/resource_ref.hpp>
 
 #include <cub/cub.cuh>
-
 #include <cuda/atomic>
+#include <thrust/copy.h>
+#include <thrust/iterator/counting_iterator.h>
 
 #include <algorithm>
 
@@ -241,7 +240,7 @@ struct scatter_gather_functor {
                                            Filter filter,
                                            cudf::size_type per_thread,
                                            rmm::cuda_stream_view stream,
-                                           rmm::mr::device_memory_resource* mr)
+                                           rmm::device_async_resource_ref mr)
   {
     auto output_column = cudf::detail::allocate_like(
       input, output_size, cudf::mask_allocation_policy::RETAIN, stream, mr);
@@ -288,7 +287,7 @@ struct scatter_gather_functor {
                                            Filter filter,
                                            cudf::size_type,
                                            rmm::cuda_stream_view stream,
-                                           rmm::mr::device_memory_resource* mr)
+                                           rmm::device_async_resource_ref mr)
   {
     rmm::device_uvector<cudf::size_type> indices(output_size, stream);
 
@@ -327,7 +326,7 @@ template <typename Filter>
 std::unique_ptr<table> copy_if(table_view const& input,
                                Filter filter,
                                rmm::cuda_stream_view stream,
-                               rmm::mr::device_memory_resource* mr)
+                               rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
 

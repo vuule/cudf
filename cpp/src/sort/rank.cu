@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,10 @@
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
+#include <cuda/functional>
+#include <cuda/std/type_traits>
 #include <thrust/functional.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/discard_iterator.h>
@@ -43,9 +46,6 @@
 #include <thrust/sequence.h>
 #include <thrust/transform.h>
 #include <thrust/tuple.h>
-
-#include <cuda/functional>
-#include <cuda/std/type_traits>
 
 namespace cudf {
 namespace detail {
@@ -271,7 +271,7 @@ std::unique_ptr<column> rank(column_view const& input,
                              null_order null_precedence,
                              bool percentage,
                              rmm::cuda_stream_view stream,
-                             rmm::mr::device_memory_resource* mr)
+                             rmm::device_async_resource_ref mr)
 {
   data_type const output_type         = (percentage or method == rank_method::AVERAGE)
                                           ? data_type(type_id::FLOAT64)
@@ -374,7 +374,7 @@ std::unique_ptr<column> rank(column_view const& input,
                              null_order null_precedence,
                              bool percentage,
                              rmm::cuda_stream_view stream,
-                             rmm::mr::device_memory_resource* mr)
+                             rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::rank(

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,11 +23,11 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_scalar.hpp>
 #include <rmm/exec_policy.hpp>
-
-#include <thrust/distance.h>
-#include <thrust/scan.h>
+#include <rmm/resource_ref.hpp>
 
 #include <cuda/functional>
+#include <thrust/distance.h>
+#include <thrust/scan.h>
 
 #include <stdexcept>
 
@@ -301,7 +301,7 @@ std::pair<std::unique_ptr<column>, size_type> make_offsets_child_column(
   InputIterator begin,
   InputIterator end,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   auto count          = static_cast<size_type>(std::distance(begin, end));
   auto offsets_column = make_numeric_column(

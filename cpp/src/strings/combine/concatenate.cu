@@ -32,6 +32,7 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/execution_policy.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -122,7 +123,7 @@ std::unique_ptr<column> concatenate(table_view const& strings_columns,
                                     string_scalar const& narep,
                                     separator_on_nulls separate_nulls,
                                     rmm::cuda_stream_view stream,
-                                    rmm::mr::device_memory_resource* mr)
+                                    rmm::device_async_resource_ref mr)
 {
   auto const num_columns = strings_columns.num_columns();
   CUDF_EXPECTS(num_columns > 1, "At least two columns must be specified");
@@ -142,7 +143,7 @@ std::unique_ptr<column> concatenate(table_view const& strings_columns,
   // Create device views from the strings columns.
   auto d_table = table_device_view::create(strings_columns, stream);
   concat_strings_fn fn{*d_table, d_separator, d_narep, separate_nulls};
-  auto [offsets_column, chars_column] = make_strings_children(fn, strings_count, stream, mr);
+  auto [offsets_column, chars] = make_strings_children(fn, strings_count, stream, mr);
 
   // create resulting null mask
   auto [null_mask, null_count] = cudf::detail::valid_if(
@@ -156,11 +157,8 @@ std::unique_ptr<column> concatenate(table_view const& strings_columns,
     stream,
     mr);
 
-  return make_strings_column(strings_count,
-                             std::move(offsets_column),
-                             std::move(chars_column->release().data.release()[0]),
-                             null_count,
-                             std::move(null_mask));
+  return make_strings_column(
+    strings_count, std::move(offsets_column), chars.release(), null_count, std::move(null_mask));
 }
 
 namespace {
@@ -209,7 +207,7 @@ std::unique_ptr<column> concatenate(table_view const& strings_columns,
                                     string_scalar const& col_narep,
                                     separator_on_nulls separate_nulls,
                                     rmm::cuda_stream_view stream,
-                                    rmm::mr::device_memory_resource* mr)
+                                    rmm::device_async_resource_ref mr)
 {
   auto const num_columns = strings_columns.num_columns();
   CUDF_EXPECTS(num_columns > 0, "At least one column must be specified");
@@ -237,7 +235,7 @@ std::unique_ptr<column> concatenate(table_view const& strings_columns,
 
   multi_separator_concat_fn mscf{
     *d_table, separator_col_view, separator_rep, col_rep, separate_nulls};
-  auto [offsets_column, chars_column] = make_strings_children(mscf, strings_count, stream, mr);
+  auto [offsets_column, chars] = make_strings_children(mscf, strings_count, stream, mr);
 
   // Create resulting null mask
   auto [null_mask, null_count] = cudf::detail::valid_if(
@@ -252,11 +250,8 @@ std::unique_ptr<column> concatenate(table_view const& strings_columns,
     stream,
     mr);
 
-  return make_strings_column(strings_count,
-                             std::move(offsets_column),
-                             std::move(chars_column->release().data.release()[0]),
-                             null_count,
-                             std::move(null_mask));
+  return make_strings_column(
+    strings_count, std::move(offsets_column), chars.release(), null_count, std::move(null_mask));
 }
 
 }  // namespace detail
@@ -268,7 +263,7 @@ std::unique_ptr<column> concatenate(table_view const& strings_columns,
                                     string_scalar const& narep,
                                     separator_on_nulls separate_nulls,
                                     rmm::cuda_stream_view stream,
-                                    rmm::mr::device_memory_resource* mr)
+                                    rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::concatenate(strings_columns, separator, narep, separate_nulls, stream, mr);
@@ -280,7 +275,7 @@ std::unique_ptr<column> concatenate(table_view const& strings_columns,
                                     string_scalar const& col_narep,
                                     separator_on_nulls separate_nulls,
                                     rmm::cuda_stream_view stream,
-                                    rmm::mr::device_memory_resource* mr)
+                                    rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::concatenate(

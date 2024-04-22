@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,12 +24,12 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
+#include <cuda/functional>
 #include <thrust/distance.h>
 #include <thrust/iterator/transform_iterator.h>
 #include <thrust/scatter.h>
-
-#include <cuda/functional>
 
 namespace cudf {
 namespace strings {
@@ -64,7 +64,7 @@ std::unique_ptr<column> scatter(SourceIterator begin,
                                 MapIterator scatter_map,
                                 strings_column_view const& target,
                                 rmm::cuda_stream_view stream,
-                                rmm::mr::device_memory_resource* mr)
+                                rmm::device_async_resource_ref mr)
 {
   if (target.is_empty()) return make_empty_column(type_id::STRING);
 

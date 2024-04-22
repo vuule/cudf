@@ -28,6 +28,7 @@
 #include <cudf/detail/iterator.cuh>
 #include <cudf/io/arrow_io_source.hpp>
 #include <cudf/io/json.hpp>
+#include <cudf/io/memory_resource.hpp>
 #include <cudf/strings/convert/convert_fixed_point.hpp>
 #include <cudf/strings/repeat_strings.hpp>
 #include <cudf/strings/strings_column_view.hpp>
@@ -35,12 +36,15 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
 
-#include <limits>
+#include <rmm/mr/pinned_host_memory_resource.hpp>
+
 #include <thrust/iterator/constant_iterator.h>
 
 #include <arrow/io/api.h>
 
 #include <fstream>
+#include <limits>
+#include <memory>
 #include <type_traits>
 
 #define wrapper cudf::test::fixed_width_column_wrapper
@@ -165,26 +169,15 @@ struct JsonReaderTest : public cudf::test::BaseFixture {};
  * @brief Enum class to be used to specify the test case of parametrized tests
  */
 enum class json_test_t {
-  // Run test with the existing JSON lines reader using row-orient input data
-  legacy_lines_row_orient,
-  // Run test with the existing JSON lines reader using record-orient input data
-  legacy_lines_record_orient,
   // Run test with the nested JSON lines reader using record-orient input data
-  json_experimental_record_orient,
+  json_record_orient,
   // Run test with the nested JSON lines reader using row-orient input data
-  json_experimental_row_orient
+  json_row_orient
 };
-
-constexpr bool is_legacy_test(json_test_t test_opt)
-{
-  return test_opt == json_test_t::legacy_lines_row_orient or
-         test_opt == json_test_t::legacy_lines_record_orient;
-}
 
 constexpr bool is_row_orient_test(json_test_t test_opt)
 {
-  return test_opt == json_test_t::legacy_lines_row_orient or
-         test_opt == json_test_t::json_experimental_row_orient;
+  return test_opt == json_test_t::json_row_orient;
 }
 
 /**
@@ -194,17 +187,10 @@ struct JsonReaderParamTest : public cudf::test::BaseFixture,
                              public testing::WithParamInterface<json_test_t> {};
 
 /**
- * @brief Test fixture for parametrized JSON reader tests, testing record orient-only for legacy
- * JSON lines reader and the nested reader
+ * @brief Test fixture for parametrized JSON reader tests with both orients
  */
-struct JsonReaderDualTest : public cudf::test::BaseFixture,
-                            public testing::WithParamInterface<json_test_t> {};
-
-/**
- * @brief Test fixture for parametrized JSON reader tests that only tests the new nested JSON reader
- */
-struct JsonReaderNoLegacy : public cudf::test::BaseFixture,
-                            public testing::WithParamInterface<json_test_t> {};
+struct JsonReaderRecordTest : public cudf::test::BaseFixture,
+                              public testing::WithParamInterface<json_test_t> {};
 
 /**
  * @brief Generates a JSON lines string that uses the record orient
@@ -240,9 +226,7 @@ struct JsonFixedPointReaderTest : public JsonReaderTest {};
 
 template <typename DecimalType>
 struct JsonValidFixedPointReaderTest : public JsonFixedPointReaderTest<DecimalType> {
-  void run_test(std::vector<std::string> const& reference_strings,
-                numeric::scale_type scale,
-                bool use_legacy_parser)
+  void run_test(std::vector<std::string> const& reference_strings, numeric::scale_type scale)
   {
     cudf::test::strings_column_wrapper const strings(reference_strings.begin(),
                                                      reference_strings.end());
@@ -259,8 +243,7 @@ struct JsonValidFixedPointReaderTest : public JsonFixedPointReaderTest<DecimalTy
     cudf::io::json_reader_options const in_opts =
       cudf::io::json_reader_options::builder(cudf::io::source_info{buffer.c_str(), buffer.size()})
         .dtypes({data_type{type_to_id<DecimalType>(), scale}})
-        .lines(true)
-        .legacy(use_legacy_parser);
+        .lines(true);
 
     auto const result      = cudf::io::read_json(in_opts);
     auto const result_view = result.tbl->view();
@@ -273,8 +256,8 @@ struct JsonValidFixedPointReaderTest : public JsonFixedPointReaderTest<DecimalTy
   void run_tests(std::vector<std::string> const& reference_strings, numeric::scale_type scale)
   {
     // Test both parsers
-    run_test(reference_strings, scale, false);
-    run_test(reference_strings, scale, true);
+    run_test(reference_strings, scale);
+    run_test(reference_strings, scale);
   }
 };
 
@@ -284,22 +267,13 @@ TYPED_TEST_SUITE(JsonValidFixedPointReaderTest, cudf::test::FixedPointTypes);
 // Parametrize qualifying JSON tests for executing both nested reader and legacy JSON lines reader
 INSTANTIATE_TEST_CASE_P(JsonReaderParamTest,
                         JsonReaderParamTest,
-                        ::testing::Values(json_test_t::legacy_lines_row_orient,
-                                          json_test_t::legacy_lines_record_orient,
-                                          json_test_t::json_experimental_record_orient,
-                                          json_test_t::json_experimental_row_orient));
+                        ::testing::Values(json_test_t::json_record_orient,
+                                          json_test_t::json_row_orient));
 
 // Parametrize qualifying JSON tests for executing both nested reader and legacy JSON lines reader
-INSTANTIATE_TEST_CASE_P(JsonReaderDualTest,
-                        JsonReaderDualTest,
-                        ::testing::Values(json_test_t::legacy_lines_record_orient,
-                                          json_test_t::json_experimental_record_orient));
-
-// Parametrize qualifying JSON tests for executing nested reader only
-INSTANTIATE_TEST_CASE_P(JsonReaderNoLegacy,
-                        JsonReaderNoLegacy,
-                        ::testing::Values(json_test_t::json_experimental_row_orient,
-                                          json_test_t::json_experimental_record_orient));
+INSTANTIATE_TEST_CASE_P(JsonReaderRecordTest,
+                        JsonReaderRecordTest,
+                        ::testing::Values(json_test_t::json_record_orient));
 
 TEST_P(JsonReaderParamTest, BasicJsonLines)
 {
@@ -312,8 +286,7 @@ TEST_P(JsonReaderParamTest, BasicJsonLines)
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{data.data(), data.size()})
       .dtypes(std::vector<data_type>{dtype<int32_t>(), dtype<double>()})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
   EXPECT_EQ(result.tbl->num_columns(), 2);
@@ -355,8 +328,7 @@ TEST_P(JsonReaderParamTest, FloatingPoint)
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{filepath})
       .dtypes({dtype<float>()})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -380,8 +352,7 @@ TEST_P(JsonReaderParamTest, JsonLinesStrings)
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{data.data(), data.size()})
       .dtypes({{"2", dtype<cudf::string_view>()}, {"0", dtype<int32_t>()}, {"1", dtype<double>()}})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -450,8 +421,7 @@ TEST_P(JsonReaderParamTest, MultiColumn)
                dtype<int64_t>(),
                dtype<float>(),
                dtype<double>()})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
   auto const view = result.tbl->view();
@@ -500,8 +470,7 @@ TEST_P(JsonReaderParamTest, Booleans)
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{filepath})
       .dtypes({dtype<bool>()})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
   // Booleans are the same (integer) data type, but valued at 0 or 1
@@ -544,8 +513,7 @@ TEST_P(JsonReaderParamTest, Dates)
     cudf::io::json_reader_options::builder(cudf::io::source_info{filepath})
       .dtypes({data_type{type_id::TIMESTAMP_MILLISECONDS}})
       .lines(true)
-      .dayfirst(true)
-      .legacy(is_legacy_test(test_opt));
+      .dayfirst(true);
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
   auto const view = result.tbl->view();
@@ -600,8 +568,7 @@ TEST_P(JsonReaderParamTest, Durations)
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{filepath})
       .dtypes({data_type{type_id::DURATION_NANOSECONDS}})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
   auto const view = result.tbl->view();
@@ -638,8 +605,7 @@ TEST_P(JsonReaderParamTest, JsonLinesDtypeInference)
 
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{data.data(), data.size()})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -674,9 +640,7 @@ TEST_P(JsonReaderParamTest, JsonLinesFileInput)
   outfile.close();
 
   cudf::io::json_reader_options in_options =
-    cudf::io::json_reader_options::builder(cudf::io::source_info{fname})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+    cudf::io::json_reader_options::builder(cudf::io::source_info{fname}).lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -703,7 +667,6 @@ TEST_F(JsonReaderTest, JsonLinesByteRange)
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{fname})
       .lines(true)
-      .legacy(true)  // Support in new reader coming in https://github.com/rapidsai/cudf/pull/12498
       .byte_range_offset(11)
       .byte_range_size(20);
 
@@ -718,18 +681,15 @@ TEST_F(JsonReaderTest, JsonLinesByteRange)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result.tbl->get_column(0), int64_wrapper{{3000, 4000, 5000}});
 }
 
-TEST_P(JsonReaderDualTest, JsonLinesObjects)
+TEST_P(JsonReaderRecordTest, JsonLinesObjects)
 {
-  auto const test_opt     = GetParam();
   const std::string fname = temp_env->get_temp_dir() + "JsonLinesObjectsTest.json";
   std::ofstream outfile(fname, std::ofstream::out);
   outfile << " {\"co\\\"l1\" : 1, \"col2\" : 2.0} \n";
   outfile.close();
 
   cudf::io::json_reader_options in_options =
-    cudf::io::json_reader_options::builder(cudf::io::source_info{fname})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+    cudf::io::json_reader_options::builder(cudf::io::source_info{fname}).lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -737,7 +697,7 @@ TEST_P(JsonReaderDualTest, JsonLinesObjects)
   EXPECT_EQ(result.tbl->num_rows(), 1);
 
   EXPECT_EQ(result.tbl->get_column(0).type().id(), cudf::type_id::INT64);
-  EXPECT_EQ(result.metadata.schema_info[0].name, is_legacy_test(test_opt) ? "co\\\"l1" : "co\"l1");
+  EXPECT_EQ(result.metadata.schema_info[0].name, "co\"l1");
   EXPECT_EQ(result.tbl->get_column(1).type().id(), cudf::type_id::FLOAT64);
   EXPECT_EQ(result.metadata.schema_info[1].name, "col2");
 
@@ -745,14 +705,13 @@ TEST_P(JsonReaderDualTest, JsonLinesObjects)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result.tbl->get_column(1), float64_wrapper{{2.0}});
 }
 
-TEST_P(JsonReaderDualTest, JsonLinesObjectsStrings)
+TEST_P(JsonReaderRecordTest, JsonLinesObjectsStrings)
 {
   auto const test_opt    = GetParam();
   auto test_json_objects = [test_opt](std::string const& data) {
     cudf::io::json_reader_options in_options =
       cudf::io::json_reader_options::builder(cudf::io::source_info{data.data(), data.size()})
-        .lines(true)
-        .legacy(is_legacy_test(test_opt));
+        .lines(true);
 
     cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -782,17 +741,15 @@ TEST_P(JsonReaderDualTest, JsonLinesObjectsStrings)
     "{\"col3\":\"bbb\", \"col1\":200, \"col2\":2.2}\n");
 }
 
-TEST_P(JsonReaderDualTest, JsonLinesObjectsMissingData)
+TEST_P(JsonReaderRecordTest, JsonLinesObjectsMissingData)
 {
-  auto const test_opt = GetParam();
-  // Note: columns will be ordered based on which fields appear first
+  //  Note: columns will be ordered based on which fields appear first
   std::string const data =
     "{              \"col2\":1.1, \"col3\":\"aaa\"}\n"
     "{\"col1\":200,               \"col3\":\"bbb\"}\n";
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{data.data(), data.size()})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -819,17 +776,15 @@ TEST_P(JsonReaderDualTest, JsonLinesObjectsMissingData)
                                  cudf::test::strings_column_wrapper({"aaa", "bbb"}));
 }
 
-TEST_P(JsonReaderDualTest, JsonLinesObjectsOutOfOrder)
+TEST_P(JsonReaderRecordTest, JsonLinesObjectsOutOfOrder)
 {
-  auto const test_opt = GetParam();
   std::string const data =
     "{\"col1\":100, \"col2\":1.1, \"col3\":\"aaa\"}\n"
     "{\"col3\":\"bbb\", \"col1\":200, \"col2\":2.2}\n";
 
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{data.data(), data.size()})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -915,8 +870,7 @@ TEST_F(JsonReaderTest, ArrowFileSource)
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{&arrow_source})
       .dtypes({dtype<int8_t>()})
-      .lines(true)
-      .legacy(true);  // Support in new reader coming in https://github.com/rapidsai/cudf/pull/12498
+      .lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -948,8 +902,7 @@ TEST_P(JsonReaderParamTest, InvalidFloatingPoint)
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{filepath})
       .dtypes({dtype<float>()})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
   EXPECT_EQ(result.tbl->num_columns(), 1);
@@ -968,8 +921,7 @@ TEST_P(JsonReaderParamTest, StringInference)
 
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{data.c_str(), data.size()})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
   EXPECT_EQ(result.tbl->num_columns(), 1);
@@ -1050,9 +1002,7 @@ TEST_P(JsonReaderParamTest, ParseInRangeIntegers)
     outfile << line.str();
   }
   cudf::io::json_reader_options in_options =
-    cudf::io::json_reader_options::builder(cudf::io::source_info{filepath})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+    cudf::io::json_reader_options::builder(cudf::io::source_info{filepath}).lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -1154,9 +1104,7 @@ TEST_P(JsonReaderParamTest, ParseOutOfRangeIntegers)
     outfile << line.str();
   }
   cudf::io::json_reader_options in_options =
-    cudf::io::json_reader_options::builder(cudf::io::source_info{filepath})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+    cudf::io::json_reader_options::builder(cudf::io::source_info{filepath}).lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -1194,9 +1142,7 @@ TEST_P(JsonReaderParamTest, JsonLinesMultipleFileInputs)
   outfile2.close();
 
   cudf::io::json_reader_options in_options =
-    cudf::io::json_reader_options::builder(cudf::io::source_info{{file1, file2}})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+    cudf::io::json_reader_options::builder(cudf::io::source_info{{file1, file2}}).lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -1213,7 +1159,7 @@ TEST_P(JsonReaderParamTest, JsonLinesMultipleFileInputs)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result.tbl->get_column(1), float64_wrapper{{1.1, 2.2, 3.3, 4.4}});
 }
 
-TEST_P(JsonReaderNoLegacy, JsonLinesMultipleFileInputsNoNL)
+TEST_P(JsonReaderParamTest, JsonLinesMultipleFileInputsNoNL)
 {
   auto const test_opt = GetParam();
   // Strings for the two separate input files in row-orient that do not end with a newline
@@ -1235,9 +1181,7 @@ TEST_P(JsonReaderNoLegacy, JsonLinesMultipleFileInputsNoNL)
   outfile2.close();
 
   cudf::io::json_reader_options in_options =
-    cudf::io::json_reader_options::builder(cudf::io::source_info{{file1, file2}})
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+    cudf::io::json_reader_options::builder(cudf::io::source_info{{file1, file2}}).lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -1254,15 +1198,16 @@ TEST_P(JsonReaderNoLegacy, JsonLinesMultipleFileInputsNoNL)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result.tbl->get_column(1), float64_wrapper{{1.1, 2.2, 3.3, 4.4}});
 }
 
-TEST_F(JsonReaderTest, BadDtypeParams)
+// This can be removed once the legacy option has been removed.
+// The read_json only throws with legacy(true)
+TEST_F(JsonReaderTest, DISABLED_BadDtypeParams)
 {
   std::string buffer = "[1,2,3,4]";
 
   cudf::io::json_reader_options options_vec =
     cudf::io::json_reader_options::builder(cudf::io::source_info{buffer.c_str(), buffer.size()})
       .lines(true)
-      .dtypes({dtype<int8_t>()})
-      .legacy(true);
+      .dtypes({dtype<int8_t>()});
 
   // should throw because there are four columns and only one dtype
   EXPECT_THROW(cudf::io::read_json(options_vec), cudf::logic_error);
@@ -1270,7 +1215,6 @@ TEST_F(JsonReaderTest, BadDtypeParams)
   cudf::io::json_reader_options options_map =
     cudf::io::json_reader_options::builder(cudf::io::source_info{buffer.c_str(), buffer.size()})
       .lines(true)
-      .legacy(true)
       .dtypes(std::map<std::string, cudf::data_type>{{"0", dtype<int8_t>()},
                                                      {"1", dtype<int8_t>()},
                                                      {"2", dtype<int8_t>()},
@@ -1279,9 +1223,9 @@ TEST_F(JsonReaderTest, BadDtypeParams)
   EXPECT_THROW(cudf::io::read_json(options_map), cudf::logic_error);
 }
 
-TEST_F(JsonReaderTest, JsonExperimentalBasic)
+TEST_F(JsonReaderTest, JsonBasic)
 {
-  std::string const fname = temp_env->get_temp_dir() + "JsonExperimentalBasic.json";
+  std::string const fname = temp_env->get_temp_dir() + "JsonBasic.json";
   std::ofstream outfile(fname, std::ofstream::out);
   outfile << R"([{"a":"11", "b":"1.1"},{"a":"22", "b":"2.2"}])";
   outfile.close();
@@ -1305,7 +1249,7 @@ TEST_F(JsonReaderTest, JsonExperimentalBasic)
                                  cudf::test::strings_column_wrapper({"1.1", "2.2"}));
 }
 
-TEST_F(JsonReaderTest, JsonExperimentalLines)
+TEST_F(JsonReaderTest, JsonLines)
 {
   std::string const json_string =
     R"({"a":"a0"}
@@ -1324,7 +1268,6 @@ TEST_F(JsonReaderTest, JsonExperimentalLines)
   auto const table = cudf::io::read_json(json_lines_options);
 
   // Read test data via legacy, non-nested JSON lines reader
-  json_lines_options.enable_legacy(true);
   auto const legacy_reader_table = cudf::io::read_json(json_lines_options);
 
   // Verify that the data read via non-nested JSON lines reader matches the data read via nested
@@ -1429,8 +1372,7 @@ TEST_F(JsonReaderTest, ErrorStrings)
   cudf::io::json_reader_options const in_opts =
     cudf::io::json_reader_options::builder(cudf::io::source_info{buffer.c_str(), buffer.size()})
       .dtypes({data_type{cudf::type_id::STRING}})
-      .lines(true)
-      .legacy(false);
+      .lines(true);
 
   auto const result      = cudf::io::read_json(in_opts);
   auto const result_view = result.tbl->view().column(0);
@@ -1474,7 +1416,7 @@ TEST_F(JsonReaderTest, TokenAllocation)
   }
 }
 
-TEST_F(JsonReaderTest, ExperimentalLinesNoOmissions)
+TEST_F(JsonReaderTest, LinesNoOmissions)
 {
   std::array<std::string const, 4> const json_inputs
     // single column
@@ -1502,7 +1444,6 @@ TEST_F(JsonReaderTest, ExperimentalLinesNoOmissions)
     auto const table = cudf::io::read_json(json_lines_options);
 
     // Read test data via legacy, non-nested JSON lines reader
-    json_lines_options.enable_legacy(true);
     auto const legacy_reader_table = cudf::io::read_json(json_lines_options);
 
     // Verify that the data read via non-nested JSON lines reader matches the data read via
@@ -1588,8 +1529,7 @@ TEST_P(JsonReaderParamTest, JsonDtypeSchema)
   cudf::io::json_reader_options in_options =
     cudf::io::json_reader_options::builder(cudf::io::source_info{data.data(), data.size()})
       .dtypes(dtype_schema)
-      .lines(true)
-      .legacy(is_legacy_test(test_opt));
+      .lines(true);
 
   cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -1785,8 +1725,7 @@ TEST_P(JsonReaderParamTest, JsonDtypeParsing)
     cudf::io::json_reader_options in_options =
       cudf::io::json_reader_options::builder(cudf::io::source_info{data.data(), data.size()})
         .dtypes(dtype_schema)
-        .lines(true)
-        .legacy(is_legacy_test(test_opt));
+        .lines(true);
 
     cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
 
@@ -1820,13 +1759,12 @@ TYPED_TEST(JsonValidFixedPointReaderTest, SingleColumnPositiveScale)
 
 TYPED_TEST(JsonFixedPointReaderTest, EmptyValues)
 {
-  auto const buffer = std::string{"{\"col0\":}"};
+  auto const buffer = std::string{"{\"col0\":\"\"}"};
 
   cudf::io::json_reader_options const in_opts =
     cudf::io::json_reader_options::builder(cudf::io::source_info{buffer.c_str(), buffer.size()})
       .dtypes({data_type{type_to_id<TypeParam>(), 0}})
-      .lines(true)
-      .legacy(true);  // Legacy behavior; not aligned with JSON specs
+      .lines(true);
 
   auto const result      = cudf::io::read_json(in_opts);
   auto const result_view = result.tbl->view();
@@ -1834,7 +1772,7 @@ TYPED_TEST(JsonFixedPointReaderTest, EmptyValues)
   ASSERT_EQ(result_view.num_columns(), 1);
   EXPECT_EQ(result_view.num_rows(), 1);
   EXPECT_EQ(result.metadata.schema_info[0].name, "col0");
-  EXPECT_EQ(result_view.column(0).null_count(), 1);
+  EXPECT_EQ(result_view.column(0).null_count(), 0);
 }
 
 TEST_F(JsonReaderTest, UnsupportedMultipleFileInputs)
@@ -2050,8 +1988,114 @@ TEST_F(JsonReaderTest, JSONLinesRecoveringIgnoreExcessChars)
     float64_wrapper{{0.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 0.0}, c_validity.cbegin()});
 }
 
+// Sanity test that checks whether there's a race on the FST destructor
+TEST_F(JsonReaderTest, JSONLinesRecoveringSync)
+{
+  // Set up host pinned memory pool to avoid implicit synchronizations to test for any potential
+  // races due to missing host-device synchronizations
+  using host_pooled_mr = rmm::mr::pool_memory_resource<rmm::mr::pinned_host_memory_resource>;
+  host_pooled_mr mr{std::make_shared<rmm::mr::pinned_host_memory_resource>().get(),
+                    size_t{128} * 1024 * 1024};
+
+  // Set new resource
+  auto last_mr = cudf::io::set_host_memory_resource(mr);
+
+  /**
+   * @brief Spark has the specific need to ignore extra characters that come after the first record
+   * on a JSON line
+   */
+  std::string data =
+    // 0 -> a: -2 (valid)
+    R"({"a":-2}{})"
+    "\n"
+    // 1 -> (invalid)
+    R"({"b":{}should_be_invalid})"
+    "\n"
+    // 2 -> b (valid)
+    R"({"b":{"a":3} })"
+    "\n"
+    // 3 -> c: (valid)
+    R"({"c":1.2 } )"
+    "\n"
+    "\n"
+    // 4 -> (valid)
+    R"({"a":4} 123)"
+    "\n"
+    // 5 -> (valid)
+    R"({"a":5}//Comment after record)"
+    "\n"
+    // 6 -> (valid)
+    R"({"a":6} //Comment after whitespace)"
+    "\n"
+    // 7 -> (invalid)
+    R"({"a":5 //Invalid Comment within record})";
+
+  // Create input of a certain size to potentially reveal a missing host/device sync
+  std::size_t const target_size = 40000000;
+  auto const repetitions_log2 =
+    static_cast<std::size_t>(std::ceil(std::log2(target_size / data.size())));
+  auto const repetitions = 1ULL << repetitions_log2;
+
+  for (std::size_t i = 0; i < repetitions_log2; ++i) {
+    data = data + "\n" + data;
+  }
+
+  auto filepath = temp_env->get_temp_dir() + "RecoveringLinesExcessChars.json";
+  {
+    std::ofstream outfile(filepath, std::ofstream::out);
+    outfile << data;
+  }
+
+  cudf::io::json_reader_options in_options =
+    cudf::io::json_reader_options::builder(cudf::io::source_info{filepath})
+      .lines(true)
+      .recovery_mode(cudf::io::json_recovery_mode_t::RECOVER_WITH_NULL);
+
+  cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
+
+  EXPECT_EQ(result.tbl->num_columns(), 3);
+  EXPECT_EQ(result.tbl->num_rows(), 8 * repetitions);
+  EXPECT_EQ(result.tbl->get_column(0).type().id(), cudf::type_id::INT64);
+  EXPECT_EQ(result.tbl->get_column(1).type().id(), cudf::type_id::STRUCT);
+  EXPECT_EQ(result.tbl->get_column(2).type().id(), cudf::type_id::FLOAT64);
+
+  std::vector<bool> a_validity{true, false, false, false, true, true, true, false};
+  std::vector<bool> b_validity{false, false, true, false, false, false, false, false};
+  std::vector<bool> c_validity{false, false, false, true, false, false, false, false};
+
+  std::vector<std::int32_t> a_data{-2, 0, 0, 0, 4, 5, 6, 0};
+  std::vector<std::int32_t> b_a_data{0, 0, 3, 0, 0, 0, 0, 0};
+  std::vector<double> c_data{0.0, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, 0.0};
+
+  for (std::size_t i = 0; i < repetitions_log2; ++i) {
+    a_validity.insert(a_validity.end(), a_validity.cbegin(), a_validity.cend());
+    b_validity.insert(b_validity.end(), b_validity.cbegin(), b_validity.cend());
+    c_validity.insert(c_validity.end(), c_validity.cbegin(), c_validity.cend());
+    a_data.insert(a_data.end(), a_data.cbegin(), a_data.cend());
+    b_a_data.insert(b_a_data.end(), b_a_data.cbegin(), b_a_data.cend());
+    c_data.insert(c_data.end(), c_data.cbegin(), c_data.cend());
+  }
+
+  // Child column b->a
+  auto b_a_col = int64_wrapper(b_a_data.cbegin(), b_a_data.cend());
+
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(
+    result.tbl->get_column(0), int64_wrapper{a_data.cbegin(), a_data.cend(), a_validity.cbegin()});
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(
+    result.tbl->get_column(1), cudf::test::structs_column_wrapper({b_a_col}, b_validity.cbegin()));
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(
+    result.tbl->get_column(2),
+    float64_wrapper{c_data.cbegin(), c_data.cend(), c_validity.cbegin()});
+
+  // Restore original memory source
+  cudf::io::set_host_memory_resource(last_mr);
+}
+
 TEST_F(JsonReaderTest, MixedTypes)
 {
+  using LCWS    = cudf::test::lists_column_wrapper<cudf::string_view>;
+  using LCWI    = cudf::test::lists_column_wrapper<int64_t>;
+  using valid_t = std::vector<cudf::valid_type>;
   {
     // Simple test for mixed types
     std::string json_string = R"({ "foo": [1,2,3], "bar": 123 }
@@ -2084,34 +2128,112 @@ TEST_F(JsonReaderTest, MixedTypes)
         .lines(true);
 
     cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
+    static int num_case                  = 0;
+    num_case++;
+    std::cout << "case:" << num_case << "\n";
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(result.tbl->get_column(0), expected);
   };
-
-  // test cases.
+  // value + string (not mixed type case)
   test_fn(R"(
 { "a": "123" }
 { "a": 123 }
 )",
           cudf::test::strings_column_wrapper({"123", "123"}));
 
+  // test cases.
+  // STR + STRUCT, STR + LIST, STR + null
+  // STRUCT + STR, STRUCT + LIST, STRUCT + null
+  // LIST + STR, LIST + STRUCT, LIST + null
+  // LIST + STRUCT + STR, STRUCT + LIST + STR, STR + STRUCT + LIST, STRUCT + LIST + null
+  // STR + STRUCT + LIST + null
+
+  // STRING mixed:
+  // STR + STRUCT, STR + LIST, STR + null
+  test_fn(R"(
+{ "a": "123" }
+{ "a": { "b": 1 } }
+)",
+          cudf::test::strings_column_wrapper({"123", "{ \"b\": 1 }"}));
+  test_fn(R"(
+{ "a": "123" }
+{ "a": [1,2,3] }
+)",
+          cudf::test::strings_column_wrapper({"123", "[1,2,3]"}));
+  test_fn(R"(
+{ "a": "123" }
+{ "a": null }
+)",
+          cudf::test::strings_column_wrapper({"123", ""}, std::vector<bool>{1, 0}.begin()));
+
+  // STRUCT mixed:
+  // STRUCT + STR, STRUCT + LIST, STRUCT + null
+  test_fn(R"(
+{ "a": { "b": 1 } }
+{ "a": "fox" }
+)",
+          cudf::test::strings_column_wrapper({"{ \"b\": 1 }", "fox"}));
+  test_fn(R"(
+{ "a": { "b": 1 } }
+{ "a": [1,2,3] }
+)",
+          cudf::test::strings_column_wrapper({"{ \"b\": 1 }", "[1,2,3]"}));
+  cudf::test::fixed_width_column_wrapper<int64_t> child_int_col_wrapper{1, 2};
+  test_fn(R"(
+{ "a": { "b": 1 } }
+{ "a": null }
+)",
+          cudf::test::structs_column_wrapper{
+            {child_int_col_wrapper}, {1, 0} /*Validity*/
+          });
+
+  // LIST mixed:
+  // LIST + STR, LIST + STRUCT, LIST + null
+  test_fn(R"(
+{ "a": [1,2,3] }
+{ "a": "123" }
+)",
+          cudf::test::strings_column_wrapper({"[1,2,3]", "123"}));
   test_fn(R"(
 { "a": [1,2,3] }
 { "a": { "b": 1 } }
 )",
           cudf::test::strings_column_wrapper({"[1,2,3]", "{ \"b\": 1 }"}));
-
-  test_fn(R"(
-{ "a": "fox" }
-{ "a": { "b": 1 } }
-)",
-          cudf::test::strings_column_wrapper({"fox", "{ \"b\": 1 }"}));
-
-  test_fn(R"(
+  test_fn(
+    R"(
 { "a": [1,2,3] }
-{ "a": "fox" }
+{ "a": null }
 )",
-          cudf::test::strings_column_wrapper({"[1,2,3]", "fox"}));
+    cudf::test::lists_column_wrapper{{LCWI{1L, 2L, 3L}, LCWI{4L, 5L}}, valid_t{1, 0}.begin()});
 
+  // All mixed:
+  // LIST + STRUCT + STR, STRUCT + LIST + STR, STR + STRUCT + LIST, STRUCT + LIST + null
+  test_fn(R"(
+{ "a": [1,2,3]  }
+{ "a": { "b": 1 } }
+{ "a": "fox"}
+)",
+          cudf::test::strings_column_wrapper({"[1,2,3]", "{ \"b\": 1 }", "fox"}));
+  test_fn(R"(
+{ "a": { "b": 1 } }
+{ "a": [1,2,3]  }
+{ "a": "fox"}
+)",
+          cudf::test::strings_column_wrapper({"{ \"b\": 1 }", "[1,2,3]", "fox"}));
+  test_fn(R"(
+{ "a": "fox"}
+{ "a": { "b": 1 } }
+{ "a": [1,2,3]  }
+)",
+          cudf::test::strings_column_wrapper({"fox", "{ \"b\": 1 }", "[1,2,3]"}));
+  test_fn(R"(
+{ "a": [1,2,3]  }
+{ "a": { "b": 1 } }
+{ "a": null}
+)",
+          cudf::test::strings_column_wrapper({"[1,2,3]", "{ \"b\": 1 }", "NA"},
+                                             valid_t{1, 1, 0}.begin()));  // RIGHT
+
+  // value + string inside list
   test_fn(R"(
 { "a": [1,2,3] }
 { "a": [true,false,true] }
@@ -2119,36 +2241,31 @@ TEST_F(JsonReaderTest, MixedTypes)
 )",
           cudf::test::lists_column_wrapper<cudf::string_view>{
             {"1", "2", "3"}, {"true", "false", "true"}, {"a", "b", "c"}});
-  {
-    std::string json_string = R"(
-{ "var1": true }
+
+  // null + list of mixed types and null
+  test_fn(R"(
+{ "var1": null }
 { "var1": [{ "var0": true, "var1": "hello", "var2": null }, null, [true, null, null]] }
-  )";
-
-    cudf::io::json_reader_options in_options =
-      cudf::io::json_reader_options::builder(
-        cudf::io::source_info{json_string.data(), json_string.size()})
-        .mixed_types_as_string(true)
-        .lines(true);
-
-    cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
-  }
+  )",
+          cudf::test::lists_column_wrapper<cudf::string_view>(
+            {{"NA", "NA"},
+             {{R"({ "var0": true, "var1": "hello", "var2": null })", "null", "[true, null, null]"},
+              valid_t{1, 0, 1}.begin()}},
+            valid_t{0, 1}.begin()));
 
   // test to confirm if reinitialize a non-string column as string affects max_rowoffsets.
   // max_rowoffsets is generated based on parent col id,
   // so, even if mixed types are present, their row offset will be correct.
-  using LCW     = cudf::test::lists_column_wrapper<cudf::string_view>;
-  using valid_t = std::vector<cudf::valid_type>;
 
   cudf::test::lists_column_wrapper expected_list{
     {
-      cudf::test::lists_column_wrapper({LCW({"1", "2", "3"}), LCW({"4", "5", "6"})}),
-      cudf::test::lists_column_wrapper({LCW()}),
-      cudf::test::lists_column_wrapper({LCW()}),  // null
-      cudf::test::lists_column_wrapper({LCW()}),  // null
-      cudf::test::lists_column_wrapper({LCW({"{\"c\": -1}"}), LCW({"5"})}),
-      cudf::test::lists_column_wrapper({LCW({"7"}), LCW({"8", "9"})}),
-      cudf::test::lists_column_wrapper({LCW()}),  // null
+      cudf::test::lists_column_wrapper({LCWS({"1", "2", "3"}), LCWS({"4", "5", "6"})}),
+      cudf::test::lists_column_wrapper({LCWS()}),
+      cudf::test::lists_column_wrapper({LCWS()}),  // null
+      cudf::test::lists_column_wrapper({LCWS()}),  // null
+      cudf::test::lists_column_wrapper({LCWS({"{\"c\": -1}"}), LCWS({"5"})}),
+      cudf::test::lists_column_wrapper({LCWS({"7"}), LCWS({"8", "9"})}),
+      cudf::test::lists_column_wrapper({LCWS()}),  // null
     },
     valid_t{1, 1, 0, 0, 1, 1, 0}.begin()};
   test_fn(R"(
@@ -2161,6 +2278,58 @@ TEST_F(JsonReaderTest, MixedTypes)
 {}
 )",
           expected_list);
+}
+
+TEST_F(JsonReaderTest, MapTypes)
+{
+  using cudf::type_id;
+  // Testing function for mixed types in JSON (for spark json reader)
+  auto test_fn = [](std::string_view json_string, bool lines, std::vector<type_id> types) {
+    std::map<std::string, cudf::io::schema_element> dtype_schema{
+      {"foo1", {data_type{type_id::STRING}}},  // list won't be a string
+      {"foo2", {data_type{type_id::STRING}}},  // struct forced as a string
+      {"1", {data_type{type_id::STRING}}},
+      {"2", {data_type{type_id::STRING}}},
+      {"bar", {dtype<int32_t>()}},
+    };
+
+    cudf::io::json_reader_options in_options =
+      cudf::io::json_reader_options::builder(
+        cudf::io::source_info{json_string.data(), json_string.size()})
+        .dtypes(dtype_schema)
+        .mixed_types_as_string(true)
+        .lines(lines);
+
+    cudf::io::table_with_metadata result = cudf::io::read_json(in_options);
+    EXPECT_EQ(result.tbl->num_columns(), types.size());
+    int i = 0;
+    for (auto& col : result.tbl->view()) {
+      EXPECT_EQ(col.type().id(), types[i]) << "column[" << i << "].type";
+      i++;
+    }
+    std::cout << "\n";
+  };
+
+  // json
+  test_fn(R"([{ "foo1": [1,2,3], "bar": 123 },
+              { "foo2": { "a": 1 }, "bar": 456 }])",
+          false,
+          {type_id::LIST, type_id::INT32, type_id::STRING});
+  // jsonl
+  test_fn(R"( { "foo1": [1,2,3], "bar": 123 }
+              { "foo2": { "a": 1 }, "bar": 456 })",
+          true,
+          {type_id::LIST, type_id::INT32, type_id::STRING});
+  // jsonl-array
+  test_fn(R"([123, [1,2,3]]
+              [456, null,  { "a": 1 }])",
+          true,
+          {type_id::INT64, type_id::LIST, type_id::STRING});
+  // json-array
+  test_fn(R"([[[1,2,3], null, 123],
+              [null, { "a": 1 }, 456 ]])",
+          false,
+          {type_id::LIST, type_id::STRING, type_id::STRING});
 }
 
 CUDF_TEST_PROGRAM_MAIN()

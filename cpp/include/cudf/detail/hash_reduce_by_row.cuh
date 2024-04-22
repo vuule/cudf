@@ -22,17 +22,17 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
+#include <cuco/static_map.cuh>
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/uninitialized_fill.h>
 
-#include <cuco/static_map.cuh>
-
 namespace cudf::detail {
 
-using hash_map_type =
-  cuco::static_map<size_type, size_type, cuda::thread_scope_device, cudf::detail::cuco_allocator>;
+using hash_map_type = cuco::legacy::
+  static_map<size_type, size_type, cuda::thread_scope_device, cudf::detail::cuco_allocator>;
 
 /**
  * @brief The base struct for customized reduction functor to perform reduce-by-key with keys are
@@ -125,7 +125,7 @@ rmm::device_uvector<OutputType> hash_reduce_by_row(
   ReduceFuncBuilder func_builder,
   OutputType init,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   auto const map_dview  = map.get_device_view();
   auto const row_hasher = cudf::experimental::row::hash::row_hasher(preprocessed_input);

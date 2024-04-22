@@ -23,6 +23,7 @@
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/for_each.h>
 #include <thrust/iterator/counting_iterator.h>
@@ -34,7 +35,7 @@ namespace strings {
 namespace detail {
 
 /**
- * @brief Creates child offsets and chars columns by applying the template function that
+ * @brief Creates child offsets and chars data by applying the template function that
  * can be used for computing the output size of each string as well as create the output
  *
  * @throws std::overflow_error if the output strings column exceeds the column size limit
@@ -49,14 +50,14 @@ namespace detail {
  * @param strings_count Number of strings.
  * @param stream CUDA stream used for device memory operations and kernel launches.
  * @param mr Device memory resource used to allocate the returned columns' device memory.
- * @return offsets child column and chars child column for a strings column
+ * @return Offsets child column and chars data for a strings column
  */
 template <typename SizeAndExecuteFunction>
 auto make_strings_children(SizeAndExecuteFunction size_and_exec_fn,
                            size_type exec_size,
                            size_type strings_count,
                            rmm::cuda_stream_view stream,
-                           rmm::mr::device_memory_resource* mr)
+                           rmm::device_async_resource_ref mr)
 {
   auto offsets_column = make_numeric_column(
     data_type{type_to_id<size_type>()}, strings_count + 1, mask_state::UNALLOCATED, stream, mr);
@@ -84,18 +85,17 @@ auto make_strings_children(SizeAndExecuteFunction size_and_exec_fn,
                std::overflow_error);
 
   // Now build the chars column
-  std::unique_ptr<column> chars_column =
-    create_chars_child_column(static_cast<size_type>(bytes), stream, mr);
+  rmm::device_uvector<char> chars(bytes, stream, mr);
 
   // Execute the function fn again to fill the chars column.
   // Note that if the output chars column has zero size, the function fn should not be called to
   // avoid accidentally overwriting the offsets.
   if (bytes > 0) {
-    size_and_exec_fn.d_chars = chars_column->mutable_view().template data<char>();
+    size_and_exec_fn.d_chars = chars.data();
     for_each_fn(size_and_exec_fn);
   }
 
-  return std::pair(std::move(offsets_column), std::move(chars_column));
+  return std::pair(std::move(offsets_column), std::move(chars));
 }
 
 /**
@@ -117,7 +117,7 @@ template <typename SizeAndExecuteFunction>
 auto make_strings_children(SizeAndExecuteFunction size_and_exec_fn,
                            size_type strings_count,
                            rmm::cuda_stream_view stream,
-                           rmm::mr::device_memory_resource* mr)
+                           rmm::device_async_resource_ref mr)
 {
   return make_strings_children(size_and_exec_fn, strings_count, strings_count, stream, mr);
 }
@@ -143,7 +143,7 @@ std::pair<std::unique_ptr<column>, int64_t> make_offsets_child_column(
   InputIterator begin,
   InputIterator end,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   auto constexpr size_type_max = static_cast<int64_t>(std::numeric_limits<size_type>::max());
   auto const lcount            = static_cast<int64_t>(std::distance(begin, end));
@@ -164,22 +164,22 @@ std::pair<std::unique_ptr<column>, int64_t> make_offsets_child_column(
     });
   auto input_itr = cudf::detail::make_counting_transform_iterator(0, map_fn);
   // Use the sizes-to-offsets iterator to compute the total number of elements
-  auto const total_elements =
+  auto const total_bytes =
     cudf::detail::sizes_to_offsets(input_itr, input_itr + strings_count + 1, d_offsets, stream);
 
-  // TODO: replace exception with if-statement when enabling creating INT64 offsets
-  CUDF_EXPECTS(total_elements <= size_type_max,
-               "Size of output exceeds the character size limit",
+  auto const threshold = get_offset64_threshold();
+  CUDF_EXPECTS(is_large_strings_enabled() || (total_bytes < threshold),
+               "Size of output exceeds the column size limit",
                std::overflow_error);
-  // if (total_elements >= get_offset64_threshold()) {
-  //   // recompute as int64 offsets when above the threshold
-  //   offsets_column = make_numeric_column(
-  //     data_type{type_id::INT64}, strings_count + 1, mask_state::UNALLOCATED, stream, mr);
-  //   auto d_offsets64 = offsets_column->mutable_view().template data<int64_t>();
-  //   sizes_to_offsets(input_itr, input_itr + strings_count + 1, d_offsets64, stream);
-  // }
+  if (total_bytes >= get_offset64_threshold()) {
+    // recompute as int64 offsets when above the threshold
+    offsets_column = make_numeric_column(
+      data_type{type_id::INT64}, strings_count + 1, mask_state::UNALLOCATED, stream, mr);
+    auto d_offsets64 = offsets_column->mutable_view().template data<int64_t>();
+    cudf::detail::sizes_to_offsets(input_itr, input_itr + strings_count + 1, d_offsets64, stream);
+  }
 
-  return std::pair(std::move(offsets_column), total_elements);
+  return std::pair(std::move(offsets_column), total_bytes);
 }
 
 }  // namespace detail

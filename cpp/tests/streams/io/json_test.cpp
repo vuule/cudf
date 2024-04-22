@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,16 @@
  * limitations under the License.
  */
 
+#include <cudf_test/base_fixture.hpp>
+#include <cudf_test/column_wrapper.hpp>
+#include <cudf_test/default_stream.hpp>
+#include <cudf_test/iterator_utilities.hpp>
+
 #include <cudf/io/detail/json.hpp>
 #include <cudf/io/json.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
-
-#include <cudf_test/base_fixture.hpp>
-#include <cudf_test/column_wrapper.hpp>
-#include <cudf_test/default_stream.hpp>
-#include <cudf_test/iterator_utilities.hpp>
 
 #include <string>
 #include <vector>
@@ -37,8 +37,7 @@ TEST_F(JSONTest, JSONreader)
     cudf::io::json_reader_options::builder(cudf::io::source_info{data.data(), data.size()})
       .dtypes(std::vector<cudf::data_type>{cudf::data_type{cudf::type_id::INT32},
                                            cudf::data_type{cudf::type_id::FLOAT64}})
-      .lines(true)
-      .legacy(true);
+      .lines(true);
   cudf::io::table_with_metadata result =
     cudf::io::read_json(in_options, cudf::test::get_default_stream());
 }

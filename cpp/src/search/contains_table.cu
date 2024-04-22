@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include <join/join_common_utils.cuh>
+#include "join/join_common_utils.cuh"
 
 #include <cudf/detail/cuco_helpers.hpp>
 #include <cudf/detail/null_mask.hpp>
@@ -25,12 +25,11 @@
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
-
-#include <thrust/iterator/counting_iterator.h>
+#include <rmm/resource_ref.hpp>
 
 #include <cuco/static_set.cuh>
-
 #include <cuda/functional>
+#include <thrust/iterator/counting_iterator.h>
 
 #include <type_traits>
 
@@ -158,9 +157,9 @@ void dispatch_nan_comparator(
   // Distinguish probing scheme CG sizes between nested and flat types for better performance
   auto const probing_scheme = [&]() {
     if constexpr (HasNested) {
-      return cuco::experimental::linear_probing<4, Hasher>{d_hasher};
+      return cuco::linear_probing<4, Hasher>{d_hasher};
     } else {
-      return cuco::experimental::linear_probing<1, Hasher>{d_hasher};
+      return cuco::linear_probing<1, Hasher>{d_hasher};
     }
   }();
 
@@ -189,7 +188,7 @@ rmm::device_uvector<bool> contains(table_view const& haystack,
                                    null_equality compare_nulls,
                                    nan_equality compare_nans,
                                    rmm::cuda_stream_view stream,
-                                   rmm::mr::device_memory_resource* mr)
+                                   rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(cudf::have_same_types(haystack, needles), "Column types mismatch");
 
@@ -228,13 +227,14 @@ rmm::device_uvector<bool> contains(table_view const& haystack,
     [&](auto const& d_self_equal, auto const& d_two_table_equal, auto const& probing_scheme) {
       auto const d_equal = comparator_adapter{d_self_equal, d_two_table_equal};
 
-      auto set = cuco::experimental::static_set{
-        cuco::experimental::extent{compute_hash_table_size(haystack.num_rows())},
-        cuco::empty_key{lhs_index_type{-1}},
-        d_equal,
-        probing_scheme,
-        cudf::detail::cuco_allocator{stream},
-        stream.value()};
+      auto set = cuco::static_set{cuco::extent{compute_hash_table_size(haystack.num_rows())},
+                                  cuco::empty_key{lhs_index_type{-1}},
+                                  d_equal,
+                                  probing_scheme,
+                                  {},
+                                  {},
+                                  cudf::detail::cuco_allocator{stream},
+                                  stream.value()};
 
       if (haystack_has_nulls && compare_nulls == null_equality::UNEQUAL) {
         auto const bitmask_buffer_and_ptr = build_row_bitmask(haystack, stream);

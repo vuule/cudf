@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,13 +25,13 @@
 #include <cudf/utilities/default_stream.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/resource_ref.hpp>
 
+#include <cuda/functional>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
 #include <thrust/random/uniform_int_distribution.h>
 #include <thrust/shuffle.h>
-
-#include <cuda/functional>
 
 namespace cudf {
 namespace detail {
@@ -41,7 +41,7 @@ std::unique_ptr<table> sample(table_view const& input,
                               sample_with_replacement replacement,
                               int64_t const seed,
                               rmm::cuda_stream_view stream,
-                              rmm::mr::device_memory_resource* mr)
+                              rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(n >= 0, "expected number of samples should be non-negative");
   auto const num_rows = input.num_rows();
@@ -93,7 +93,7 @@ std::unique_ptr<table> sample(table_view const& input,
                               sample_with_replacement replacement,
                               int64_t const seed,
                               rmm::cuda_stream_view stream,
-                              rmm::mr::device_memory_resource* mr)
+                              rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::sample(input, n, replacement, seed, stream, mr);

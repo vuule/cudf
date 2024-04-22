@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,6 +14,12 @@
  * limitations under the License.
  */
 
+#include <cudf_test/base_fixture.hpp>
+#include <cudf_test/column_utilities.hpp>
+#include <cudf_test/column_wrapper.hpp>
+#include <cudf_test/cudf_gtest.hpp>
+#include <cudf_test/type_lists.hpp>
+
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/iterator.cuh>
 #include <cudf/merge.hpp>
@@ -22,11 +28,7 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
-#include <cudf_test/base_fixture.hpp>
-#include <cudf_test/column_utilities.hpp>
-#include <cudf_test/column_wrapper.hpp>
-#include <cudf_test/cudf_gtest.hpp>
-#include <cudf_test/type_lists.hpp>
+#include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cassert>
@@ -34,8 +36,6 @@
 #include <limits>
 #include <memory>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 using cudf::test::fixed_width_column_wrapper;
 using cudf::test::strings_column_wrapper;
@@ -410,4 +410,61 @@ TYPED_TEST(MergeStringTest, Merge2StringKeyNullColumns)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_column_view1, output_column_view1);
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_column_view2, output_column_view2);
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_column_view3, output_column_view3);
+}
+
+class MergeLargeStringsTest : public cudf::test::BaseFixture {};
+
+TEST_F(MergeLargeStringsTest, MergeLargeStrings)
+{
+  CUDF_TEST_ENABLE_LARGE_STRINGS();
+  auto itr = thrust::constant_iterator<std::string_view>(
+    "abcdefghijklmnopqrstuvwxyABCDEFGHIJKLMNOPQRSTUVWXY");                      // 50 bytes
+  auto const input = cudf::test::strings_column_wrapper(itr, itr + 5'000'000);  // 250MB
+  auto input_views = std::vector<cudf::table_view>();
+  auto const view  = cudf::table_view({input});
+  std::vector<cudf::size_type> splits;
+  int const multiplier = 10;
+  for (int i = 0; i < multiplier; ++i) {  // 2500MB > 2GB
+    input_views.push_back(view);
+    splits.push_back(view.num_rows() * (i + 1));
+  }
+  splits.pop_back();  // remove last entry
+  auto const column_order    = std::vector<cudf::order>{cudf::order::ASCENDING};
+  auto const null_precedence = std::vector<cudf::null_order>{cudf::null_order::AFTER};
+
+  auto result = cudf::merge(input_views, {0}, column_order, null_precedence);
+  auto sv     = cudf::strings_column_view(result->view().column(0));
+  EXPECT_EQ(sv.size(), view.num_rows() * multiplier);
+  EXPECT_EQ(sv.offsets().type(), cudf::data_type{cudf::type_id::INT64});
+
+  auto sliced = cudf::split(sv.parent(), splits);
+  for (auto c : sliced) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(c, input);
+  }
+
+  // also test with large strings column as input
+  input_views.clear();
+  input_views.push_back(view);            // regular column
+  input_views.push_back(result->view());  // large column
+  result = cudf::merge(input_views, {0}, column_order, null_precedence);
+  sv     = cudf::strings_column_view(result->view().column(0));
+  EXPECT_EQ(sv.size(), view.num_rows() * (multiplier + 1));
+  EXPECT_EQ(sv.offsets().type(), cudf::data_type{cudf::type_id::INT64});
+  splits.push_back(view.num_rows() * multiplier);
+  sliced = cudf::split(sv.parent(), splits);
+  for (auto c : sliced) {
+    CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(c, input);
+  }
+
+  // also check merge still returns 32-bit offsets for regular columns
+  input_views.clear();
+  input_views.push_back(view);
+  input_views.push_back(view);
+  result = cudf::merge(input_views, {0}, column_order, null_precedence);
+  sv     = cudf::strings_column_view(result->view().column(0));
+  EXPECT_EQ(sv.size(), view.num_rows() * 2);
+  EXPECT_EQ(sv.offsets().type(), cudf::data_type{cudf::type_id::INT32});
+  sliced = cudf::split(sv.parent(), {view.num_rows()});
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sliced[0], input);
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(sliced[1], input);
 }

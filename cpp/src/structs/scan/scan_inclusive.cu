@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include <reductions/nested_type_minmax_util.cuh>
+#include "reductions/nested_type_minmax_util.cuh"
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/gather.hpp>
@@ -24,6 +24,7 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/scan.h>
@@ -40,7 +41,7 @@ namespace {
 template <typename Op>
 std::unique_ptr<column> scan_inclusive(column_view const& input,
                                        rmm::cuda_stream_view stream,
-                                       rmm::mr::device_memory_resource* mr)
+                                       rmm::device_async_resource_ref mr)
 {
   // Create a gather map containing indices of the prefix min/max elements.
   auto gather_map = rmm::device_uvector<size_type>(input.size(), stream);
@@ -78,11 +79,11 @@ std::unique_ptr<column> scan_inclusive(column_view const& input,
 
 template std::unique_ptr<column> scan_inclusive<DeviceMin>(column_view const& input_view,
                                                            rmm::cuda_stream_view stream,
-                                                           rmm::mr::device_memory_resource* mr);
+                                                           rmm::device_async_resource_ref mr);
 
 template std::unique_ptr<column> scan_inclusive<DeviceMax>(column_view const& input_view,
                                                            rmm::cuda_stream_view stream,
-                                                           rmm::mr::device_memory_resource* mr);
+                                                           rmm::device_async_resource_ref mr);
 
 }  // namespace detail
 }  // namespace structs

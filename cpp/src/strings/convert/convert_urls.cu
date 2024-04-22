@@ -31,6 +31,7 @@
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <cub/cub.cuh>
 
@@ -125,18 +126,18 @@ struct url_encoder_fn {
 //
 std::unique_ptr<column> url_encode(strings_column_view const& input,
                                    rmm::cuda_stream_view stream,
-                                   rmm::mr::device_memory_resource* mr)
+                                   rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) return make_empty_column(type_id::STRING);
 
   auto d_column = column_device_view::create(input.parent(), stream);
 
-  auto [offsets_column, chars_column] = cudf::strings::detail::make_strings_children(
+  auto [offsets_column, chars] = cudf::strings::detail::make_strings_children(
     url_encoder_fn{*d_column}, input.size(), stream, mr);
 
   return make_strings_column(input.size(),
                              std::move(offsets_column),
-                             std::move(chars_column->release().data.release()[0]),
+                             chars.release(),
                              input.null_count(),
                              cudf::detail::copy_bitmask(input.parent(), stream, mr));
 }
@@ -146,7 +147,7 @@ std::unique_ptr<column> url_encode(strings_column_view const& input,
 // external API
 std::unique_ptr<column> url_encode(strings_column_view const& input,
                                    rmm::cuda_stream_view stream,
-                                   rmm::mr::device_memory_resource* mr)
+                                   rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::url_encode(input, stream, mr);
@@ -369,7 +370,7 @@ CUDF_KERNEL void url_decode_char_replacer(column_device_view const in_strings,
 //
 std::unique_ptr<column> url_decode(strings_column_view const& strings,
                                    rmm::cuda_stream_view stream,
-                                   rmm::mr::device_memory_resource* mr)
+                                   rmm::device_async_resource_ref mr)
 {
   size_type strings_count = strings.size();
   if (strings_count == 0) return make_empty_column(type_id::STRING);
@@ -416,7 +417,7 @@ std::unique_ptr<column> url_decode(strings_column_view const& strings,
 
 std::unique_ptr<column> url_decode(strings_column_view const& input,
                                    rmm::cuda_stream_view stream,
-                                   rmm::mr::device_memory_resource* mr)
+                                   rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::url_decode(input, stream, mr);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,9 +24,8 @@
 #include "parquet.hpp"
 #include "parquet_gpu.hpp"
 
-#include <cudf/io/data_sink.hpp>
-
 #include <cudf/detail/utilities/integer_utils.hpp>
+#include <cudf/io/data_sink.hpp>
 #include <cudf/io/detail/parquet.hpp>
 #include <cudf/io/parquet.hpp>
 #include <cudf/table/table.hpp>
@@ -130,7 +129,6 @@ class writer::impl {
    * @param chunks Column chunks
    * @param global_rowgroup_base Numbers of rowgroups in each file/partition
    * @param first_rg_in_part The first rowgroup in each partition
-   * @param batch_list The batches of rowgroups to encode
    * @param rg_to_part A map from rowgroup to partition
    * @param[out] bounce_buffer Temporary host output buffer
    */
@@ -139,7 +137,6 @@ class writer::impl {
                                   host_2dspan<EncColumnChunk const> chunks,
                                   host_span<size_t const> global_rowgroup_base,
                                   host_span<int const> first_rg_in_part,
-                                  host_span<size_type const> batch_list,
                                   host_span<int const> rg_to_part,
                                   host_span<uint8_t> bounce_buffer);
 

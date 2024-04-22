@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#include <strings/regex/regex_program_impl.h>
-#include <strings/regex/utilities.cuh>
+#include "strings/regex/regex_program_impl.h"
+#include "strings/regex/utilities.cuh"
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_device_view.cuh>
@@ -29,14 +29,14 @@
 #include <cudf/utilities/span.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/resource_ref.hpp>
 
+#include <cuda/functional>
 #include <thrust/execution_policy.h>
 #include <thrust/fill.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/permutation_iterator.h>
 #include <thrust/pair.h>
-
-#include <cuda/functional>
 
 namespace cudf {
 namespace strings {
@@ -92,7 +92,7 @@ struct extract_fn {
 std::unique_ptr<table> extract(strings_column_view const& input,
                                regex_program const& prog,
                                rmm::cuda_stream_view stream,
-                               rmm::mr::device_memory_resource* mr)
+                               rmm::device_async_resource_ref mr)
 {
   // create device object from regex_program
   auto d_prog = regex_device_builder::create_prog_device(prog, stream);
@@ -136,7 +136,7 @@ std::unique_ptr<table> extract(strings_column_view const& input,
 std::unique_ptr<table> extract(strings_column_view const& input,
                                regex_program const& prog,
                                rmm::cuda_stream_view stream,
-                               rmm::mr::device_memory_resource* mr)
+                               rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::extract(input, prog, stream, mr);

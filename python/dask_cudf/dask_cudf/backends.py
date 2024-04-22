@@ -2,6 +2,7 @@
 
 import warnings
 from collections.abc import Iterator
+from functools import partial
 
 import cupy as cp
 import numpy as np
@@ -105,8 +106,10 @@ def _get_non_empty_data(s):
         categories = (
             s.categories if len(s.categories) else [UNKNOWN_CATEGORIES]
         )
-        codes = cudf.core.column.full(
-            size=2, fill_value=0, dtype=cudf._lib.types.size_type_dtype
+        codes = cudf.core.column.as_column(
+            0,
+            dtype=cudf._lib.types.size_type_dtype,
+            length=2,
         )
         ordered = s.ordered
         data = cudf.core.column.build_categorical_column(
@@ -381,18 +384,6 @@ def _cudf_to_table(obj, preserve_index=None, **kwargs):
             "Ignoring the following arguments to "
             f"`to_pyarrow_table_dispatch`: {list(kwargs)}"
         )
-
-    # TODO: Remove this logic when cudf#14159 is resolved
-    # (see: https://github.com/rapidsai/cudf/issues/14159)
-    if preserve_index and isinstance(obj.index, cudf.RangeIndex):
-        obj = obj.copy()
-        obj.index.name = (
-            obj.index.name
-            if obj.index.name is not None
-            else "__index_level_0__"
-        )
-        obj.index = obj.index._as_int_index()
-
     return obj.to_arrow(preserve_index=preserve_index)
 
 
@@ -405,15 +396,7 @@ def _table_to_cudf(obj, table, self_destruct=None, **kwargs):
             f"Ignoring the following arguments to "
             f"`from_pyarrow_table_dispatch`: {list(kwargs)}"
         )
-    result = obj.from_arrow(table)
-
-    # TODO: Remove this logic when cudf#14159 is resolved
-    # (see: https://github.com/rapidsai/cudf/issues/14159)
-    if "__index_level_0__" in result.index.names:
-        assert len(result.index.names) == 1
-        result.index.name = None
-
-    return result
+    return obj.from_arrow(table)
 
 
 @union_categoricals_dispatch.register((cudf.Series, cudf.BaseIndex))
@@ -482,7 +465,6 @@ try:
     def _simple_cudf_encode(_):
         # Basic pickle-based encoding for a partd k-v store
         import pickle
-        from functools import partial
 
         import partd
 
@@ -625,13 +607,90 @@ class CudfBackendEntrypoint(DataFrameBackendEntrypoint):
 
     @staticmethod
     def read_hdf(*args, **kwargs):
-        from dask_cudf import from_dask_dataframe
-
         # HDF5 reader not yet implemented in cudf
         warnings.warn(
             "read_hdf is not yet implemented in cudf/dask_cudf. "
             "Moving to cudf from pandas. Expect poor performance!"
         )
-        return from_dask_dataframe(
-            _default_backend(dd.read_hdf, *args, **kwargs)
+        return _default_backend(dd.read_hdf, *args, **kwargs).to_backend(
+            "cudf"
         )
+
+
+# Define "cudf" backend entrypoint for dask-expr
+class CudfDXBackendEntrypoint(DataFrameBackendEntrypoint):
+    """Backend-entrypoint class for Dask-Expressions
+
+    This class is registered under the name "cudf" for the
+    ``dask-expr.dataframe.backends`` entrypoint in ``setup.cfg``.
+    Dask-DataFrame will use the methods defined in this class
+    in place of ``dask_expr.<creation-method>`` when the
+    "dataframe.backend" configuration is set to "cudf":
+
+    Examples
+    --------
+    >>> import dask
+    >>> import dask_expr
+    >>> with dask.config.set({"dataframe.backend": "cudf"}):
+    ...     ddf = dx.from_dict({"a": range(10)})
+    >>> type(ddf._meta)
+    <class 'cudf.core.dataframe.DataFrame'>
+    """
+
+    @classmethod
+    def to_backend_dispatch(cls):
+        return CudfBackendEntrypoint.to_backend_dispatch()
+
+    @classmethod
+    def to_backend(cls, *args, **kwargs):
+        return CudfBackendEntrypoint.to_backend(*args, **kwargs)
+
+    @staticmethod
+    def from_dict(
+        data,
+        npartitions,
+        orient="columns",
+        dtype=None,
+        columns=None,
+        constructor=cudf.DataFrame,
+    ):
+        import dask_expr as dx
+
+        return _default_backend(
+            dx.from_dict,
+            data,
+            npartitions=npartitions,
+            orient=orient,
+            dtype=dtype,
+            columns=columns,
+            constructor=constructor,
+        )
+
+    @staticmethod
+    def read_json(*args, engine="auto", **kwargs):
+        return _default_backend(
+            dd.read_json,
+            *args,
+            engine=(
+                partial(cudf.read_json, engine=engine)
+                if isinstance(engine, str)
+                else engine
+            ),
+            **kwargs,
+        )
+
+    @staticmethod
+    def read_orc(*args, **kwargs):
+        from dask_expr import from_legacy_dataframe
+
+        from dask_cudf.io.orc import read_orc as legacy_read_orc
+
+        ddf = legacy_read_orc(*args, **kwargs)
+        return from_legacy_dataframe(ddf)
+
+
+# Import/register cudf-specific classes for dask-expr
+try:
+    import dask_cudf.expr  # noqa: F401
+except ImportError:
+    pass

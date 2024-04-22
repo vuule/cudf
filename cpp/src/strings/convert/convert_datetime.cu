@@ -34,6 +34,7 @@
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
@@ -437,7 +438,7 @@ std::unique_ptr<cudf::column> to_timestamps(strings_column_view const& input,
                                             data_type timestamp_type,
                                             std::string_view format,
                                             rmm::cuda_stream_view stream,
-                                            rmm::mr::device_memory_resource* mr)
+                                            rmm::device_async_resource_ref mr)
 {
   if (input.is_empty())
     return make_empty_column(timestamp_type);  // make_timestamp_column(timestamp_type, 0);
@@ -675,7 +676,7 @@ struct check_datetime_format {
 std::unique_ptr<cudf::column> is_timestamp(strings_column_view const& input,
                                            std::string_view const& format,
                                            rmm::cuda_stream_view stream,
-                                           rmm::mr::device_memory_resource* mr)
+                                           rmm::device_async_resource_ref mr)
 {
   size_type strings_count = input.size();
   if (strings_count == 0) return make_empty_column(type_id::BOOL8);
@@ -711,7 +712,7 @@ std::unique_ptr<cudf::column> to_timestamps(strings_column_view const& input,
                                             data_type timestamp_type,
                                             std::string_view format,
                                             rmm::cuda_stream_view stream,
-                                            rmm::mr::device_memory_resource* mr)
+                                            rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::to_timestamps(input, timestamp_type, format, stream, mr);
@@ -720,7 +721,7 @@ std::unique_ptr<cudf::column> to_timestamps(strings_column_view const& input,
 std::unique_ptr<cudf::column> is_timestamp(strings_column_view const& input,
                                            std::string_view format,
                                            rmm::cuda_stream_view stream,
-                                           rmm::mr::device_memory_resource* mr)
+                                           rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::is_timestamp(input, format, stream, mr);
@@ -1099,14 +1100,14 @@ struct datetime_formatter_fn {
 };
 
 //
-using strings_children = std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>>;
+using strings_children = std::pair<std::unique_ptr<cudf::column>, rmm::device_uvector<char>>;
 struct dispatch_from_timestamps_fn {
   template <typename T, std::enable_if_t<cudf::is_timestamp<T>()>* = nullptr>
   strings_children operator()(column_device_view const& d_timestamps,
                               column_device_view const& d_format_names,
                               device_span<format_item const> d_format_items,
                               rmm::cuda_stream_view stream,
-                              rmm::mr::device_memory_resource* mr) const
+                              rmm::device_async_resource_ref mr) const
   {
     return make_strings_children(
       datetime_formatter_fn<T>{d_timestamps, d_format_names, d_format_items},
@@ -1129,7 +1130,7 @@ std::unique_ptr<column> from_timestamps(column_view const& timestamps,
                                         std::string_view format,
                                         strings_column_view const& names,
                                         rmm::cuda_stream_view stream,
-                                        rmm::mr::device_memory_resource* mr)
+                                        rmm::device_async_resource_ref mr)
 {
   if (timestamps.is_empty()) return make_empty_column(type_id::STRING);
 
@@ -1148,17 +1149,17 @@ std::unique_ptr<column> from_timestamps(column_view const& timestamps,
   auto const d_timestamps   = column_device_view::create(timestamps, stream);
 
   // dispatcher is called to handle the different timestamp types
-  auto [offsets_column, chars_column] = cudf::type_dispatcher(timestamps.type(),
-                                                              dispatch_from_timestamps_fn(),
-                                                              *d_timestamps,
-                                                              *d_names,
-                                                              d_format_items,
-                                                              stream,
-                                                              mr);
+  auto [offsets_column, chars] = cudf::type_dispatcher(timestamps.type(),
+                                                       dispatch_from_timestamps_fn(),
+                                                       *d_timestamps,
+                                                       *d_names,
+                                                       d_format_items,
+                                                       stream,
+                                                       mr);
 
   return make_strings_column(timestamps.size(),
                              std::move(offsets_column),
-                             std::move(chars_column->release().data.release()[0]),
+                             chars.release(),
                              timestamps.null_count(),
                              cudf::detail::copy_bitmask(timestamps, stream, mr));
 }
@@ -1171,7 +1172,7 @@ std::unique_ptr<column> from_timestamps(column_view const& timestamps,
                                         std::string_view format,
                                         strings_column_view const& names,
                                         rmm::cuda_stream_view stream,
-                                        rmm::mr::device_memory_resource* mr)
+                                        rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::from_timestamps(timestamps, format, names, stream, mr);

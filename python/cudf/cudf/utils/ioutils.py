@@ -85,9 +85,7 @@ Examples
 0       10   hello
 1       20  rapids
 2       30      ai
-""".format(
-    remote_data_sources=_docstring_remote_sources
-)
+""".format(remote_data_sources=_docstring_remote_sources)
 doc_read_avro = docfmt_partial(docstring=_docstring_read_avro)
 
 _docstring_read_parquet_metadata = """
@@ -103,11 +101,13 @@ Returns
 Total number of rows
 Number of row groups
 List of column names
+Number of columns
+List of metadata of row groups
 
 Examples
 --------
 >>> import cudf
->>> num_rows, num_row_groups, names = cudf.io.read_parquet_metadata(filename)
+>>> num_rows, num_row_groups, names, num_columns, row_group_metadata = cudf.io.read_parquet_metadata(filename)
 >>> df = [cudf.read_parquet(fname, row_group=i) for i in range(row_groups)]
 >>> df = cudf.concat(df)
 >>> df
@@ -545,7 +545,7 @@ path_or_buf : list, str, path object, or file-like object
     function or `StringIO`). Multiple inputs may be provided as a list. If a
     list is specified each list entry may be of a different input type as long
     as each input is of a valid type and all input JSON schema(s) match.
-engine : {{ 'auto', 'cudf', 'cudf_legacy', 'pandas' }}, default 'auto'
+engine : {{ 'auto', 'cudf', 'pandas' }}, default 'auto'
     Parser engine to use. If 'auto' is passed, the engine will be
     automatically selected based on the other parameters. See notes below.
 orient : string
@@ -1416,9 +1416,7 @@ filepath_or_buffer : str, bytes, BytesIO, list
     list of Filepath strings or in-memory buffers of data.
 compression : str
     Type of compression algorithm for the content
-    """.format(
-    bytes_per_thread=_BYTES_PER_THREAD_DEFAULT
-)
+    """.format(bytes_per_thread=_BYTES_PER_THREAD_DEFAULT)
 
 
 doc_get_reader_filepath_or_buffer = docfmt_partial(
@@ -1848,6 +1846,7 @@ def stringify_pathlike(pathlike):
     """
     Convert any object that implements the fspath protocol
     to a string. Leaves other objects unchanged
+
     Parameters
     ----------
     pathlike

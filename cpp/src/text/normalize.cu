@@ -14,11 +14,9 @@
  * limitations under the License.
  */
 
-#include <text/subword/detail/data_normalizer.hpp>
-#include <text/subword/detail/tokenizer_utils.cuh>
-#include <text/utilities/tokenize_ops.cuh>
-
-#include <nvtext/normalize.hpp>
+#include "text/subword/detail/data_normalizer.hpp"
+#include "text/subword/detail/tokenizer_utils.cuh"
+#include "text/utilities/tokenize_ops.cuh"
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_device_view.cuh>
@@ -35,7 +33,10 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
+#include <nvtext/normalize.hpp>
+
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
@@ -174,7 +175,7 @@ struct codepoint_to_utf8_fn {
 // detail API
 std::unique_ptr<cudf::column> normalize_spaces(cudf::strings_column_view const& strings,
                                                rmm::cuda_stream_view stream,
-                                               rmm::mr::device_memory_resource* mr)
+                                               rmm::device_async_resource_ref mr)
 {
   if (strings.is_empty()) return cudf::make_empty_column(cudf::data_type{cudf::type_id::STRING});
 
@@ -182,12 +183,12 @@ std::unique_ptr<cudf::column> normalize_spaces(cudf::strings_column_view const& 
   auto d_strings = cudf::column_device_view::create(strings.parent(), stream);
 
   // build offsets and children using the normalize_space_fn
-  auto [offsets_column, chars_column] = cudf::strings::detail::make_strings_children(
+  auto [offsets_column, chars] = cudf::strings::detail::make_strings_children(
     normalize_spaces_fn{*d_strings}, strings.size(), stream, mr);
 
   return cudf::make_strings_column(strings.size(),
                                    std::move(offsets_column),
-                                   std::move(chars_column->release().data.release()[0]),
+                                   chars.release(),
                                    strings.null_count(),
                                    cudf::detail::copy_bitmask(strings.parent(), stream, mr));
 }
@@ -198,7 +199,7 @@ std::unique_ptr<cudf::column> normalize_spaces(cudf::strings_column_view const& 
 std::unique_ptr<cudf::column> normalize_characters(cudf::strings_column_view const& strings,
                                                    bool do_lower_case,
                                                    rmm::cuda_stream_view stream,
-                                                   rmm::mr::device_memory_resource* mr)
+                                                   rmm::device_async_resource_ref mr)
 {
   if (strings.is_empty()) return cudf::make_empty_column(cudf::data_type{cudf::type_id::STRING});
 
@@ -224,12 +225,12 @@ std::unique_ptr<cudf::column> normalize_characters(cudf::strings_column_view con
   auto d_strings = cudf::column_device_view::create(strings.parent(), stream);
 
   // build offsets and children using the codepoint_to_utf8_fn
-  auto [offsets_column, chars_column] = cudf::strings::detail::make_strings_children(
+  auto [offsets_column, chars] = cudf::strings::detail::make_strings_children(
     codepoint_to_utf8_fn{*d_strings, cp_chars, cp_offsets}, strings.size(), stream, mr);
 
   return cudf::make_strings_column(strings.size(),
                                    std::move(offsets_column),
-                                   std::move(chars_column->release().data.release()[0]),
+                                   chars.release(),
                                    strings.null_count(),
                                    cudf::detail::copy_bitmask(strings.parent(), stream, mr));
 }
@@ -240,7 +241,7 @@ std::unique_ptr<cudf::column> normalize_characters(cudf::strings_column_view con
 
 std::unique_ptr<cudf::column> normalize_spaces(cudf::strings_column_view const& input,
                                                rmm::cuda_stream_view stream,
-                                               rmm::mr::device_memory_resource* mr)
+                                               rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::normalize_spaces(input, stream, mr);
@@ -252,7 +253,7 @@ std::unique_ptr<cudf::column> normalize_spaces(cudf::strings_column_view const& 
 std::unique_ptr<cudf::column> normalize_characters(cudf::strings_column_view const& input,
                                                    bool do_lower_case,
                                                    rmm::cuda_stream_view stream,
-                                                   rmm::mr::device_memory_resource* mr)
+                                                   rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::normalize_characters(input, do_lower_case, stream, mr);

@@ -22,6 +22,7 @@
 #include <cudf/types.hpp>
 
 #include <rmm/mr/device/per_device_resource.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <map>
 #include <string>
@@ -117,6 +118,9 @@ class json_reader_options {
 
   // Normalize single quotes
   bool _normalize_single_quotes = false;
+
+  // Normalize unquoted spaces and tabs
+  bool _normalize_whitespace = false;
 
   // Whether to recover after an invalid JSON line
   json_recovery_mode_t _recovery_mode = json_recovery_mode_t::FAIL;
@@ -247,9 +251,11 @@ class json_reader_options {
   /**
    * @brief Whether the legacy reader should be used.
    *
+   * @deprecated Since 24.06
+   *
    * @returns true if the legacy reader will be used, false otherwise
    */
-  bool is_enabled_legacy() const { return _legacy; }
+  [[deprecated]] bool is_enabled_legacy() const { return _legacy; }
 
   /**
    * @brief Whether the reader should keep quotes of string values.
@@ -264,6 +270,13 @@ class json_reader_options {
    * @returns true if the reader should normalize single quotes, false otherwise
    */
   bool is_enabled_normalize_single_quotes() const { return _normalize_single_quotes; }
+
+  /**
+   * @brief Whether the reader should normalize unquoted whitespace characters
+   *
+   * @returns true if the reader should normalize whitespace, false otherwise
+   */
+  bool is_enabled_normalize_whitespace() const { return _normalize_whitespace; }
 
   /**
    * @brief Queries the JSON reader's behavior on invalid JSON lines.
@@ -323,6 +336,7 @@ class json_reader_options {
 
   /**
    * @brief Set whether to parse mixed types as a string column.
+   * Also enables forcing to read a struct as string column using schema.
    *
    * @param val Boolean value to enable/disable parsing mixed types as a string column
    */
@@ -338,9 +352,11 @@ class json_reader_options {
   /**
    * @brief Set whether to use the legacy reader.
    *
+   * @deprecated Since 24.06
+   *
    * @param val Boolean value to enable/disable the legacy reader
    */
-  void enable_legacy(bool val) { _legacy = val; }
+  [[deprecated]] void enable_legacy(bool val) { _legacy = val; }
 
   /**
    * @brief Set whether the reader should keep quotes of string values.
@@ -357,6 +373,14 @@ class json_reader_options {
    * strings
    */
   void enable_normalize_single_quotes(bool val) { _normalize_single_quotes = val; }
+
+  /**
+   * @brief Set whether the reader should enable normalization of unquoted whitespace
+   *
+   * @param val Boolean value to indicate whether the reader should normalize unquoted whitespace
+   * characters i.e. tabs and spaces
+   */
+  void enable_normalize_whitespace(bool val) { _normalize_whitespace = val; }
 
   /**
    * @brief Specifies the JSON reader's behavior on invalid JSON lines.
@@ -473,6 +497,7 @@ class json_reader_options_builder {
 
   /**
    * @brief Set whether to parse mixed types as a string column.
+   * Also enables forcing to read a struct as string column using schema.
    *
    * @param val Boolean value to enable/disable parsing mixed types as a string column
    * @return this for chaining
@@ -498,10 +523,12 @@ class json_reader_options_builder {
   /**
    * @brief Set whether to use the legacy reader.
    *
+   * @deprecated Since 24.06
+   *
    * @param val Boolean value to enable/disable legacy parsing
    * @return this for chaining
    */
-  json_reader_options_builder& legacy(bool val)
+  [[deprecated]] json_reader_options_builder& legacy(bool val)
   {
     options._legacy = val;
     return *this;
@@ -530,6 +557,19 @@ class json_reader_options_builder {
   json_reader_options_builder& normalize_single_quotes(bool val)
   {
     options._normalize_single_quotes = val;
+    return *this;
+  }
+
+  /**
+   * @brief Set whether the reader should normalize unquoted whitespace
+   *
+   * @param val Boolean value to indicate whether the reader should normalize unquoted
+   * whitespace
+   * @return this for chaining
+   */
+  json_reader_options_builder& normalize_whitespace(bool val)
+  {
+    options._normalize_whitespace = val;
     return *this;
   }
 
@@ -579,8 +619,8 @@ class json_reader_options_builder {
  */
 table_with_metadata read_json(
   json_reader_options options,
-  rmm::cuda_stream_view stream        = cudf::get_default_stream(),
-  rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource());
+  rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource());
 
 /** @} */  // end of group
 
@@ -926,8 +966,8 @@ class json_writer_options_builder {
  * @param mr Device memory resource to use for device memory allocation
  */
 void write_json(json_writer_options const& options,
-                rmm::cuda_stream_view stream        = cudf::get_default_stream(),
-                rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource());
+                rmm::cuda_stream_view stream      = cudf::get_default_stream(),
+                rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource());
 
 /** @} */  // end of group
 }  // namespace io

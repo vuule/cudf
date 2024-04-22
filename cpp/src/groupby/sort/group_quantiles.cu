@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
  */
 
 #include "group_reductions.hpp"
-#include <quantiles/quantiles_util.hpp>
+#include "quantiles/quantiles_util.hpp"
 
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
@@ -29,6 +29,7 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/execution_policy.h>
 #include <thrust/for_each.h>
@@ -90,7 +91,7 @@ struct quantiles_functor {
     device_span<double const> quantile,
     interpolation interpolation,
     rmm::cuda_stream_view stream,
-    rmm::mr::device_memory_resource* mr)
+    rmm::device_async_resource_ref mr)
   {
     using ResultType = cudf::detail::target_type_t<T, aggregation::QUANTILE>;
 
@@ -161,7 +162,7 @@ std::unique_ptr<column> group_quantiles(column_view const& values,
                                         std::vector<double> const& quantiles,
                                         interpolation interp,
                                         rmm::cuda_stream_view stream,
-                                        rmm::mr::device_memory_resource* mr)
+                                        rmm::device_async_resource_ref mr)
 {
   auto dv_quantiles = cudf::detail::make_device_uvector_async(
     quantiles, stream, rmm::mr::get_current_device_resource());

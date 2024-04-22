@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES.   # noqa: E501
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -437,9 +437,7 @@ class _FastSlowAttribute:
                 # methods because dir for the method won't be the same as for
                 # the pure unbound function, but the alternative is
                 # materializing the slow object when we don't really want to.
-                result._fsproxy_slow_dir = dir(
-                    slow_result_type
-                )  # type: ignore
+                result._fsproxy_slow_dir = dir(slow_result_type)  # type: ignore
 
         return result
 
@@ -572,7 +570,24 @@ class _FastSlowProxy:
             _raise_attribute_error(self.__class__.__name__, name)
         if name.startswith("_"):
             # private attributes always come from `._fsproxy_slow`:
-            return getattr(self._fsproxy_slow, name)
+            obj = getattr(self._fsproxy_slow, name)
+            if name.startswith("__array"):
+                # TODO: numpy methods raise when given proxy ndarray objects
+                # https://numpy.org/doc/stable/reference/arrays.classes.html#special-attributes-and-methods  # noqa:E501
+                return obj
+
+            if not _is_function_or_method(obj):
+                return _maybe_wrap_result(
+                    obj, getattr, self._fsproxy_slow, name
+                )
+
+            @functools.wraps(obj)
+            def _wrapped_private_slow(*args, **kwargs):
+                slow_args, slow_kwargs = _slow_arg(args), _slow_arg(kwargs)
+                result = obj(*slow_args, **slow_kwargs)
+                return _maybe_wrap_result(result, obj, *args, **kwargs)
+
+            return _wrapped_private_slow
         attr = _FastSlowAttribute(name)
         return attr.__get__(self)
 
@@ -1054,7 +1069,7 @@ def _is_intermediate_type(result: Any) -> bool:
 
 
 def _is_function_or_method(obj: Any) -> bool:
-    return isinstance(
+    res = isinstance(
         obj,
         (
             types.FunctionType,
@@ -1066,6 +1081,12 @@ def _is_function_or_method(obj: Any) -> bool:
             types.BuiltinMethodType,
         ),
     )
+    if not res:
+        try:
+            return "cython_function_or_method" in str(type(obj))
+        except Exception:
+            return False
+    return res
 
 
 def _replace_closurevars(
@@ -1087,7 +1108,7 @@ def _replace_closurevars(
         if any(c == types.CellType() for c in f.__closure__):
             return f
 
-    f_nonlocals, f_globals, f_builtins, _ = inspect.getclosurevars(f)
+    f_nonlocals, f_globals, _, _ = inspect.getclosurevars(f)
 
     g_globals = _transform_arg(f_globals, attribute_name, seen)
     g_nonlocals = _transform_arg(f_nonlocals, attribute_name, seen)
@@ -1100,11 +1121,14 @@ def _replace_closurevars(
         return f
 
     g_closure = tuple(types.CellType(val) for val in g_nonlocals.values())
-    g_globals["__builtins__"] = f_builtins
+
+    # https://github.com/rapidsai/cudf/issues/15548
+    new_g_globals = f.__globals__.copy()
+    new_g_globals.update(g_globals)
 
     g = types.FunctionType(
         f.__code__,
-        g_globals,
+        new_g_globals,
         name=f.__name__,
         argdefs=f.__defaults__,
         closure=g_closure,

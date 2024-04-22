@@ -31,6 +31,7 @@
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/execution_policy.h>
 #include <thrust/find.h>
@@ -118,7 +119,7 @@ std::unique_ptr<column> filter_characters(
   filter_type keep_characters,
   string_scalar const& replacement,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   size_type strings_count = strings.size();
   if (strings_count == 0) return make_empty_column(type_id::STRING);
@@ -139,12 +140,12 @@ std::unique_ptr<column> filter_characters(
 
   // this utility calls the strip_fn to build the offsets and chars columns
   filter_fn ffn{*d_strings, keep_characters, table.begin(), table.end(), d_replacement};
-  auto [offsets_column, chars_column] =
+  auto [offsets_column, chars] =
     cudf::strings::detail::make_strings_children(ffn, strings.size(), stream, mr);
 
   return make_strings_column(strings_count,
                              std::move(offsets_column),
-                             std::move(chars_column->release().data.release()[0]),
+                             chars.release(),
                              strings.null_count(),
                              cudf::detail::copy_bitmask(strings.parent(), stream, mr));
 }
@@ -160,7 +161,7 @@ std::unique_ptr<column> filter_characters(
   filter_type keep_characters,
   string_scalar const& replacement,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::filter_characters(

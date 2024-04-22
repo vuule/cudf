@@ -13,6 +13,7 @@ import pytest
 
 import cudf
 from cudf import Series
+from cudf.core._compat import PANDAS_CURRENT_SUPPORTED_VERSION, PANDAS_VERSION
 from cudf.core.buffer.spill_manager import get_global_manager
 from cudf.core.index import as_index
 from cudf.testing import _utils as utils
@@ -824,11 +825,21 @@ def test_operator_func_between_series_logical(
 @pytest.mark.parametrize("fill_value", [None, 1.0])
 @pytest.mark.parametrize("use_cudf_scalar", [False, True])
 def test_operator_func_series_and_scalar_logical(
-    dtype, func, has_nulls, scalar, fill_value, use_cudf_scalar
+    request, dtype, func, has_nulls, scalar, fill_value, use_cudf_scalar
 ):
-    gdf_series = utils.gen_rand_series(
-        dtype, 1000, has_nulls=has_nulls, stride=10000
+    request.applymarker(
+        pytest.mark.xfail(
+            PANDAS_VERSION >= PANDAS_CURRENT_SUPPORTED_VERSION
+            and fill_value == 1.0
+            and scalar is np.nan
+            and (has_nulls or (not has_nulls and func not in {"eq", "ne"})),
+            reason="https://github.com/pandas-dev/pandas/issues/57447",
+        )
     )
+    if has_nulls:
+        gdf_series = cudf.Series([-1.0, 0, cudf.NA, 1.1], dtype=dtype)
+    else:
+        gdf_series = cudf.Series([-1.0, 0, 10.5, 1.1], dtype=dtype)
     pdf_series = gdf_series.to_pandas(nullable=True)
     gdf_series_result = getattr(gdf_series, func)(
         cudf.Scalar(scalar) if use_cudf_scalar else scalar,
@@ -1684,16 +1695,6 @@ def test_scalar_null_binops(op, dtype_l, dtype_r):
     assert result.dtype == valid_result.dtype
 
 
-@pytest.mark.parametrize(
-    "date_col",
-    [
-        [
-            "2000-01-01 00:00:00.012345678",
-            "2000-01-31 00:00:00.012345678",
-            "2000-02-29 00:00:00.012345678",
-        ]
-    ],
-)
 @pytest.mark.parametrize("n_periods", [0, 1, -1, 12, -12])
 @pytest.mark.parametrize(
     "frequency",
@@ -1709,13 +1710,33 @@ def test_scalar_null_binops(op, dtype_l, dtype_r):
     ],
 )
 @pytest.mark.parametrize(
-    "dtype",
-    ["datetime64[ns]", "datetime64[us]", "datetime64[ms]", "datetime64[s]"],
+    "dtype, components",
+    [
+        ["datetime64[ns]", "00.012345678"],
+        ["datetime64[us]", "00.012345"],
+        ["datetime64[ms]", "00.012"],
+        ["datetime64[s]", "00"],
+    ],
 )
 @pytest.mark.parametrize("op", [operator.add, operator.sub])
 def test_datetime_dateoffset_binaryop(
-    date_col, n_periods, frequency, dtype, op
+    request, n_periods, frequency, dtype, components, op
 ):
+    request.applymarker(
+        pytest.mark.xfail(
+            PANDAS_VERSION >= PANDAS_CURRENT_SUPPORTED_VERSION
+            and dtype in {"datetime64[ms]", "datetime64[s]"}
+            and frequency == "microseconds"
+            and n_periods == 0,
+            reason="https://github.com/pandas-dev/pandas/issues/57448",
+        )
+    )
+
+    date_col = [
+        f"2000-01-01 00:00:{components}",
+        f"2000-01-31 00:00:{components}",
+        f"2000-02-29 00:00:{components}",
+    ]
     gsr = cudf.Series(date_col, dtype=dtype)
     psr = gsr.to_pandas()
 
@@ -1776,16 +1797,6 @@ def test_datetime_dateoffset_binaryop_multiple(date_col, kwargs, op):
     utils.assert_eq(expect, got)
 
 
-@pytest.mark.parametrize(
-    "date_col",
-    [
-        [
-            "2000-01-01 00:00:00.012345678",
-            "2000-01-31 00:00:00.012345678",
-            "2000-02-29 00:00:00.012345678",
-        ]
-    ],
-)
 @pytest.mark.parametrize("n_periods", [0, 1, -1, 12, -12])
 @pytest.mark.parametrize(
     "frequency",
@@ -1801,12 +1812,22 @@ def test_datetime_dateoffset_binaryop_multiple(date_col, kwargs, op):
     ],
 )
 @pytest.mark.parametrize(
-    "dtype",
-    ["datetime64[ns]", "datetime64[us]", "datetime64[ms]", "datetime64[s]"],
+    "dtype, components",
+    [
+        ["datetime64[ns]", "00.012345678"],
+        ["datetime64[us]", "00.012345"],
+        ["datetime64[ms]", "00.012"],
+        ["datetime64[s]", "00"],
+    ],
 )
 def test_datetime_dateoffset_binaryop_reflected(
-    date_col, n_periods, frequency, dtype
+    n_periods, frequency, dtype, components
 ):
+    date_col = [
+        f"2000-01-01 00:00:{components}",
+        f"2000-01-31 00:00:{components}",
+        f"2000-02-29 00:00:{components}",
+    ]
     gsr = cudf.Series(date_col, dtype=dtype)
     psr = gsr.to_pandas()  # converts to nanos
 
@@ -1818,7 +1839,9 @@ def test_datetime_dateoffset_binaryop_reflected(
     expect = poffset + psr
     got = goffset + gsr
 
-    utils.assert_eq(expect, got)
+    # TODO: Remove check_dtype once we get some clarity on:
+    # https://github.com/pandas-dev/pandas/issues/57448
+    utils.assert_eq(expect, got, check_dtype=False)
 
     with pytest.raises(TypeError):
         poffset - psr

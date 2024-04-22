@@ -17,14 +17,14 @@
 #pragma once
 
 #include "aggregate_orc_metadata.hpp"
-
-#include <io/utilities/column_buffer.hpp>
+#include "io/utilities/column_buffer.hpp"
 
 #include <cudf/io/datasource.hpp>
 #include <cudf/io/detail/orc.hpp>
 #include <cudf/io/orc.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <memory>
 #include <optional>
@@ -51,7 +51,7 @@ class reader::impl {
   explicit impl(std::vector<std::unique_ptr<datasource>>&& sources,
                 orc_reader_options const& options,
                 rmm::cuda_stream_view stream,
-                rmm::mr::device_memory_resource* mr);
+                rmm::device_async_resource_ref mr);
 
   /**
    * @brief Read an entire set or a subset of data and returns a set of columns
@@ -61,7 +61,7 @@ class reader::impl {
    * @param stripes Indices of individual stripes to load if non-empty
    * @return The set of columns along with metadata
    */
-  table_with_metadata read(uint64_t skip_rows,
+  table_with_metadata read(int64_t skip_rows,
                            std::optional<size_type> const& num_rows_opt,
                            std::vector<std::vector<size_type>> const& stripes);
 
@@ -73,7 +73,7 @@ class reader::impl {
    * @param num_rows_opt Optional number of rows to read, or `std::nullopt` to read all rows
    * @param stripes Indices of individual stripes to load if non-empty
    */
-  void prepare_data(uint64_t skip_rows,
+  void prepare_data(int64_t skip_rows,
                     std::optional<size_type> const& num_rows_opt,
                     std::vector<std::vector<size_type>> const& stripes);
 
@@ -94,7 +94,7 @@ class reader::impl {
   table_with_metadata read_chunk_internal();
 
   rmm::cuda_stream_view const _stream;
-  rmm::mr::device_memory_resource* const _mr;
+  rmm::device_async_resource_ref const _mr;
 
   // Reader configs
   data_type const _timestamp_type;  // Override output timestamp resolution

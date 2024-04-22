@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "io/utilities/parsing_utils.cuh"
+
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/copy.hpp>
@@ -33,10 +35,9 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 
-#include <io/utilities/parsing_utils.cuh>
-
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/optional.h>
 #include <thrust/pair.h>
@@ -522,6 +523,14 @@ struct path_operator {
 };
 
 /**
+ * @brief Enum to specify whether parsing values enclosed within brackets, like `['book']`.
+ */
+enum class bracket_state : bool {
+  INSIDE,  ///< Parsing inside brackets
+  OUTSIDE  ///< Parsing outside brackets
+};
+
+/**
  * @brief Parsing class that holds the current state of the JSONPath string to be parsed
  * and provides functions for navigating through it. This is only called on the host
  * during the preprocess step which builds a command buffer that the gpu uses.
@@ -541,7 +550,7 @@ class path_state : private parser {
       case '.': {
         path_operator op;
         string_view term{".[", 2};
-        if (parse_path_name(op.name, term)) {
+        if (parse_path_name(op.name, term, bracket_state::OUTSIDE)) {
           // this is another potential use case for __SPARK_BEHAVIORS / configurability
           // Spark currently only handles the wildcard operator inside [*], it does
           // not handle .*
@@ -564,7 +573,7 @@ class path_state : private parser {
         path_operator op;
         string_view term{"]", 1};
         bool const is_string = *pos == '\'';
-        if (parse_path_name(op.name, term)) {
+        if (parse_path_name(op.name, term, bracket_state::INSIDE)) {
           pos++;
           if (op.name.size_bytes() == 1 && op.name.data()[0] == '*') {
             op.type          = path_operator_type::CHILD_WILDCARD;
@@ -600,7 +609,8 @@ class path_state : private parser {
  private:
   cudf::io::parse_options_view json_opts{',', '\n', '\"', '.'};
 
-  bool parse_path_name(string_view& name, string_view const& terminators)
+  // b_state is set to INSIDE while parsing values enclosed within [ ], otherwise OUTSIDE
+  bool parse_path_name(string_view& name, string_view const& terminators, bracket_state b_state)
   {
     switch (*pos) {
       case '*':
@@ -609,8 +619,11 @@ class path_state : private parser {
         break;
 
       case '\'':
-        if (parse_string(name, false, '\'') != parse_result::SUCCESS) { return false; }
-        break;
+        if (b_state == bracket_state::INSIDE) {
+          if (parse_string(name, false, '\'') != parse_result::SUCCESS) { return false; }
+          break;
+        }
+        // if not inside the [ ] -> go to default
 
       default: {
         size_t const chars_left = input_len - (pos - input);
@@ -656,7 +669,7 @@ std::pair<thrust::optional<rmm::device_uvector<path_operator>>, int> build_comma
   do {
     op = p_state.get_next_operator();
     if (op.type == path_operator_type::ERROR) {
-      CUDF_FAIL("Encountered invalid JSONPath input string");
+      CUDF_FAIL("Encountered invalid JSONPath input string", std::invalid_argument);
     }
     if (op.type == path_operator_type::CHILD_WILDCARD) { max_stack_depth++; }
     // convert pointer to device pointer
@@ -965,7 +978,7 @@ std::unique_ptr<cudf::column> get_json_object(cudf::strings_column_view const& c
                                               cudf::string_scalar const& json_path,
                                               get_json_object_options options,
                                               rmm::cuda_stream_view stream,
-                                              rmm::mr::device_memory_resource* mr)
+                                              rmm::device_async_resource_ref mr)
 {
   // preprocess the json_path into a command buffer
   auto preprocess = build_command_buffer(json_path, stream);
@@ -1050,7 +1063,7 @@ std::unique_ptr<cudf::column> get_json_object(cudf::strings_column_view const& c
                                               cudf::string_scalar const& json_path,
                                               get_json_object_options options,
                                               rmm::cuda_stream_view stream,
-                                              rmm::mr::device_memory_resource* mr)
+                                              rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::get_json_object(col, json_path, options, stream, mr);

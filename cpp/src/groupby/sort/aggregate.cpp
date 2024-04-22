@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-#include <groupby/common/utils.hpp>
-#include <groupby/sort/functors.hpp>
-#include <groupby/sort/group_reductions.hpp>
+#include "groupby/common/utils.hpp"
+#include "groupby/sort/functors.hpp"
+#include "groupby/sort/group_reductions.hpp"
 
 #include <cudf/aggregation.hpp>
 #include <cudf/column/column.hpp>
@@ -37,6 +37,7 @@
 #include <cudf/types.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <memory>
 #include <unordered_map>
@@ -797,7 +798,7 @@ void aggregate_result_functor::operator()<aggregation::MERGE_TDIGEST>(aggregatio
 std::pair<std::unique_ptr<table>, std::vector<aggregation_result>> groupby::sort_aggregate(
   host_span<aggregation_request const> requests,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   // We're going to start by creating a cache of results so that aggs that
   // depend on other aggs will not have to be recalculated. e.g. mean depends on

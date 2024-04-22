@@ -19,10 +19,9 @@
  * @brief cuDF-IO CSV writer class implementation
  */
 
-#include "durations.hpp"
-
 #include "csv_common.hpp"
 #include "csv_gpu.hpp"
+#include "durations.hpp"
 
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/detail/copy.hpp>
@@ -42,6 +41,7 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
 #include <rmm/mr/device/per_device_resource.hpp>
+#include <rmm/resource_ref.hpp>
 
 #include <thrust/execution_policy.h>
 #include <thrust/host_vector.h>
@@ -141,7 +141,7 @@ struct column_to_strings_fn {
 
   explicit column_to_strings_fn(csv_writer_options const& options,
                                 rmm::cuda_stream_view stream,
-                                rmm::mr::device_memory_resource* mr)
+                                rmm::device_async_resource_ref mr)
     : options_(options), stream_(stream), mr_(mr)
   {
   }
@@ -181,12 +181,12 @@ struct column_to_strings_fn {
 
     auto d_column = column_device_view::create(column_v, stream_);
     escape_strings_fn fn{*d_column, delimiter.value(stream_)};
-    auto [offsets_column, chars_column] =
+    auto [offsets_column, chars] =
       cudf::strings::detail::make_strings_children(fn, column_v.size(), stream_, mr_);
 
     return make_strings_column(column_v.size(),
                                std::move(offsets_column),
-                               std::move(chars_column->release().data.release()[0]),
+                               chars.release(),
                                column_v.null_count(),
                                cudf::detail::copy_bitmask(column_v, stream_, mr_));
   }
@@ -278,7 +278,7 @@ struct column_to_strings_fn {
  private:
   csv_writer_options const& options_;
   rmm::cuda_stream_view stream_;
-  rmm::mr::device_memory_resource* mr_;
+  rmm::device_async_resource_ref mr_;
 };
 }  // unnamed namespace
 
@@ -289,7 +289,7 @@ void write_chunked_begin(data_sink* out_sink,
                          host_span<std::string const> user_column_names,
                          csv_writer_options const& options,
                          rmm::cuda_stream_view stream,
-                         rmm::mr::device_memory_resource* mr)
+                         rmm::device_async_resource_ref mr)
 {
   if (options.is_enabled_include_header()) {
     // need to generate column names if names are not provided
@@ -355,7 +355,7 @@ void write_chunked(data_sink* out_sink,
                    strings_column_view const& str_column_view,
                    csv_writer_options const& options,
                    rmm::cuda_stream_view stream,
-                   rmm::mr::device_memory_resource* mr)
+                   rmm::device_async_resource_ref mr)
 {
   // algorithm outline:
   //
@@ -411,7 +411,7 @@ void write_csv(data_sink* out_sink,
                host_span<std::string const> user_column_names,
                csv_writer_options const& options,
                rmm::cuda_stream_view stream,
-               rmm::mr::device_memory_resource* mr)
+               rmm::device_async_resource_ref mr)
 {
   // write header: column names separated by delimiter:
   // (even for tables with no rows)

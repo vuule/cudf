@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-#include <nvtext/detail/generate_ngrams.hpp>
-#include <nvtext/jaccard.hpp>
-
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_factories.hpp>
@@ -28,15 +25,18 @@
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <nvtext/detail/generate_ngrams.hpp>
+#include <nvtext/jaccard.hpp>
+
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
+#include <rmm/resource_ref.hpp>
 
+#include <cub/cub.cuh>
 #include <thrust/binary_search.h>
 #include <thrust/execution_policy.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform.h>
-
-#include <cub/cub.cuh>
 
 namespace nvtext {
 namespace detail {
@@ -248,7 +248,7 @@ std::unique_ptr<cudf::column> jaccard_index(cudf::strings_column_view const& inp
                                             cudf::strings_column_view const& input2,
                                             cudf::size_type width,
                                             rmm::cuda_stream_view stream,
-                                            rmm::mr::device_memory_resource* mr)
+                                            rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(
     input1.size() == input2.size(), "input columns must be the same size", std::invalid_argument);
@@ -298,7 +298,7 @@ std::unique_ptr<cudf::column> jaccard_index(cudf::strings_column_view const& inp
                                             cudf::strings_column_view const& input2,
                                             cudf::size_type width,
                                             rmm::cuda_stream_view stream,
-                                            rmm::mr::device_memory_resource* mr)
+                                            rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
   return detail::jaccard_index(input1, input2, width, stream, mr);
