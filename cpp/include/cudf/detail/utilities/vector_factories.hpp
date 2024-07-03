@@ -271,6 +271,22 @@ rmm::device_uvector<typename Container::value_type> make_device_uvector_sync(
   return make_device_uvector_sync(device_span<typename Container::value_type const>{c}, stream, mr);
 }
 
+template <typename T>
+rmm::device_uvector<T> make_device_uvector_async(host_vector<T> const& v,
+                                                 rmm::cuda_stream_view stream,
+                                                 rmm::device_async_resource_ref mr)
+{
+  rmm::device_uvector<T> ret(v.size(), stream, mr);
+  auto const is_pinned = v.is_device_accessible();
+  std::cout << "called the new overload!" << std::endl;
+  cuda_memcpy_async(ret.data(),
+                    v.data(),
+                    v.size() * sizeof(T),
+                    is_pinned ? host_memory_kind::PINNED : host_memory_kind::PAGEABLE,
+                    stream);
+  return ret;
+}
+
 // Utility function template to allow copying to either a thrust::host_vector or std::vector
 template <typename T, typename OutContainer>
 OutContainer make_vector_async(device_span<T const> v, rmm::cuda_stream_view stream)
@@ -361,6 +377,15 @@ std::vector<typename Container::value_type> make_std_vector_sync(Container const
   return make_std_vector_sync(device_span<typename Container::value_type const>{c}, stream);
 }
 
+template <typename T>
+host_vector<T> make_host_vector_async(size_t size, rmm::cuda_stream_view stream)
+{
+  if (size <= get_allocate_host_as_pinned_threshold()) {
+    return host_vector<T>(size, get_pinned_memory_resource(), stream);
+  }
+  return host_vector<T>(size, get_pageable_memory_resource(), stream);
+}
+
 /**
  * @brief Asynchronously construct a `thrust::host_vector` containing a copy of data from a
  * `device_span`
@@ -375,8 +400,8 @@ std::vector<typename Container::value_type> make_std_vector_sync(Container const
 template <typename T>
 host_vector<T> make_host_vector_async(device_span<T const> v, rmm::cuda_stream_view stream)
 {
-  auto result          = host_vector<T>(v.size(), get_host_allocator<T>(v.size(), stream));
-  auto const is_pinned = result.get_allocator().is_device_accessible();
+  auto result          = make_host_vector_async<T>(v.size(), stream);
+  auto const is_pinned = result.is_device_accessible();
   cuda_memcpy_async(result.data(),
                     v.data(),
                     v.size() * sizeof(T),
@@ -461,7 +486,7 @@ host_vector<typename Container::value_type> make_host_vector_sync(Container cons
 template <typename T>
 host_vector<T> make_pinned_vector_async(size_t size, rmm::cuda_stream_view stream)
 {
-  return host_vector<T>(size, {cudf::get_pinned_memory_resource(), stream});
+  return host_vector<T>(size, cudf::get_pinned_memory_resource(), stream);
 }
 
 /**

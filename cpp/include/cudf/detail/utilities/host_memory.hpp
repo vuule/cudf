@@ -22,25 +22,8 @@
 
 #include <rmm/resource_ref.hpp>
 
-#include <cstddef>
-
 namespace cudf::detail {
 
 CUDF_EXPORT rmm::host_async_resource_ref& get_pageable_memory_resource();
-
-/**
- * @brief Get the rmm resource to be used for host memory allocations.
- *
- * @param size The size of the allocation
- * @return The rmm resource to be used for host memory allocations
- */
-template <typename T>
-rmm_host_allocator<T> get_host_allocator(std::size_t size, rmm::cuda_stream_view _stream)
-{
-  if (size * sizeof(T) <= get_allocate_host_as_pinned_threshold()) {
-    return {get_pinned_memory_resource(), _stream};
-  }
-  return {get_pageable_memory_resource(), _stream};
-}
 
 }  // namespace cudf::detail
