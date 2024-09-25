@@ -150,17 +150,21 @@ special_case_mapping const* get_special_case_mapping_table()
 
 int64_t get_offset64_threshold()
 {
-  auto const threshold = std::getenv("LIBCUDF_LARGE_STRINGS_THRESHOLD");
-  int64_t const rtn    = threshold != nullptr ? std::atol(threshold) : 0L;
-  return (rtn > 0 && rtn < std::numeric_limits<int32_t>::max())
-           ? rtn
-           : std::numeric_limits<int32_t>::max();
+  static int64_t const threshold = [] {
+    auto const threshold = std::getenv("LIBCUDF_LARGE_STRINGS_THRESHOLD");
+    int64_t const rtn    = threshold != nullptr ? std::atol(threshold) : 0L;
+    return (rtn > 0 && rtn < std::numeric_limits<int32_t>::max())
+             ? rtn
+             : std::numeric_limits<int32_t>::max();
+  }();
+
+  return threshold;
 }
 
 bool is_large_strings_enabled()
 {
   // default depends on compile-time switch but can be overridden by the environment variable
-  auto const env = std::getenv("LIBCUDF_LARGE_STRINGS_ENABLED");
+  static auto const env = std::getenv("LIBCUDF_LARGE_STRINGS_ENABLED");
 #ifdef CUDF_LARGE_STRINGS_DISABLED
   return env != nullptr && std::string(env) == "1";
 #else
