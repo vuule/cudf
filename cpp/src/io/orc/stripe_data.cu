@@ -1573,12 +1573,12 @@ CUDF_KERNEL void __launch_bounds__(block_size)
 
   orcdec_state_s* const s = &state_g;
   uint32_t chunk_id;
-  int t              = threadIdx.x;
-  auto num_rowgroups = row_groups.size().first;
+  int t                 = threadIdx.x;
+  auto num_rowgroups    = row_groups.size().first;
+  uint32_t const rg_idx = blockIdx.x % num_rowgroups;
 
   if (num_rowgroups > 0) {
     if (t == 0) {
-      auto const rg_idx  = blockIdx.x % num_rowgroups;
       auto const col_idx = blockIdx.x / num_rowgroups;
       s->top.data.index  = row_groups[rg_idx][col_idx];
     }
@@ -1606,13 +1606,12 @@ CUDF_KERNEL void __launch_bounds__(block_size)
       if (s->top.data.index.strm_offset[1] > s->chunk.strm_len[CI_DATA2]) {
         atomicAdd(error_count, 1);
       }
-      auto const ofs0       = min(s->top.data.index.strm_offset[0], s->chunk.strm_len[CI_DATA]);
-      auto const ofs1       = min(s->top.data.index.strm_offset[1], s->chunk.strm_len[CI_DATA2]);
-      uint32_t const rg_idx = blockIdx.x % num_rowgroups;
+      auto const ofs0 = min(s->top.data.index.strm_offset[0], s->chunk.strm_len[CI_DATA]);
+      auto const ofs1 = min(s->top.data.index.strm_offset[1], s->chunk.strm_len[CI_DATA2]);
       uint32_t rowgroup_rowofs =
         (level == 0) ? (rg_idx - cuda::std::min(s->chunk.rowgroup_id, rg_idx)) * rowidx_stride
                      : s->top.data.index.start_row;
-      ;
+
       s->chunk.streams[CI_DATA] += ofs0;
       s->chunk.strm_len[CI_DATA] -= ofs0;
       s->chunk.streams[CI_DATA2] += ofs1;
@@ -1644,6 +1643,8 @@ CUDF_KERNEL void __launch_bounds__(block_size)
     run_cache_manager_inst.initialize(s);
   }
   __syncthreads();
+
+  unsigned long long int total_decoded = 0;
 
   while (is_valid && (s->top.data.cur_row < s->top.data.end_row)) {
     uint32_t list_child_elements = 0;
@@ -1870,12 +1871,13 @@ CUDF_KERNEL void __launch_bounds__(block_size)
           }
         }
       }
-      if (t == 0 && numvals + vals_skipped > 0) {
+      if (t == 0) {
         auto const max_vals = s->top.data.max_vals;
         if (max_vals > numvals) {
           if (s->chunk.type_kind == TIMESTAMP) { s->top.data.buffered_count = max_vals - numvals; }
           s->top.data.max_vals = numvals;
         }
+        total_decoded += s->top.data.max_vals;
       }
       __syncthreads();
       // Use the valid bits to compute non-null row positions until we get a full batch of values to
@@ -1884,6 +1886,8 @@ CUDF_KERNEL void __launch_bounds__(block_size)
       if (!s->top.data.nrows && !s->u.rowdec.nz_count && !vals_skipped) {
         // This is a bug (could happen with bitstream errors with a bad run that would produce more
         // values than the number of remaining rows)
+
+        if (t == 0) atomicAdd(&(chunks[chunk_id].num_decoded), total_decoded);
         return;
       }
 
@@ -2038,6 +2042,8 @@ CUDF_KERNEL void __launch_bounds__(block_size)
     cuda::atomic_ref<int64_t, cuda::thread_scope_device> ref{chunks[chunk_id].num_child_rows};
     ref.fetch_add(s->num_child_rows, cuda::std::memory_order_relaxed);
   }
+
+  if (t == 0) { atomicAdd(&(chunks[chunk_id].num_decoded), total_decoded); }
 }
 
 /**

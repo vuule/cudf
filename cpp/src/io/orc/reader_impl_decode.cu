@@ -418,6 +418,17 @@ void decode_stream_data(int64_t num_dicts,
   auto const num_errors = error_count.value(stream);
   CUDF_EXPECTS(num_errors == 0, "ORC data decode failed");
 
+  for (auto& chunk : chunks.host_view().flat_view()) {
+    if (chunk.type_kind != STRUCT) {  // and !num_rows and !skip rows
+      CUDF_EXPECTS((int64_t)chunk.num_decoded + chunk.null_count >= chunk.num_rows,
+                   "ORC decode error: chunk not fully decoded");
+      /*{
+        std::cout << (int)chunk.type_kind << std::endl;
+        std::cout << chunk.num_rows << " " << chunk.null_count << " " << chunk.num_decoded << "\n";
+      }*/
+    }
+  }
+
   std::for_each(col_idx_it + 0, col_idx_it + num_columns, [&](auto col_idx) {
     out_buffers[col_idx].null_count() =
       std::accumulate(stripe_idx_it + 0,

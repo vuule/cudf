@@ -1122,10 +1122,11 @@ CUDF_KERNEL void __launch_bounds__(compact_streams_block_size)
     srcs[out_id]      = streams[ss.column_id][group].data_ptrs[cid];
     dsts[out_id]      = dst_ptr;
 
-    // Also update the stream here, data will be copied in a separate kernel
-    streams[ss.column_id][group].data_ptrs[cid] = dst_ptr;
-
     auto const len = streams[ss.column_id][group].lengths[cid];
+
+    // Also update the stream here, data will be copied in a separate kernel
+    if (len > 0) streams[ss.column_id][group].data_ptrs[cid] = dst_ptr;
+
     // len is the size (in bytes) of the current stream.
     sizes[out_id] = len;
     dst_ptr += len;

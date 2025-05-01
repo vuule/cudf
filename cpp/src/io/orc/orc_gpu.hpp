@@ -110,16 +110,17 @@ struct column_desc {
   void* column_data_base;                  // base pointer of column data
   int64_t start_row;                       // starting row of the stripe
   int64_t num_rows;                        // number of rows in stripe
-  int64_t column_num_rows;                 // number of rows in whole column
-  int64_t num_child_rows;                  // store number of child rows if it's list column
-  uint32_t num_rowgroups;                  // number of rowgroups in the chunk
-  int64_t dictionary_start;                // start position in global dictionary
-  uint32_t dict_len;                       // length of local dictionary
-  int64_t null_count;                      // number of null values in this stripe's column
-  int64_t skip_count;                      // number of non-null values to skip
-  uint32_t rowgroup_id;                    // row group position
-  ColumnEncodingKind encoding_kind;        // column encoding kind
-  TypeKind type_kind;                      // column data type
+  unsigned long long int num_decoded;
+  int64_t column_num_rows;           // number of rows in whole column
+  int64_t num_child_rows;            // store number of child rows if it's list column
+  uint32_t num_rowgroups;            // number of rowgroups in the chunk
+  int64_t dictionary_start;          // start position in global dictionary
+  uint32_t dict_len;                 // length of local dictionary
+  int64_t null_count;                // number of null values in this stripe's column
+  int64_t skip_count;                // number of non-null values to skip
+  uint32_t rowgroup_id;              // row group position
+  ColumnEncodingKind encoding_kind;  // column encoding kind
+  TypeKind type_kind;                // column data type
   uint8_t dtype_len;          // data type length (for types that can be mapped to different sizes)
   type_id dtype_id;           // TODO
   int32_t decimal_scale;      // number of fractional decimal digits for decimal type
