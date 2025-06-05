@@ -115,6 +115,9 @@ using is_duration_t = cuda::std::disjunction<cuda::std::is_same<cudf::duration_D
                                              cuda::std::is_same<cudf::duration_us, T>,
                                              cuda::std::is_same<cudf::duration_ns, T>>;
 
+template <typename T>
+concept Duration = is_duration_t<T>::value;
+
 /**
  * @brief Indicates whether objects of types `L` and `R` can be relationally
  *compared.

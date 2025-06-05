@@ -74,8 +74,9 @@ struct Div {
            (is_fixed_point<TypeLhs>() and is_numeric<TypeRhs>()) or
            (is_numeric<TypeLhs>() and is_fixed_point<TypeRhs>());
   }
-  template <typename T1, typename T2, std::enable_if_t<is_supported<T1, T2>()>* = nullptr>
+  template <typename T1, typename T2>
   __device__ inline auto operator()(T1 const& lhs, T2 const& rhs) -> decltype(lhs / rhs)
+    requires(is_supported<T1, T2>())
   {
     return lhs / rhs;
   }
@@ -91,11 +92,10 @@ struct TrueDiv {
 };
 
 struct FloorDiv {
-  template <typename TypeLhs,
-            typename TypeRhs,
-            std::enable_if_t<(std::is_integral_v<std::common_type_t<TypeLhs, TypeRhs>> and
-                              std::is_signed_v<std::common_type_t<TypeLhs, TypeRhs>>)>* = nullptr>
+  template <typename TypeLhs, typename TypeRhs>
   __device__ inline auto operator()(TypeLhs x, TypeRhs y) -> decltype(x / y)
+    requires(std::is_integral_v<std::common_type_t<TypeLhs, TypeRhs>> and
+             std::is_signed_v<std::common_type_t<TypeLhs, TypeRhs>>)
   {
     auto const quotient          = x / y;
     auto const nonzero_remainder = (x % y) != 0;

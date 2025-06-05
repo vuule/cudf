@@ -197,9 +197,9 @@ int static constexpr encode_field_number_base(int field_number) noexcept
 }
 };  // namespace
 
-template <typename T,
-          std::enable_if_t<!std::is_class_v<T> or std::is_same_v<T, std::string>>* = nullptr>
+template <typename T>
 int constexpr encode_field_number(int field_number) noexcept
+  requires(!std::is_class_v<T> or std::is_same_v<T, std::string>)
 {
   return encode_field_number_base<T>(field_number);
 }
@@ -272,11 +272,7 @@ class protobuf_reader {
 
   uint32_t read_field_size(uint8_t const* end);
 
-  template <typename T, std::enable_if_t<std::is_integral_v<T>>* = nullptr>
-  void read_field(T& value, uint8_t const* end)
-  {
-    value = get<T>();
-  }
+  void read_field(std::integral auto& value, uint8_t const* end) { value = get<decltype(value)>(); }
 
   template <typename T, std::enable_if_t<std::is_enum_v<T>>* = nullptr>
   void read_field(T& value, uint8_t const* end)

@@ -579,17 +579,15 @@ struct column_to_strings_fn {
   // instead of column-wise; might be faster.
 
   // bools:
-  template <typename column_type>
-  std::enable_if_t<std::is_same_v<column_type, bool>, std::unique_ptr<column>> operator()(
-    column_view const& column) const
+  template <std::same_as<bool> column_type>
+  std::unique_ptr<column> operator()(column_view const& column) const
   {
     return cudf::strings::detail::from_booleans(column, true_value, false_value, stream_, mr_);
   }
 
   // strings:
-  template <typename column_type>
-  std::enable_if_t<std::is_same_v<column_type, cudf::string_view>, std::unique_ptr<column>>
-  operator()(column_view const& column_v) const
+  template <std::same_as<cudf::string_view> column_type>
+  std::unique_ptr<column> operator()(column_view const& column_v) const
   {
     auto d_column = column_device_view::create(column_v, stream_);
     return escape_strings_fn{*d_column, false, options_.is_enabled_utf8_escaped()}
@@ -597,18 +595,16 @@ struct column_to_strings_fn {
   }
 
   // ints:
-  template <typename column_type>
-  std::enable_if_t<std::is_integral_v<column_type> && !std::is_same_v<column_type, bool>,
-                   std::unique_ptr<column>>
-  operator()(column_view const& column) const
+  template <std::integral column_type>
+  std::unique_ptr<column> operator()(column_view const& column) const
+    requires(!std::is_same_v<column_type, bool>)
   {
     return cudf::strings::detail::from_integers(column, stream_, mr_);
   }
 
   // floats:
-  template <typename column_type>
-  std::enable_if_t<std::is_floating_point_v<column_type>, std::unique_ptr<column>> operator()(
-    column_view const& column) const
+  template <std::floating_point column_type>
+  std::unique_ptr<column> operator()(column_view const& column) const
   {
     return cudf::strings::detail::from_floats(column, stream_, mr_);
   }

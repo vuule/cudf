@@ -35,6 +35,9 @@
 namespace cudf {
 namespace io {
 
+template <typename T, typename U>
+concept not_same_as = !std::same_as<T, U>;
+
 enum statistics_dtype {
   dtype_none,
   dtype_bool,
@@ -115,13 +118,13 @@ struct statistics_merge_group {
   uint32_t num_chunks{};                     //!< Number of chunks in group
 };
 
-template <typename T, std::enable_if_t<!std::is_same_v<T, statistics::byte_array_view>>* = nullptr>
+template <not_same_as<statistics::byte_array_view> T>
 __device__ T get_element(column_device_view const& col, uint32_t row)
 {
   return col.element<T>(row);
 }
 
-template <typename T, std::enable_if_t<std::is_same_v<T, statistics::byte_array_view>>* = nullptr>
+template <std::same_as<statistics::byte_array_view> T>
 __device__ T get_element(column_device_view const& col, uint32_t row)
 {
   using et              = typename T::element_type;
