@@ -481,6 +481,11 @@ ConfigureNVBench(
   rolling/range_rolling_sum.cu rolling/rolling_sum.cpp
 )
 
+# ##################################################################################################
+# * memory benchmark
+# ---------------------------------------------------------------------------------
+ConfigureBench(MEMORY_BENCH memory/vector_allocation.cpp)
+
 add_custom_target(
   run_benchmarks
   DEPENDS CUDF_BENCHMARKS

@@ -13,7 +13,7 @@
 # =============================================================================
 
 if(CMAKE_COMPILER_IS_GNUCXX)
-  list(APPEND CUDF_CXX_FLAGS -Wall -Werror -Wno-unknown-pragmas -Wno-error=deprecated-declarations)
+  list(APPEND CUDF_CXX_FLAGS -Wall -Werror -Wno-unknown-pragmas -Wno-error=deprecated-declarations -Wno-psabi)
 endif()
 
 list(APPEND CUDF_CUDA_FLAGS --expt-extended-lambda --expt-relaxed-constexpr)
