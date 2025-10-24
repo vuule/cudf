@@ -176,7 +176,7 @@ void generate_depth_remappings(
 
 [[nodiscard]] std::future<void> read_column_chunks_async(
   std::vector<std::unique_ptr<datasource>> const& sources,
-  cudf::host_span<rmm::device_buffer> page_data,
+  cudf::host_span<cudf::detail::host_vector<uint8_t>> page_data,
   cudf::detail::hostdevice_vector<ColumnChunkDesc>& chunks,
   size_t begin_chunk,
   size_t end_chunk,
@@ -202,9 +202,10 @@ void generate_depth_remappings(
     if (io_size != 0) {
       auto& source = sources[chunk_source_map[chunk]];
       if (source->is_device_read_preferred(io_size)) {
+        //std::cout << "device_read_async" << std::endl;
         // Buffer needs to be padded.
         // Required by `gpuDecodePageData`.
-        page_data[chunk] = rmm::device_buffer(
+        page_data[chunk] = cudf::detail::make_pinned_vector<uint8_t>(
           cudf::util::round_up_safe(io_size, cudf::io::detail::BUFFER_PADDING_MULTIPLE), stream);
         auto fut_read_size = source->device_read_async(
           io_offset, io_size, static_cast<uint8_t*>(page_data[chunk].data()), stream);
@@ -213,7 +214,7 @@ void generate_depth_remappings(
         auto const read_buffer = source->host_read(io_offset, io_size);
         // Buffer needs to be padded.
         // Required by `gpuDecodePageData`.
-        page_data[chunk] = rmm::device_buffer(
+        page_data[chunk] = cudf::detail::make_pinned_vector<uint8_t>(
           cudf::util::round_up_safe(read_buffer->size(), cudf::io::detail::BUFFER_PADDING_MULTIPLE),
           stream);
         CUDF_CUDA_TRY(cudaMemcpyAsync(page_data[chunk].data(),

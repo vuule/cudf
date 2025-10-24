@@ -73,7 +73,7 @@ void generate_depth_remappings(
  */
 [[nodiscard]] std::future<void> read_column_chunks_async(
   std::vector<std::unique_ptr<datasource>> const& sources,
-  cudf::host_span<rmm::device_buffer> page_data,
+  cudf::host_span<cudf::detail::host_vector<uint8_t>> page_data,
   cudf::detail::hostdevice_vector<ColumnChunkDesc>& chunks,
   size_t begin_chunk,
   size_t end_chunk,

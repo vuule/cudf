@@ -192,8 +192,15 @@ void hybrid_scan_reader_impl::setup_compressed_data(
 
   auto& chunks = pass.chunks;
 
-  // Move column chunk buffers to raw page data.
-  _pass_itm_data->raw_page_data = std::move(column_chunk_buffers);
+  // Convert column chunk buffers to raw page data.
+  _pass_itm_data->raw_page_data.clear();
+  _pass_itm_data->raw_page_data.reserve(column_chunk_buffers.size());
+  for (auto& device_buffer : column_chunk_buffers) {
+    auto host_vector = cudf::detail::make_host_vector_async(
+      cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(device_buffer.data()), device_buffer.size()}, 
+      _stream);
+    _pass_itm_data->raw_page_data.emplace_back(std::move(host_vector));
+  }
 
   pass.has_compressed_data = setup_column_chunks();
 

@@ -139,7 +139,7 @@ struct pass_intermediate_data {
   pass_intermediate_data(pass_intermediate_data&&)                 = default;
   pass_intermediate_data& operator=(pass_intermediate_data&&)      = default;
 
-  std::vector<rmm::device_buffer> raw_page_data;
+  std::vector<cudf::detail::host_vector<uint8_t>> raw_page_data;
 
   // rowgroup, chunk and page information for the current pass.
   bool has_compressed_data{false};

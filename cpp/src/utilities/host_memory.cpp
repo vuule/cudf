@@ -26,9 +26,7 @@
 #include <rmm/mr/device/pool_memory_resource.hpp>
 #include <rmm/mr/pinned_host_memory_resource.hpp>
 
-#include <algorithm>
 #include <atomic>
-#include <cstdint>
 #include <cstdlib>
 #include <mutex>
 #include <optional>
@@ -185,22 +183,9 @@ static_assert(cuda::mr::resource_with<fixed_pinned_pool_memory_resource,
 CUDF_EXPORT rmm::host_device_async_resource_ref& make_default_pinned_mr(
   std::optional<size_t> config_size)
 {
-  static fixed_pinned_pool_memory_resource mr = [config_size]() {
-    auto const size = [&config_size]() -> size_t {
-      if (auto const env_val = getenv("LIBCUDF_PINNED_POOL_SIZE"); env_val != nullptr) {
-        return std::atol(env_val);
-      }
-
-      if (config_size.has_value()) { return *config_size; }
-
-      auto const total = rmm::available_device_memory().second;
-      // 0.5% of the total device memory, capped at 100MB
-      return std::min(total / 200, size_t{100} * 1024 * 1024);
-    }();
-
-    // make the pool with max size equal to the initial size
-    return fixed_pinned_pool_memory_resource{size};
-  }();
+  static rmm::mr::pinned_host_memory_resource upstream_mr{};
+  static rmm::mr::pool_memory_resource<rmm::mr::pinned_host_memory_resource> mr{
+    &upstream_mr, config_size.value_or(1<<30)};
 
   static rmm::host_device_async_resource_ref mr_ref{mr};
   return mr_ref;
@@ -287,7 +272,14 @@ class new_delete_memory_resource {
   bool operator!=(new_delete_memory_resource const& other) const { return !operator==(other); }
 
   // NOLINTBEGIN
-  friend void get_property(new_delete_memory_resource const&, cuda::mr::host_accessible) noexcept {}
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+  friend void get_property(new_delete_memory_resource const&, cuda::mr::host_accessible) noexcept
+  {
+    // This function enables the host_accessible property for the memory resource
+    // The function body is intentionally empty as it's only used for type traits
+  }
+#pragma GCC diagnostic pop
   // NOLINTEND
 
   // BEGIN CCCL >=3.1.0 COMPATIBILITY APIS
