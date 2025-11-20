@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cudf/io/detail/codec.hpp>
 #include <cudf/io/detail/nvcomp_adapter.hpp>
 #include <cudf/io/types.hpp>
 
