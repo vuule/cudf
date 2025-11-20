@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,7 +13,7 @@
 namespace CUDF_EXPORT cudf {
 namespace io::detail::nvcomp {
 
-enum class compression_type { SNAPPY, ZSTD, DEFLATE, LZ4, GZIP };
+enum class compression_type { SNAPPY, ZSTD, DEFLATE, LZ4, GZIP, CASCADE };
 
 /**
  * @brief Set of parameters that impact whether nvCOMP features are enabled.

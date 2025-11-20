@@ -5,11 +5,14 @@
 
 #pragma once
 
-#include "nvcomp_adapter.hpp"
-
+#include <cudf/io/detail/nvcomp_adapter.hpp>
 #include <cudf/io/types.hpp>
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <optional>
+#include <string>
 
 namespace cudf::io::detail {
 
@@ -38,13 +41,26 @@ constexpr double default_host_device_decompression_cost_ratio = 32;
 // single GPU block; higher values lead to more host compression in HYBRID mode
 constexpr double default_host_device_compression_cost_ratio = 64;
 
-[[nodiscard]] constexpr std::optional<nvcomp::compression_type> to_nvcomp_compression(
+[[nodiscard]] inline bool use_snappy_cascade()
+{
+  auto const* env = std::getenv("LIBCUDF_NVCOMP_SNAPPY_CASCADE");
+  if (env == nullptr) { return false; }
+  std::string val{env};
+  std::transform(val.begin(), val.end(), val.begin(), [](unsigned char c) {
+    return static_cast<char>(std::toupper(c));
+  });
+  return val == "1" or val == "ON" or val == "TRUE";
+}
+
+[[nodiscard]] inline std::optional<nvcomp::compression_type> to_nvcomp_compression(
   compression_type compression)
 {
   switch (compression) {
     case compression_type::GZIP: return nvcomp::compression_type::GZIP;
     case compression_type::LZ4: return nvcomp::compression_type::LZ4;
-    case compression_type::SNAPPY: return nvcomp::compression_type::SNAPPY;
+    case compression_type::SNAPPY:
+      return use_snappy_cascade() ? nvcomp::compression_type::CASCADE
+                                  : nvcomp::compression_type::SNAPPY;
     case compression_type::ZLIB: return nvcomp::compression_type::DEFLATE;
     case compression_type::ZSTD: return nvcomp::compression_type::ZSTD;
     default: return std::nullopt;
