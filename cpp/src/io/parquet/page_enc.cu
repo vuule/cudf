@@ -2540,8 +2540,8 @@ CUDF_KERNEL void __launch_bounds__(decide_compression_block_size)
   __syncwarp();
 
   if (lane_id == 0) {
-    auto const write_compressed = compressed_data_size != 0 and compression_error[warp_id] == 0 and
-                                  compressed_data_size < uncompressed_data_size;
+    // Always write compressed if compression succeeded, even if compressed size is larger
+    auto const write_compressed    = compressed_data_size != 0 and compression_error[warp_id] == 0;
     chunks[chunk_id].is_compressed = write_compressed;
     chunks[chunk_id].bfr_size      = uncompressed_data_size;
     chunks[chunk_id].compressed_size =
