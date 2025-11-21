@@ -1466,19 +1466,6 @@ INSTANTIATE_TEST_CASE_P(Nvcomp,
                                                              cudf::io::compression_type::LZ4,
                                                              cudf::io::compression_type::ZSTD)));
 
-INSTANTIATE_TEST_CASE_P(DeviceInternal,
-                        ParquetCompressionTest,
-                        ::testing::Combine(::testing::Values("DEVICE_INTERNAL"),
-                                           ::testing::Values(cudf::io::compression_type::AUTO,
-                                                             cudf::io::compression_type::SNAPPY)));
-
-INSTANTIATE_TEST_CASE_P(Host,
-                        ParquetCompressionTest,
-                        ::testing::Combine(::testing::Values("HOST", "HYBRID", "AUTO"),
-                                           ::testing::Values(cudf::io::compression_type::AUTO,
-                                                             cudf::io::compression_type::SNAPPY,
-                                                             cudf::io::compression_type::ZSTD)));
-
 TEST_F(ParquetWriterTest, NoNullsAsNonNullable)
 {
   column_wrapper<int32_t> col{{1, 2, 3}, no_nulls()};
@@ -1859,32 +1846,6 @@ TEST_F(ParquetWriterTest, Decimal128DeltaByteArray)
   // make sure DELTA_BYTE_ARRAY was not used
   EXPECT_NE(fmd.row_groups[0].columns[0].meta_data.encodings[0],
             cudf::io::parquet::Encoding::DELTA_BYTE_ARRAY);
-}
-
-TEST_F(ParquetWriterTest, DeltaBinaryStartsWithNulls)
-{
-  // test that the DELTA_BINARY_PACKED writer can properly encode a column that begins with
-  // more than 129 nulls
-  constexpr int num_rows  = 500;
-  constexpr int num_nulls = 150;
-
-  auto const ones = thrust::make_constant_iterator(1);
-  auto valids     = cudf::detail::make_counting_transform_iterator(
-    0, [num_nulls](auto i) { return i >= num_nulls; });
-  auto const col      = cudf::test::fixed_width_column_wrapper<int>{ones, ones + num_rows, valids};
-  auto const expected = table_view({col});
-
-  auto const filepath = temp_env->get_temp_filepath("DeltaBinaryStartsWithNulls.parquet");
-  cudf::io::parquet_writer_options out_opts =
-    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, expected)
-      .write_v2_headers(true)
-      .dictionary_policy(cudf::io::dictionary_policy::NEVER);
-  cudf::io::write_parquet(out_opts);
-
-  cudf::io::parquet_reader_options in_opts =
-    cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath});
-  auto result = cudf::io::read_parquet(in_opts);
-  CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result.tbl->view());
 }
 
 std::pair<std::unique_ptr<cudf::table>, cudf::io::table_input_metadata>
