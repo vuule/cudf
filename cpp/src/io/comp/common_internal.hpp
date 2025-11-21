@@ -60,7 +60,7 @@ constexpr double default_host_device_compression_cost_ratio = 64;
     case compression_type::GZIP: return nvcomp::compression_type::GZIP;
     case compression_type::LZ4: return nvcomp::compression_type::LZ4;
     case compression_type::SNAPPY:
-      return use_snappy_cascade() ? nvcomp::compression_type::ZSTD
+      return use_snappy_cascade() ? nvcomp::compression_type::CASCADE
                                   : nvcomp::compression_type::SNAPPY;
     case compression_type::ZLIB: return nvcomp::compression_type::DEFLATE;
     case compression_type::ZSTD: return nvcomp::compression_type::ZSTD;

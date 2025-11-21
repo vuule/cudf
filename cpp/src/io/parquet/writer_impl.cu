@@ -12,6 +12,7 @@
 #include "compact_protocol_reader.hpp"
 #include "compact_protocol_writer.hpp"
 #include "io/comp/common.hpp"
+#include "io/comp/common_internal.hpp"
 #include "io/comp/compression.hpp"
 #include "io/parquet/parquet_gpu.hpp"
 #include "io/statistics/column_statistics.cuh"
