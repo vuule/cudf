@@ -273,9 +273,14 @@ hybrid_scan_reader_impl::filter_row_groups_with_dictionary_pages(
   auto decompressed_dictionary_page_data = std::optional<rmm::device_buffer>{};
   if (has_compressed_data) {
     // Use the `decompress_page_data` utility to decompress dictionary pages (passed as pass_pages)
-    decompressed_dictionary_page_data =
-      std::get<0>(parquet::detail::decompress_page_data(chunks, pages, {}, {}, stream, mr));
+    auto [decomp_data, unused_subpass_data, comp_copy, unused_subpass_comp] =
+      parquet::detail::decompress_page_data(chunks, pages, {}, {}, stream, mr);
+    decompressed_dictionary_page_data = std::move(decomp_data);
+    // Keep compressed copy alive until function returns - some pages may still reference it
+    auto compressed_page_copy = std::move(comp_copy);
     pages.host_to_device_async(stream);
+    // Use the variable to prevent it from being optimized away
+    (void)compressed_page_copy;
   }
 
   // Filter row groups using dictionary pages

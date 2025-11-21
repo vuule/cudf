@@ -31,6 +31,11 @@
 #include <iostream>
 #include <numeric>
 
+// Forward declaration for nvcomp alignment function
+namespace cudf::io::detail::nvcomp {
+size_t decompress_required_alignment(compression_type compression);
+}
+
 namespace cudf::io::parquet::detail {
 
 using cudf::io::detail::codec_exec_result;
@@ -445,13 +450,62 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
   return splits;
 }
 
-[[nodiscard]] std::pair<rmm::device_buffer, rmm::device_buffer> decompress_page_data(
-  host_span<ColumnChunkDesc const> chunks,
-  host_span<PageInfo> pass_pages,
-  host_span<PageInfo> subpass_pages,
-  host_span<bool const> subpass_page_mask,
-  rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
+namespace {
+
+[[nodiscard]] rmm::device_buffer copy_pages_to_buffer(host_span<PageInfo> pages,
+                                                      rmm::cuda_stream_view stream,
+                                                      rmm::device_async_resource_ref mr)
+{
+  auto const required_alignment = 8ul;
+  auto const total_size =
+    std::accumulate(pages.begin(), pages.end(), size_t{0}, [](size_t total, PageInfo const& page) {
+      auto const size = static_cast<size_t>(std::max(page.compressed_page_size, 0));
+      total           = cudf::util::round_up_safe(total, required_alignment);
+      return total + size;
+    });
+
+  rmm::device_buffer buffer(total_size, stream, mr);
+  if (total_size == 0) { return buffer; }
+
+  auto inputs =
+    cudf::detail::make_empty_host_vector<device_span<uint8_t const>>(pages.size(), stream);
+  auto outputs = cudf::detail::make_empty_host_vector<device_span<uint8_t>>(pages.size(), stream);
+
+  size_t offset = 0;
+  for (auto& page : pages) {
+    offset          = cudf::util::round_up_safe(offset, required_alignment);
+    auto const size = static_cast<size_t>(std::max(page.compressed_page_size, 0));
+    auto const src  = page.page_data;
+    auto const dst  = static_cast<uint8_t*>(buffer.data()) + offset;
+    page.page_data  = dst;
+    if (size == 0) { continue; }
+    inputs.push_back({src, size});
+    outputs.push_back({dst, size});
+    offset += size;
+  }
+
+  if (not inputs.empty()) {
+    auto const d_inputs = cudf::detail::make_device_uvector_async(
+      inputs, stream, cudf::get_current_device_resource_ref());
+    auto const d_outputs = cudf::detail::make_device_uvector_async(
+      outputs, stream, cudf::get_current_device_resource_ref());
+    cudf::io::detail::gpu_copy_uncompressed_blocks(d_inputs, d_outputs, stream);
+  }
+  stream.synchronize();
+
+  return buffer;
+}
+
+}  // namespace
+
+[[nodiscard]] std::
+  tuple<rmm::device_buffer, rmm::device_buffer, rmm::device_buffer, rmm::device_buffer>
+  decompress_page_data(host_span<ColumnChunkDesc const> chunks,
+                       host_span<PageInfo> pass_pages,
+                       host_span<PageInfo> subpass_pages,
+                       host_span<bool const> subpass_page_mask,
+                       rmm::cuda_stream_view stream,
+                       rmm::device_async_resource_ref mr)
 {
   CUDF_FUNC_RANGE();
 
@@ -478,12 +532,23 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
                  "Unsupported Parquet compression type: " + parquet_compression_name(chunk.codec));
   }
 
+  auto pass_comp_pages_copy    = copy_pages_to_buffer(pass_pages, stream, mr);
+  auto subpass_comp_pages_copy = copy_pages_to_buffer(subpass_pages, stream, mr);
+
+  // Get alignment requirement for decompression output buffers
+  auto const required_alignment = 8ul;
+
   size_t total_pass_decomp_size = 0;
+  size_t num_pass_pages         = 0;
   for (auto& codec : codecs) {
     // Use an empty span as pass page mask as we don't want to filter out dictionary pages
     codec.add_pages(chunks, pass_pages, codec_stats::page_selection::DICT_PAGES, {});
     total_pass_decomp_size += codec.total_decomp_size;
+    num_pass_pages += codec.num_pages;
   }
+  // Add padding for alignment between pages
+  total_pass_decomp_size +=
+    (num_pass_pages > 0 ? (num_pass_pages - 1) : 0) * (required_alignment - 1);
 
   // Total number of pages to decompress, including both pass and subpass pages
   size_t num_comp_pages    = 0;
@@ -495,6 +560,8 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
     total_decomp_size += codec.total_decomp_size;
     num_comp_pages += codec.num_pages;
   }
+  // Add padding for alignment between pages
+  total_decomp_size += (num_comp_pages > 0 ? (num_comp_pages - 1) : 0) * (required_alignment - 1);
 
   // Dispatch batches of pages to decompress for each codec.
   // Buffer needs to be padded, required by `gpuDecodePageData`.
@@ -537,6 +604,8 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
       auto const is_page_compressed = (page.flags & PAGEINFO_FLAGS_V2) ? page.is_compressed : true;
       if (is_page_needed && chunks[page.chunk_idx].codec == codec.compression_type &&
           (page.flags & PAGEINFO_FLAGS_DICTIONARY) == select_dict_pages and is_page_compressed) {
+        // Align decomp_offset to satisfy nvCOMP alignment requirements
+        decomp_offset       = cudf::util::round_up_safe(decomp_offset, required_alignment);
         auto const dst_base = static_cast<uint8_t*>(decomp_data) + decomp_offset;
         // offset will only be non-zero for V2 pages
         auto const offset =
@@ -628,7 +697,13 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
                    [] __device__(auto const& res) { return res.status == codec_status::SUCCESS; }),
     "Error during decompression");
 
-  return {std::move(pass_decomp_pages), std::move(subpass_decomp_pages)};
+  // Return both decompressed data and compressed copies.
+  // The compressed copies must be kept alive because some pages may still reference them
+  // (e.g., uncompressed pages or pages that weren't selected for decompression).
+  return {std::move(pass_decomp_pages),
+          std::move(subpass_decomp_pages),
+          std::move(pass_comp_pages_copy),
+          std::move(subpass_comp_pages_copy)};
 }
 
 void detect_malformed_pages(device_span<PageInfo const> pages,

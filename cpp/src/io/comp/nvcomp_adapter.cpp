@@ -577,6 +577,32 @@ void batched_decompress(compression_type compression,
   CUDF_EXPECTS(max_total_uncomp_size > 0, "max_total_uncomp_size must be greater than 0");
   CUDF_EXPECTS(max_uncomp_chunk_size > 0, "max_uncomp_chunk_size must be greater than 0");
 
+  auto const required_alignment = 8ul;
+  auto const h_inputs           = cudf::detail::make_host_vector(inputs, stream);
+  auto const h_outputs          = cudf::detail::make_host_vector(outputs, stream);
+
+  // Check input buffer alignment
+  for (size_t i = 0; i < h_inputs.size(); ++i) {
+    auto const& buffer = h_inputs[i];
+    if (buffer.size() > 0 && !is_aligned(buffer.data(), required_alignment)) {
+      CUDF_FAIL("Input buffer " + std::to_string(i) + " is misaligned: address=" +
+                std::to_string(reinterpret_cast<std::uintptr_t>(buffer.data())) +
+                ", size=" + std::to_string(buffer.size()) +
+                ", required_alignment=" + std::to_string(required_alignment));
+    }
+  }
+
+  // Check output buffer alignment
+  for (size_t i = 0; i < h_outputs.size(); ++i) {
+    auto const& buffer = h_outputs[i];
+    if (buffer.size() > 0 && !is_aligned(buffer.data(), required_alignment)) {
+      CUDF_FAIL("Output buffer " + std::to_string(i) + " is misaligned: address=" +
+                std::to_string(reinterpret_cast<std::uintptr_t>(buffer.data())) +
+                ", size=" + std::to_string(buffer.size()) +
+                ", required_alignment=" + std::to_string(required_alignment));
+    }
+  }
+
   auto const num_chunks = inputs.size();
 
   // cuDF inflate inputs converted to nvcomp inputs

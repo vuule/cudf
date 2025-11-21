@@ -81,6 +81,7 @@ struct subpass_intermediate_data {
   subpass_intermediate_data& operator=(subpass_intermediate_data&&)      = default;
 
   rmm::device_buffer decomp_page_data;
+  rmm::device_buffer comp_page_copy;  // Copy of compressed page data for uncompressed pages
 
   rmm::device_buffer level_decode_data{};
   cudf::detail::hostdevice_span<PageInfo> pages{};
@@ -149,6 +150,7 @@ struct pass_intermediate_data {
   rmm::device_uvector<size_type> page_offsets{0, cudf::get_default_stream()};
 
   rmm::device_buffer decomp_dict_data{0, cudf::get_default_stream()};
+  rmm::device_buffer comp_page_copy{0, cudf::get_default_stream()};  // Copy of compressed page data
   rmm::device_uvector<size_t> decomp_scratch_sizes{0, cudf::get_default_stream()};
   rmm::device_uvector<size_t> string_offset_sizes{0, cudf::get_default_stream()};
   rmm::device_uvector<string_index_pair> str_dict_index{0, cudf::get_default_stream()};

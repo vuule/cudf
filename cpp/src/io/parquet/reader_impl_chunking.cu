@@ -341,7 +341,7 @@ void reader_impl::setup_next_subpass(read_mode mode)
   // decompress the data pages in this subpass; also decompress the dictionary pages in this pass,
   // if this is the first subpass in the pass
   if (pass.has_compressed_data) {
-    auto [pass_data, subpass_data] =
+    auto [pass_data, subpass_data, pass_comp_copy, subpass_comp_copy] =
       decompress_page_data(pass.chunks,
                            is_first_subpass ? pass.pages : host_span<PageInfo>{},
                            subpass.pages,
@@ -351,10 +351,12 @@ void reader_impl::setup_next_subpass(read_mode mode)
 
     if (is_first_subpass) {
       pass.decomp_dict_data = std::move(pass_data);
+      pass.comp_page_copy   = std::move(pass_comp_copy);
       pass.pages.host_to_device_async(_stream);
     }
 
     subpass.decomp_page_data = std::move(subpass_data);
+    subpass.comp_page_copy   = std::move(subpass_comp_copy);
     subpass.pages.host_to_device_async(_stream);
   }
 

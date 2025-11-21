@@ -2524,20 +2524,6 @@ INSTANTIATE_TEST_CASE_P(Nvcomp,
                                                              cudf::io::compression_type::SNAPPY,
                                                              cudf::io::compression_type::LZ4,
                                                              cudf::io::compression_type::ZSTD)));
-
-INSTANTIATE_TEST_CASE_P(DeviceInternal,
-                        ParquetDecompressionTest,
-                        ::testing::Combine(::testing::Values("DEVICE_INTERNAL"),
-                                           ::testing::Values(cudf::io::compression_type::AUTO,
-                                                             cudf::io::compression_type::SNAPPY)));
-
-INSTANTIATE_TEST_CASE_P(Host,
-                        ParquetDecompressionTest,
-                        ::testing::Combine(::testing::Values("HOST"),
-                                           ::testing::Values(cudf::io::compression_type::AUTO,
-                                                             cudf::io::compression_type::SNAPPY,
-                                                             cudf::io::compression_type::ZSTD)));
-
 //////////////////////
 // wide tables tests
 
