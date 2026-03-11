@@ -396,6 +396,7 @@ class RunConfig:
     fallback_mode: str | None = None
     validation_method: ValidationMethod | None = None
     io_mode: Literal["cold", "lukewarm", "hot"] = "lukewarm"
+    cache_dir: Path | None = None
 
     def __post_init__(self) -> None:  # noqa: D105
         if self.gather_shuffle_stats and self.shuffle != "rapidsmpf":
@@ -543,12 +544,15 @@ class RunConfig:
             fallback_mode=args.fallback_mode,
             validation_method=validation_method,
             io_mode=args.io_mode,
+            cache_dir=args.cache_dir,
         )
 
     def serialize(self, engine: pl.GPUEngine | None) -> dict:
         """Serialize the run config to a dictionary."""
         result = dataclasses.asdict(self)
         result["run_id"] = str(self.run_id)
+        if result.get("cache_dir") is not None:
+            result["cache_dir"] = str(result["cache_dir"])
 
         if engine is not None:
             config_options = ConfigOptions.from_polars_engine(engine)
@@ -1274,6 +1278,16 @@ def build_parser(num_queries: int = 22) -> argparse.ArgumentParser:
             - raise  : Raise an exception
             - silent : Silently fall back to single partition"""),
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help=textwrap.dedent("""\
+            Directory for cudftable format cache files.
+            When set, tables are cached as cudftable files for faster
+            re-reads across iterations. On cache miss, parquet is read
+            and the result is written to the cache directory."""),
+    )
 
     return parser
 
@@ -1606,6 +1620,10 @@ def run_polars(
     """Run the queries using the given benchmark and executor options."""
     vars(args).update({"query_set": benchmark.name})
     run_config = RunConfig.from_args(args)
+    if run_config.cache_dir is not None:
+        from cudf_polars.dsl.ir import set_scan_cache_dir
+
+        set_scan_cache_dir(run_config.cache_dir)
     validation_failures: list[int] = []
     query_failures: list[tuple[int, int]] = []
 

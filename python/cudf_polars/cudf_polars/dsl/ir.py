@@ -14,6 +14,7 @@ can be considered as functions:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import itertools
 import json
 import random
@@ -402,6 +403,86 @@ def _prepare_parquet_predicate(
             predicate, _parquet_physical_types(paths, cols)
         )
     return predicate
+
+
+_SCAN_CACHE_DIR: Path | None = None
+_SCAN_CACHE_SKIP: set[str] = set()
+
+
+def set_scan_cache_dir(cache_dir: str | Path | None) -> None:
+    """Configure a directory for caching parquet scan results as cudftable files."""
+    global _SCAN_CACHE_DIR
+    _SCAN_CACHE_DIR = Path(cache_dir) if cache_dir is not None else None
+    _SCAN_CACHE_SKIP.clear()
+
+
+_COMMUTATIVE_OPS = frozenset({
+    plc.binaryop.BinaryOperator.NULL_LOGICAL_AND,
+    plc.binaryop.BinaryOperator.NULL_LOGICAL_OR,
+})
+
+
+def _collect_commutative_leaves(
+    node: expr.Expr, op: plc.binaryop.BinaryOperator
+) -> list[expr.Expr]:
+    """Flatten a chain of the same commutative BinOp into leaf terms."""
+    if isinstance(node, expr.BinOp) and node.op == op:
+        left, right = node.children
+        return _collect_commutative_leaves(left, op) + _collect_commutative_leaves(
+            right, op
+        )
+    return [node]
+
+
+def _stable_expr_str(node: expr.Expr | expr.NamedExpr | None) -> str:
+    """Serialize an expression tree into a deterministic string.
+
+    Unlike repr(), this avoids any object-identity-dependent components
+    (e.g. id()-based hashes in Literal.get_hashable) by walking the
+    tree and using only type names, polars dtype reprs, and Python
+    scalar reprs — all of which are stable across object re-creation.
+
+    For commutative AND/OR chains, the tree is flattened and leaf terms
+    are sorted so that different associativity groupings produce the
+    same string.
+    """
+    if node is None:
+        return ""
+    if isinstance(node, expr.NamedExpr):
+        return _stable_expr_str(node.value)
+
+    if isinstance(node, expr.BinOp) and node.op in _COMMUTATIVE_OPS:
+        leaves = _collect_commutative_leaves(node, node.op)
+        leaf_strs = sorted(_stable_expr_str(leaf) for leaf in leaves)
+        return f"BinOp({repr(node.dtype.polars_type)};{repr(node.op)},{','.join(leaf_strs)})"
+
+    parts = []
+    for attr_name in type(node)._non_child:
+        val = getattr(node, attr_name)
+        if hasattr(val, "polars_type"):
+            parts.append(repr(val.polars_type))
+        else:
+            parts.append(repr(val))
+    children_str = ",".join(_stable_expr_str(c) for c in node.children)
+    return f"{type(node).__name__}({';'.join(parts)},{children_str})"
+
+
+def _scan_cache_key(
+    paths: list[str],
+    with_columns: list[str] | None,
+    predicate: expr.NamedExpr | None,
+    skip_rows: int,
+    n_rows: int,
+) -> str:
+    """Compute a deterministic cache key for a parquet scan."""
+    key_parts = (
+        tuple(sorted(paths)),
+        tuple(sorted(with_columns)) if with_columns is not None else (),
+        _stable_expr_str(predicate),
+        skip_rows,
+        n_rows,
+    )
+    return hashlib.sha256(repr(key_parts).encode()).hexdigest()[:16]
 
 
 class Scan(IR):
@@ -807,77 +888,171 @@ class Scan(IR):
                     ),
                     stream=stream,
                 )
-            parquet_reader_options = (
-                plc.io.parquet.ParquetReaderOptions.builder(plc.io.SourceInfo(paths))
-                .decimal_width(plc.TypeId.DECIMAL128)
-                .build()
-            )
 
-            if with_columns is not None:
-                parquet_reader_options.set_column_names(with_columns)
-            if filters is not None:
-                parquet_reader_options.set_filter(filters)
-            if n_rows != -1:
-                parquet_reader_options.set_num_rows(n_rows)
-            if skip_rows != 0:
-                parquet_reader_options.set_skip_rows(skip_rows)
-            if parquet_options.chunked:
-                reader = plc.io.parquet.ChunkedParquetReader(
-                    parquet_reader_options,
-                    chunk_read_limit=parquet_options.chunk_read_limit,
-                    pass_read_limit=parquet_options.pass_read_limit,
-                    stream=stream,
+            cache_key: str | None = None
+            can_cache = (
+                _SCAN_CACHE_DIR is not None
+                and include_file_paths is None
+                and row_index is None
+            )
+            if can_cache:
+                cache_key = _scan_cache_key(
+                    paths, with_columns, predicate, skip_rows, n_rows
                 )
-                chunk = reader.read_chunk()
-                # TODO: Nested column names
-                names = chunk.column_names(include_children=False)
-                concatenated_columns = chunk.tbl.columns()
-                while reader.has_next():
-                    columns = reader.read_chunk().tbl.columns()
-                    # Discard columns while concatenating to reduce memory footprint.
-                    # Reverse order to avoid O(n^2) list popping cost.
-                    for i in range(len(concatenated_columns) - 1, -1, -1):
-                        concatenated_columns[i] = plc.concatenate.concatenate(
-                            [concatenated_columns[i], columns.pop()], stream=stream
+                if cache_key in _SCAN_CACHE_SKIP:
+                    cache_key = None
+
+            # --- Cache hit path ---
+            cache_hit = False
+            if cache_key is not None:
+                assert _SCAN_CACHE_DIR is not None
+                cache_file = _SCAN_CACHE_DIR / f"{cache_key}.cudftable"
+                meta_file = _SCAN_CACHE_DIR / f"{cache_key}.meta"
+                if cache_file.exists() and meta_file.exists():
+                    try:
+                        t0 = time.monotonic()
+                        source = plc.io.SourceInfo([str(cache_file)])
+                        tbl = plc.io.experimental.read_cudftable(source)
+                        meta = json.loads(meta_file.read_text())
+                        col_names = meta["columns"]
+                        df = DataFrame.from_table(
+                            tbl,
+                            col_names,
+                            [schema[name] for name in col_names],
+                            stream=stream,
                         )
-                num_rows = (
-                    cls._get_parquet_row_count_from_metadata(paths, skip_rows, n_rows)
-                    if not names
-                    else None
-                )
-                df = DataFrame.from_table(
-                    plc.Table(concatenated_columns),
-                    names=names,
-                    dtypes=[schema[name] for name in names],
-                    stream=stream,
-                    num_rows=num_rows,
-                )
-                if include_file_paths is not None:
-                    df = Scan.add_file_paths(
-                        include_file_paths, paths, chunk.num_rows_per_source, df
+                        cache_hit = True
+                        print(
+                            f"  [cache hit]  {cache_key} "
+                            f"({', '.join(col_names[:3])}...): "
+                            f"{time.monotonic() - t0:.3f}s",
+                            flush=True,
+                        )
+                        if filters is not None:
+                            return df
+                    except MemoryError:
+                        print(
+                            f"  [cache OOM]  {cache_key}: "
+                            "falling back to parquet",
+                            flush=True,
+                        )
+                        _SCAN_CACHE_SKIP.add(cache_key)
+                        cache_key = None
+
+            # --- Normal parquet read (cache miss or no caching) ---
+            if not cache_hit:
+                parquet_reader_options = (
+                    plc.io.parquet.ParquetReaderOptions.builder(
+                        plc.io.SourceInfo(paths)
                     )
-            else:
-                tbl_w_meta = plc.io.parquet.read_parquet(
-                    parquet_reader_options, stream=stream
+                    .decimal_width(plc.TypeId.DECIMAL128)
+                    .build()
                 )
-                # TODO: consider nested column names?
-                col_names = tbl_w_meta.column_names(include_children=False)
-                num_rows = (
-                    cls._get_parquet_row_count_from_metadata(paths, skip_rows, n_rows)
-                    if not col_names
-                    else None
-                )
-                df = DataFrame.from_table(
-                    tbl_w_meta.tbl,
-                    col_names,
-                    [schema[name] for name in col_names],
-                    stream=stream,
-                    num_rows=num_rows,
-                )
-                if include_file_paths is not None:
-                    df = Scan.add_file_paths(
-                        include_file_paths, paths, tbl_w_meta.num_rows_per_source, df
+
+                if with_columns is not None:
+                    parquet_reader_options.set_column_names(with_columns)
+                if filters is not None:
+                    parquet_reader_options.set_filter(filters)
+                if n_rows != -1:
+                    parquet_reader_options.set_num_rows(n_rows)
+                if skip_rows != 0:
+                    parquet_reader_options.set_skip_rows(skip_rows)
+                if parquet_options.chunked:
+                    reader = plc.io.parquet.ChunkedParquetReader(
+                        parquet_reader_options,
+                        chunk_read_limit=parquet_options.chunk_read_limit,
+                        pass_read_limit=parquet_options.pass_read_limit,
+                        stream=stream,
                     )
+                    chunk = reader.read_chunk()
+                    # TODO: Nested column names
+                    names = chunk.column_names(include_children=False)
+                    concatenated_columns = chunk.tbl.columns()
+                    while reader.has_next():
+                        columns = reader.read_chunk().tbl.columns()
+                        for i in range(len(concatenated_columns) - 1, -1, -1):
+                            concatenated_columns[i] = plc.concatenate.concatenate(
+                                [concatenated_columns[i], columns.pop()],
+                                stream=stream,
+                            )
+                    num_rows = (
+                        cls._get_parquet_row_count_from_metadata(
+                            paths, skip_rows, n_rows
+                        )
+                        if not names
+                        else None
+                    )
+                    df = DataFrame.from_table(
+                        plc.Table(concatenated_columns),
+                        names=names,
+                        dtypes=[schema[name] for name in names],
+                        stream=stream,
+                        num_rows=num_rows,
+                    )
+                    if include_file_paths is not None:
+                        df = Scan.add_file_paths(
+                            include_file_paths,
+                            paths,
+                            chunk.num_rows_per_source,
+                            df,
+                        )
+                else:
+                    tbl_w_meta = plc.io.parquet.read_parquet(
+                        parquet_reader_options, stream=stream
+                    )
+                    # TODO: consider nested column names?
+                    col_names = tbl_w_meta.column_names(include_children=False)
+                    num_rows = (
+                        cls._get_parquet_row_count_from_metadata(
+                            paths, skip_rows, n_rows
+                        )
+                        if not col_names
+                        else None
+                    )
+                    df = DataFrame.from_table(
+                        tbl_w_meta.tbl,
+                        col_names,
+                        [schema[name] for name in col_names],
+                        stream=stream,
+                        num_rows=num_rows,
+                    )
+                    if include_file_paths is not None:
+                        df = Scan.add_file_paths(
+                            include_file_paths,
+                            paths,
+                            tbl_w_meta.num_rows_per_source,
+                            df,
+                        )
+
+                # --- Cache write after successful parquet read ---
+                if cache_key is not None and _SCAN_CACHE_DIR is not None:
+                    try:
+                        t0 = time.monotonic()
+                        _SCAN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                        cache_file = _SCAN_CACHE_DIR / f"{cache_key}.cudftable"
+                        meta_file = _SCAN_CACHE_DIR / f"{cache_key}.meta"
+                        sink = plc.io.SinkInfo([str(cache_file)])
+                        plc.io.experimental.write_cudftable(df.table, sink)
+                        cache_col_names = [c.name for c in df.columns]
+                        meta_file.write_text(
+                            json.dumps({"columns": cache_col_names})
+                        )
+                        print(
+                            f"  [cache miss] {cache_key} "
+                            f"({', '.join(cache_col_names[:3])}...): "
+                            f"write {time.monotonic() - t0:.3f}s",
+                            flush=True,
+                        )
+                    except MemoryError:
+                        print(
+                            f"  [cache skip] {cache_key}: "
+                            "too large to pack",
+                            flush=True,
+                        )
+                        _SCAN_CACHE_SKIP.add(cache_key)
+                        for f in (cache_file, meta_file):
+                            f.unlink(missing_ok=True)
+
             if filters is not None:
                 # Mask must have been applied.
                 return df

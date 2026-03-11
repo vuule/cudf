@@ -235,11 +235,6 @@ class SplitScan(IR):
         ).rowgroup_metadata()
         total_row_groups = len(rowgroup_metadata)
         if total_splits <= total_row_groups:
-            # We have enough row-groups in the file to align
-            # all "total_splits" of our reads with row-group
-            # boundaries. Calculate which row-groups to include
-            # in the current read, and use metadata to translate
-            # the row-group indices to "skip_rows" and "n_rows".
             rg_stride = total_row_groups // total_splits
             skip_rgs = rg_stride * split_index
             skip_rows = sum(rg["num_rows"] for rg in rowgroup_metadata[:skip_rgs])
@@ -248,19 +243,13 @@ class SplitScan(IR):
                 for rg in rowgroup_metadata[skip_rgs : skip_rgs + rg_stride]
             )
         else:
-            # There are not enough row-groups to align
-            # all "total_splits" of our reads with row-group
-            # boundaries. Use metadata to directly calculate
-            # "skip_rows" and "n_rows" for the current read.
             total_rows = sum(rg["num_rows"] for rg in rowgroup_metadata)
             n_rows = total_rows // total_splits
             skip_rows = n_rows * split_index
 
-        # Last split should always read to end of file
         if split_index == (total_splits - 1):
             n_rows = -1
 
-        # Perform the partial read
         return Scan.do_evaluate(
             schema,
             typ,
