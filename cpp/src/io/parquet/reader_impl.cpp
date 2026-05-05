@@ -389,6 +389,33 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
   // the delta_temp_buf in the subpass struct can be freed now
   subpass.delta_temp_buf.release();
 
+  // Free per-subpass scratch buffers if this is the last output chunk in the subpass.
+  // For READ_ALL there is always exactly one output chunk, so we always release here.
+  // For CHUNKED_READ, only release on the final chunk; intermediate chunks still need
+  // the pre-decoded levels for compute_page_sizes / compute_page_string_sizes_pass1
+  // and the string offset state for compute_page_string_sizes_pass1 in subsequent
+  // output chunks.
+  bool const is_last_output_chunk =
+    subpass.current_output_chunk + 1 >= subpass.output_chunk_read_info.size();
+  // True iff this subpass exhausts the rows in the current pass. Used to release
+  // pass-scoped buffers whose last consumer is the current decode.
+  // pass.processed_rows is updated only between subpasses (see comment in
+  // reader_impl_chunking.hpp), so this comparison correctly identifies the last
+  // subpass of the pass.
+  bool const is_last_subpass_of_pass = pass.processed_rows + subpass.num_rows >= pass.num_rows;
+  if (is_last_output_chunk) {
+    subpass.level_decode_data          = rmm::device_buffer(0, _stream);
+    subpass.string_offset_buffer       = rmm::device_uvector<uint32_t>(0, _stream);
+    subpass.page_string_offset_indices = rmm::device_uvector<size_t>(0, _stream);
+
+    // Release the pass-scoped string dictionary index after the last decode of the
+    // last subpass of the pass. Each subpass's chunks alias into this buffer via
+    // ColumnChunkDesc::str_dict_index, so it must outlive every subpass in the pass.
+    if (is_last_subpass_of_pass) {
+      pass.str_dict_index = rmm::device_uvector<string_index_pair>(0, _stream);
+    }
+  }
+
   subpass.pages.device_to_host_async(_stream);
   page_nesting.device_to_host_async(_stream);
   page_nesting_decode.device_to_host_async(_stream);
@@ -473,6 +500,17 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
       }
       out_buf.null_count() += pndi[l_idx].null_count;
     }
+  }
+
+  // Release per-subpass page nesting buffers on the last output chunk. The
+  // device->host copies queued at lines above were synchronized via
+  // error_code.value_sync(_stream), and the host-side reads (above) have
+  // completed, so it is safe to drop both host and device storage now. The
+  // next subpass will reallocate via allocate_nesting_info().
+  if (is_last_output_chunk) {
+    subpass.page_nesting_info = cudf::detail::hostdevice_vector<PageNestingInfo>(0, _stream);
+    subpass.page_nesting_decode_info =
+      cudf::detail::hostdevice_vector<PageNestingDecodeInfo>(0, _stream);
   }
 
   _stream.synchronize();

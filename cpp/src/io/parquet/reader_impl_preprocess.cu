@@ -899,6 +899,12 @@ void reader_impl::preprocess_subpass_pages(read_mode mode, size_t chunk_read_lim
 
   // now split up the output into chunks as necessary
   compute_output_chunks_for_subpass();
+
+  // page_src_index is only consumed by set_subpass_page_mask() and the
+  // update_pass_num_rows / update_subpass_chunk_row functors above. After this
+  // point nothing else reads it for the lifetime of the subpass, so release it
+  // early to reduce peak device memory usage.
+  subpass.page_src_index = rmm::device_uvector<size_t>(0, _stream);
 }
 
 void reader_impl::allocate_columns(read_mode mode, size_t skip_rows, size_t num_rows)
