@@ -853,16 +853,28 @@ struct segmented_valid_cnt_input {
   std::vector<size_type> indices;
 };
 
-// Storage of one (stripe, stream) pair within an encoded arena.
+/**
+ * @brief Storage of one (stripe, stream) pair within an encoded arena.
+ */
 struct extent_info {
-  size_t size{0};    // upper bound on what the encoder writes
-  size_t offset{0};  // byte offset within the arena
-  bool has_slack{false};
-  bool is_transient{false};  // placed in `encoded_data::transient_buffer`
+  size_t size{0};            ///< upper bound on what the encoder writes
+  size_t offset{0};          ///< byte offset within the arena
+  bool has_slack{false};     ///< whether `size` is a strict upper bound rather than exact
+  bool is_transient{false};  ///< placed in `encoded_data::transient_buffer`
 };
 
-// Returns the encoded data, along with a [stripe][strm_id] description of every extent, flattened
-// with `streams.size()` elements per row.
+/**
+ * @brief Encodes the columns' data into the ORC stream layout.
+ *
+ * @param[in] orc_table Table to be written, with ORC-related information
+ * @param[in] dec_chunk_sizes Sizes of encoded decimal elements
+ * @param[in] segmentation stripe and rowgroup ranges
+ * @param[in] streams List of stream descriptors
+ * @param[in] uncomp_block_align Required alignment of the codec's chunks
+ * @param[in] stream CUDA stream used for device memory operations and kernel launches
+ * @return The encoded data, along with a [stripe][strm_id] description of every extent, flattened
+ * with `streams.size()` elements per row
+ */
 std::pair<encoded_data, std::vector<extent_info>> encode_columns(
   orc_table_view const& orc_table,
   encoder_decimal_info&& dec_chunk_sizes,
