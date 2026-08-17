@@ -87,6 +87,11 @@ void BM_segmented_bitmask_and(nvbench::state& state)
   set_throughputs(state);
 }
 
+void BM_segmented_bitmask_and_wide_masks(nvbench::state& state)
+{
+  BM_segmented_bitmask_and(state);
+}
+
 void BM_multi_segment_bitmask_and(nvbench::state& state)
 {
   auto const mask_size_bits = static_cast<size_t>(state.get_int64("mask_size_bits"));
@@ -136,6 +141,15 @@ NVBENCH_BENCH(BM_segmented_bitmask_and)
   .add_int64_axis("num_segments", {100, 1000, 10000})
   .add_int64_axis("expected_masks_per_segment", {4, 8, 16})
   .add_int64_axis("mask_size_bits", {32, 64, 128});
+
+// The number of bits in a null mask is the row count of the table it belongs to, so masks of
+// hundreds of thousands of bits are the common case for the struct null mask reduction that this
+// kernel serves. The axes above are all narrow enough to fit in a handful of words.
+NVBENCH_BENCH(BM_segmented_bitmask_and_wide_masks)
+  .set_name("segmented_bitmask_and_wide_masks")
+  .add_int64_axis("num_segments", {8, 64, 512})
+  .add_int64_axis("expected_masks_per_segment", {4, 8})
+  .add_int64_axis("mask_size_bits", {100000, 1000000});
 
 NVBENCH_BENCH(BM_multi_segment_bitmask_and)
   .set_name("multi_segment_bitmask_and")
