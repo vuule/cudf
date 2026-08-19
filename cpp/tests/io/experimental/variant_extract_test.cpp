@@ -837,6 +837,27 @@ TEST_F(ExtractVariantFieldTest, LargeDictionary100FieldsExtractLast)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
 }
 
+TEST_F(ExtractVariantFieldTest, SortedDictionaryBinarySearch)
+{
+  // 50-entry sorted dictionary ("k00".."k49"); the binary search must find a key beyond the
+  // midpoint and correctly report a miss for a key that is absent.
+  auto const keys        = make_numeric_keys(50);
+  auto const meta        = build_metadata(keys, /*sorted=*/true);
+  auto const val         = build_sequential_int32_object(50);
+  auto col               = wrap_single_variant(meta, val);
+  auto stream            = cudf::test::get_default_stream();
+  auto const int32_dtype = cudf::data_type{cudf::type_id::INT32};
+
+  auto hit =
+    cudf::io::parquet::experimental::extract_variant_field(col, "k37", int32_dtype, stream);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*hit, cudf::test::fixed_width_column_wrapper<int32_t>{37});
+
+  auto miss =
+    cudf::io::parquet::experimental::extract_variant_field(col, "k99", int32_dtype, stream);
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*miss,
+                                 cudf::test::fixed_width_column_wrapper<int32_t>({0}, {false}));
+}
+
 TEST_F(ExtractVariantFieldTest, MetadataOffsetSizeThresholdBoundary)
 {
   // Verifies build_metadata selects 1-byte offsets when total string bytes == 255 (still fits)
