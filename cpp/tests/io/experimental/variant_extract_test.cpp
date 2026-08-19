@@ -547,13 +547,18 @@ inline std::vector<uint8_t> build_metadata(std::vector<std::string> const& keys,
   constexpr uint8_t kVariantMetadataSortedBit = 0x10;
   constexpr int kMetadataOffsetSizeShift      = 6;
   constexpr uint32_t kMaxSingleByteOffsetSum  = 255u;
+  constexpr uint32_t kMaxSingleByteCount      = 255u;
 
   uint32_t total_key_bytes = 0;
   for (auto const& key : keys) {
     total_key_bytes += static_cast<uint32_t>(key.size());
   }
 
-  int const offset_size = (total_key_bytes > kMaxSingleByteOffsetSum) ? 2 : 1;
+  // The dictionary size (keys.size()) is itself written using offset_size bytes, so it must also
+  // be accounted for when choosing the offset width -- otherwise a large all-empty-string
+  // dictionary (small total_key_bytes, but >255 entries) would have its entry count truncated.
+  int const offset_size =
+    (total_key_bytes > kMaxSingleByteOffsetSum || keys.size() > kMaxSingleByteCount) ? 2 : 1;
   std::vector<uint8_t> out{static_cast<uint8_t>(kVariantMetadataVersion |
                                                 (sorted ? kVariantMetadataSortedBit : 0) |
                                                 ((offset_size - 1) << kMetadataOffsetSizeShift))};
@@ -980,6 +985,42 @@ TEST_F(ExtractVariantFieldTest, MetadataOffsetSizeThresholdBoundary)
       cudf::io::parquet::experimental::extract_variant_field(col, "long", int32_dtype, stream);
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got,
                                    cudf::test::fixed_width_column_wrapper<int32_t>{kExpected});
+  }
+}
+
+TEST_F(ExtractVariantFieldTest, MetadataOffsetSizeEntryCountBoundary)
+{
+  // Verifies build_metadata selects 2-byte offsets once the *entry count* crosses 255, even when
+  // total_key_bytes stays tiny -- the dictionary size (keys.size()) is itself written using
+  // offset_size bytes, so a 256-entry dictionary of mostly-empty keys must not have its count
+  // truncated by staying at 1-byte offsets.
+  auto stream                 = cudf::test::get_default_stream();
+  auto const int32_dtype      = cudf::data_type{cudf::type_id::INT32};
+  constexpr int32_t kExpected = 42;
+
+  // Dictionary of `entry_count` keys, all empty except the last, which is "target" at field id
+  // `entry_count - 1`. The value object references only that single field, so field_count / field
+  // ids stay within the 1-byte encoding used by make_variant_object_header() regardless of
+  // dictionary size.
+  auto const test_entry_count = [&](int entry_count) {
+    std::vector<std::string> keys(entry_count - 1, std::string{});
+    keys.emplace_back("target");
+    auto const val =
+      build_single_field_object(static_cast<uint8_t>(entry_count - 1), enc_int32(kExpected));
+    auto col = wrap_single_variant(build_metadata(keys), val);
+    auto got =
+      cudf::io::parquet::experimental::extract_variant_field(col, "target", int32_dtype, stream);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got,
+                                   cudf::test::fixed_width_column_wrapper<int32_t>{kExpected});
+  };
+
+  {
+    SCOPED_TRACE("count=255, 1-byte offsets");
+    test_entry_count(255);
+  }
+  {
+    SCOPED_TRACE("count=256, 2-byte offsets");
+    test_entry_count(256);
   }
 }
 
