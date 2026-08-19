@@ -256,92 +256,42 @@ __device__ cuda::std::optional<size_type> find_key_in_metadata(device_span<uint8
   // Bytes available for dictionary string payloads
   auto const strings_extent = meta_len - strings_base;
 
-  auto const read_offset = [&](size_type i) {
-    return read_uint64(meta, offsets_start + i * offset_size, offset_size);
-  };
-
-  // Helper: build the string for entry i from its already-read start/end offsets, without
-  // bounds-checking strings_extent (callers must validate). Returns nullopt on a bad offset pair.
-  auto const build_entry = [&](uint64_t s, uint64_t e) -> cuda::std::optional<cudf::string_view> {
-    if (e < s || cuda::std::cmp_greater(e, strings_extent)) { return cuda::std::nullopt; }
-    return cudf::string_view{reinterpret_cast<char const*>(meta.data() + strings_base + s),
-                             static_cast<size_type>(e - s)};
-  };
-
-  // Helper: read the string for entry i via two random-access offset reads. Used by the
-  // probe-based searches below, which visit entries out of order.
+  // Helper: read the string for entry i without bounds-checking strings_extent
+  // (callers must validate). Returns nullopt on a bad offset read.
   auto read_entry = [&](size_type i) -> cuda::std::optional<cudf::string_view> {
-    auto const s = read_offset(i);
-    auto const e = read_offset(i + 1);
+    auto const s = read_uint64(meta, offsets_start + i * offset_size, offset_size);
+    auto const e = read_uint64(meta, offsets_start + (i + 1) * offset_size, offset_size);
     if (!s.has_value() || !e.has_value()) { return cuda::std::nullopt; }
-    return build_entry(s.value(), e.value());
+    if (e.value() < s.value() || cuda::std::cmp_greater(e.value(), strings_extent)) {
+      return cuda::std::nullopt;
+    }
+    return cudf::string_view{reinterpret_cast<char const*>(meta.data() + strings_base + s.value()),
+                             static_cast<size_type>(e.value() - s.value())};
   };
 
-  // Not using thrust::lower_bound since it does not propagate entry read failures.
-  //
-  // Consecutive entries share an offset (entry i's end is entry i+1's start), so a sequential
-  // scan only needs to read one new offset per entry instead of two.
-  auto const linear_scan = [&]() -> cuda::std::optional<size_type> {
-    auto start_off = read_offset(0);
-    if (!start_off.has_value()) { return cuda::std::nullopt; }
-    for (size_type i = 0; i < num_entries.value(); ++i) {
-      auto const end_off = read_offset(i + 1);
-      if (!end_off.has_value()) { return cuda::std::nullopt; }
-      auto const entry = build_entry(start_off.value(), end_off.value());
+  // Not using thrust::lower_bound since it does not propagate entry read failures
+  if (is_sorted) {
+    size_type lo = 0;
+    size_type hi = num_entries.value();
+    while (lo < hi) {
+      size_type const mid = lo + (hi - lo) / 2;
+      auto const entry    = read_entry(mid);
       if (!entry.has_value()) { return cuda::std::nullopt; }
-      if (entry.value() == key) { return i; }
-      start_off = end_off;
+      auto const cmp = entry.value().compare(key);
+      if (cmp == 0) { return mid; }
+      if (cmp < 0) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
     }
     return cuda::std::nullopt;
-  };
-
-  if (!is_sorted) { return linear_scan(); }
-
-  // Real dictionaries are typically small (a handful of field names), where a sequential scan
-  // that exits as soon as it finds the key beats a search with per-probe branch overhead and
-  // scattered accesses. Only switch to a probe-based search once the dictionary is large enough
-  // for its O(log N) probe count to actually pay for that overhead.
-  constexpr size_type linear_scan_threshold = 32;
-  size_type const n                         = num_entries.value();
-  if (n <= linear_scan_threshold) { return linear_scan(); }
-
-  // Field paths overwhelmingly resolve to keys near the start of the (sorted) dictionary, where
-  // a linear scan finds the match in O(1) - a plain binary search can't match that, since it
-  // always takes ceil(log2(N)) probes regardless of where the key sits. Check index 0 directly
-  // first, then fall back to galloping (exponential) search: probe at exponentially growing
-  // offsets (1, 3, 7, ...) to bracket the key in O(log(pos)) probes, then binary-search that
-  // bracket. This keeps the O(log N) worst case for keys near the end of a large dictionary while
-  // matching a linear scan's O(1) best case for keys at (or near) the start.
-  auto const entry0 = read_entry(0);
-  if (!entry0.has_value()) { return cuda::std::nullopt; }
-  auto const cmp0 = entry0.value().compare(key);
-  if (cmp0 == 0) { return 0; }
-  if (cmp0 > 0) { return cuda::std::nullopt; }
-
-  size_type bound = 1;
-  size_type prev  = 1;
-  while (bound < n) {
-    auto const entry = read_entry(bound);
-    if (!entry.has_value()) { return cuda::std::nullopt; }
-    auto const cmp = entry.value().compare(key);
-    if (cmp == 0) { return bound; }
-    if (cmp > 0) { break; }
-    prev  = bound + 1;
-    bound = bound * 2 + 1;
   }
-  size_type lo = prev;
-  size_type hi = cuda::std::min(bound, n);
-  while (lo < hi) {
-    size_type const mid = lo + (hi - lo) / 2;
-    auto const entry    = read_entry(mid);
+
+  for (size_type i = 0; i < num_entries.value(); ++i) {
+    auto const entry = read_entry(i);
     if (!entry.has_value()) { return cuda::std::nullopt; }
-    auto const cmp = entry.value().compare(key);
-    if (cmp == 0) { return mid; }
-    if (cmp < 0) {
-      lo = mid + 1;
-    } else {
-      hi = mid;
-    }
+    if (entry.value() == key) { return i; }
   }
   return cuda::std::nullopt;
 }
