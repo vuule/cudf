@@ -461,6 +461,10 @@ NVBENCH_BENCH(bench_variant_extract_nesting)
 // Benchmarks get_variant_field on a flat object, varying the total number of fields and whether
 // the target field is first or last (probes binary search cost). Type is fixed to int32_t to
 // isolate field-lookup overhead; casting is exercised separately by bench_variant_cast.
+// Seed for the "random" field_position axis value, kept fixed so the target field (and thus the
+// benchmark's runtime characteristics) stays deterministic across runs.
+static constexpr auto bench_variant_extract_fields_seed = 564;
+
 static void bench_variant_extract_fields(nvbench::state& state)
 {
   auto stream = cudf::get_default_stream();
@@ -471,7 +475,13 @@ static void bench_variant_extract_fields(nvbench::state& state)
   auto const field_pos_str = state.get_string("field_position");
   auto const hit_rate      = static_cast<int>(state.get_int64("hit_rate"));
 
-  int const target_fid = (field_pos_str == "last") ? (num_fields - 1) : 0;
+  int target_fid = 0;
+  if (field_pos_str == "last") {
+    target_fid = num_fields - 1;
+  } else if (field_pos_str == "random") {
+    std::mt19937 rng{bench_variant_extract_fields_seed};
+    target_fid = std::uniform_int_distribution<int>(0, num_fields - 1)(rng);
+  }
 
   auto const meta_blob = build_metadata(get_dict_keys_for_fields(num_fields));
   auto const leaf      = build_leaf_value(bench_variant_type::INT32);
@@ -506,5 +516,5 @@ NVBENCH_BENCH(bench_variant_extract_fields)
   .set_name("bench_variant_extract_fields")
   .add_int64_axis("num_rows", {32768, 262144, 2097152})
   .add_int64_axis("num_fields", {1, 10, 100})
-  .add_string_axis("field_position", {"first", "last"})
+  .add_string_axis("field_position", {"first", "last", "random"})
   .add_int64_axis("hit_rate", {20, 80});
