@@ -288,10 +288,23 @@ __device__ cuda::std::optional<size_type> find_key_in_metadata(device_span<uint8
     return cuda::std::nullopt;
   }
 
+  // Linear scan: each offset is read once and carried forward as the next entry's start, rather
+  // than re-reading offsets[i] twice (once as offsets[i-1]'s end, once as offsets[i]'s start) via
+  // read_entry().
+  auto start_off = read_uint64(meta, offsets_start, offset_size);
+  if (!start_off.has_value()) { return cuda::std::nullopt; }
   for (size_type i = 0; i < num_entries.value(); ++i) {
-    auto const entry = read_entry(i);
-    if (!entry.has_value()) { return cuda::std::nullopt; }
-    if (entry.value() == key) { return i; }
+    auto const end_off = read_uint64(meta, offsets_start + (i + 1) * offset_size, offset_size);
+    if (!end_off.has_value()) { return cuda::std::nullopt; }
+    if (end_off.value() < start_off.value() ||
+        cuda::std::cmp_greater(end_off.value(), strings_extent)) {
+      return cuda::std::nullopt;
+    }
+    cudf::string_view const entry{
+      reinterpret_cast<char const*>(meta.data() + strings_base + start_off.value()),
+      static_cast<size_type>(end_off.value() - start_off.value())};
+    if (entry == key) { return i; }
+    start_off = end_off;
   }
   return cuda::std::nullopt;
 }

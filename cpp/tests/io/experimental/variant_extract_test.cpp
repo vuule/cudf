@@ -539,7 +539,7 @@ inline cudf::test::structs_column_wrapper wrap_multi_row_variant(
 // Uses 2-byte offsets when total string length exceeds 255 bytes; 1-byte otherwise.
 // Header bits [7:6] = offset_size_minus_one; bit [4] = sorted-strings flag; bits [3:0] = version
 // (1). `sorted` must only be set to true when `keys` is actually in ascending byte order, since
-// the sorted-dictionary search (galloping + binary search) assumes that invariant.
+// the sorted-dictionary binary search assumes that invariant.
 inline std::vector<uint8_t> build_metadata(std::vector<std::string> const& keys,
                                            bool sorted = false)
 {
@@ -835,99 +835,6 @@ TEST_F(ExtractVariantFieldTest, LargeDictionary100FieldsExtractLast)
 
   cudf::test::fixed_width_column_wrapper<int32_t> expected{int32_t{99}};
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
-}
-
-// find_key_in_metadata only takes the galloping/binary-search path for sorted dictionaries with
-// more than 32 entries (linear_scan_threshold); dictionaries at or below that size, or unsorted
-// ones, always use the linear scan instead. These cases exercise both sides of that boundary with
-// the sorted-strings bit set, including hits at the start/middle/end and misses before, after, and
-// between existing keys.
-TEST_F(ExtractVariantFieldTest, SortedDictionaryLinearScanAtThreshold)
-{
-  auto const keys        = make_numeric_keys(32);
-  auto const meta        = build_metadata(keys, /*sorted=*/true);
-  auto const val         = build_sequential_int32_object(32);
-  auto col               = wrap_single_variant(meta, val);
-  auto stream            = cudf::test::get_default_stream();
-  auto const int32_dtype = cudf::data_type{cudf::type_id::INT32};
-
-  auto get = [&](std::string const& key) {
-    return cudf::io::parquet::experimental::extract_variant_field(col, key, int32_dtype, stream);
-  };
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("k00"), cudf::test::fixed_width_column_wrapper<int32_t>{0});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("k16"), cudf::test::fixed_width_column_wrapper<int32_t>{16});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("k31"), cudf::test::fixed_width_column_wrapper<int32_t>{31});
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("zzz"),
-                                 cudf::test::fixed_width_column_wrapper<int32_t>({0}, {false}));
-}
-
-TEST_F(ExtractVariantFieldTest, SortedDictionaryGallopingSearchAboveThreshold)
-{
-  auto const keys        = make_numeric_keys(33);
-  auto const meta        = build_metadata(keys, /*sorted=*/true);
-  auto const val         = build_sequential_int32_object(33);
-  auto col               = wrap_single_variant(meta, val);
-  auto stream            = cudf::test::get_default_stream();
-  auto const int32_dtype = cudf::data_type{cudf::type_id::INT32};
-
-  auto get = [&](std::string const& key) {
-    return cudf::io::parquet::experimental::extract_variant_field(col, key, int32_dtype, stream);
-  };
-  // Hit at index 0 (short-circuit before galloping starts).
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("k00"), cudf::test::fixed_width_column_wrapper<int32_t>{0});
-  // Hit requiring galloping to bracket, then a binary search within the bracket.
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("k16"), cudf::test::fixed_width_column_wrapper<int32_t>{16});
-  // Hit at the last entry (gallop bound clamped to n).
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("k32"), cudf::test::fixed_width_column_wrapper<int32_t>{32});
-  auto const null_i32 = cudf::test::fixed_width_column_wrapper<int32_t>({0}, {false});
-  // Miss before the first entry (cmp0 > 0 short-circuit).
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("j99"), null_i32);
-  // Miss after the last entry (gallop exhausts the dictionary without bracketing).
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("k99"), null_i32);
-  // Miss strictly between two existing entries ("k16" < "k165" < "k17").
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*get("k165"), null_i32);
-}
-
-TEST_F(ExtractVariantFieldTest, SortedDictionaryGallopingSearchMalformedOffsetsYieldsNull)
-{
-  // 40-entry sorted dictionary (above the 32-entry linear-scan threshold), but with the string
-  // payload truncated so offsets for higher-index entries point past the end of the buffer. The
-  // galloping/binary search must propagate that failure as a null rather than reading out of
-  // bounds.
-  auto const keys = make_numeric_keys(40);
-  auto meta       = build_metadata(keys, /*sorted=*/true);
-  ASSERT_GT(meta.size(), std::size_t{60});
-  meta.resize(meta.size() - 60);
-  auto const val         = build_sequential_int32_object(40);
-  auto col               = wrap_single_variant(meta, val);
-  auto stream            = cudf::test::get_default_stream();
-  auto const int32_dtype = cudf::data_type{cudf::type_id::INT32};
-
-  auto got =
-    cudf::io::parquet::experimental::extract_variant_field(col, "k39", int32_dtype, stream);
-  ASSERT_EQ(got->size(), 1);
-  EXPECT_EQ(got->null_count(), 1);
-}
-
-TEST_F(ExtractVariantFieldTest, SortedDictionaryGallopingSearchNonAsciiKeys)
-{
-  // 34 keys sharing a common ASCII prefix (which determines sort order) with a non-ASCII UTF-8
-  // suffix (U+00E9, encoded as 0xC3 0xA9), so the galloping/binary search compares multi-byte
-  // entries above the linear-scan threshold.
-  std::vector<std::string> keys;
-  for (int i = 0; i < 34; ++i) {
-    std::array<char, 8> buf{};
-    std::snprintf(buf.data(), buf.size(), "k%02d", i);
-    keys.emplace_back(std::string(buf.data()) + "\xC3\xA9");
-  }
-  auto const meta = build_metadata(keys, /*sorted=*/true);
-  auto const val  = build_sequential_int32_object(34);
-  auto col        = wrap_single_variant(meta, val);
-  auto stream     = cudf::test::get_default_stream();
-
-  auto got = cudf::io::parquet::experimental::extract_variant_field(
-    col, "k20\xC3\xA9", cudf::data_type{cudf::type_id::INT32}, stream);
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, cudf::test::fixed_width_column_wrapper<int32_t>{20});
 }
 
 TEST_F(ExtractVariantFieldTest, MetadataOffsetSizeThresholdBoundary)
