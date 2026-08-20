@@ -1177,11 +1177,12 @@ TEST_F(GetVariantFieldsTest, NullRowsAndSlicedInput)
   expect_matches_looped_get(cudf::slice(col, {1, 3}).front(), {"x", "y"});
 }
 
-TEST_F(GetVariantFieldsTest, ManyPathsUseGlobalScratch)
+TEST_F(GetVariantFieldsTest, WideGroupUsesGlobalScratch)
 {
-  // More leaves than `max_local_trie_slots`, so the walk falls back to global slot scratch.
+  // One group of more siblings than `max_local_walk_state`. Merging their lookups keeps all of
+  // their results live at once, which pushes the walk's state onto global scratch.
   auto paths = std::vector<std::string>{"x", "y", "z"};
-  for (int i = 0; i < 40; ++i) {
+  for (int i = 0; i < 140; ++i) {
     paths.push_back(std::format("$.field_{}", i));
   }
   expect_matches_looped_get(make_xyz_three_row_variant(), paths);
@@ -1189,13 +1190,67 @@ TEST_F(GetVariantFieldsTest, ManyPathsUseGlobalScratch)
 
 TEST_F(GetVariantFieldsTest, DeepTrieUsesGlobalScratch)
 {
-  // Every path extends the previous one, so the trie is a chain deeper than the per-thread stack
-  // the walk normally uses, which pushes it onto global scratch. Only "x" resolves.
+  // Every path extends the previous one, so the trie is a chain needing more state than the
+  // per-thread array the walk normally uses, which pushes it onto global scratch. Only "x"
+  // resolves.
   std::vector<std::string> paths{"x"};
-  for (int i = 0; i < 20; ++i) {
+  for (int i = 0; i < 140; ++i) {
     paths.push_back(std::format("{}.s{}", paths.back(), i));
   }
   expect_matches_looped_get(make_xyz_three_row_variant(), paths);
+}
+
+TEST_F(GetVariantFieldsTest, SiblingGroupSpansWholeObject)
+{
+  // Asking for every field of a 50-field object is the case a merged group pass is for: the keys
+  // are dense, so each one is found in the field right after the previous match.
+  auto const col = wrap_single_variant(build_metadata(make_numeric_keys(50), /*sorted=*/true),
+                                       build_sequential_int32_object(50));
+  std::vector<std::string> paths;
+  for (auto const& key : make_numeric_keys(50)) {
+    paths.push_back(key);
+  }
+  expect_matches_looped_get(col, paths);
+}
+
+TEST_F(GetVariantFieldsTest, SiblingGroupWithAbsentKeys)
+{
+  // Absent keys before, between, and after the object's fields, so the sweep has to leave its
+  // position where a missing key would have been rather than consuming a field for it.
+  auto const col = wrap_single_variant(build_metadata(make_numeric_keys(50), /*sorted=*/true),
+                                       build_sequential_int32_object(50));
+  expect_matches_looped_get(col,
+                            {"a", "k00", "k00a", "k01", "k24", "k25", "k48", "k49", "k49a", "zzz"});
+}
+
+TEST_F(GetVariantFieldsTest, SiblingGroupSparseKeys)
+{
+  // Three keys spread across 50 fields: too sparse for the next field to be the next key, so each
+  // is searched for rather than tested against the position the previous one left behind.
+  auto const col = wrap_single_variant(build_metadata(make_numeric_keys(50), /*sorted=*/true),
+                                       build_sequential_int32_object(50));
+  expect_matches_looped_get(col, {"k00", "k25", "k49"});
+}
+
+TEST_F(GetVariantFieldsTest, SiblingGroupMixesNamesAndIndices)
+{
+  // A group holding both kinds of step: only the names can be merged, and the index steps must
+  // still resolve from the group's parent value.
+  auto const col = make_apache_variant(avf::object_nested);
+  expect_matches_looped_get(col,
+                            {"$.observation.location",
+                             "$.observation[0]",
+                             "$.observation.time",
+                             "$.observation[1].x",
+                             "$.id"});
+}
+
+TEST_F(GetVariantFieldsTest, SiblingGroupUnderNonObject)
+{
+  // The parent of each group resolves to a primitive or is missing outright, so no group's keys can
+  // be looked up at all.
+  auto const col = make_xyz_three_row_variant();
+  expect_matches_looped_get(col, {"$.x.a", "$.x.b", "$.x.c", "$.nope.a", "$.nope.b"});
 }
 
 TEST_F(GetVariantFieldsTest, NoPathsYieldsNoColumns)

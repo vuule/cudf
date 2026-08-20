@@ -8,6 +8,7 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <map>
@@ -77,6 +78,69 @@ struct trie_builder_node {
 [[nodiscard]] bool needs_slot(trie_builder_node const& node)
 {
   return node.ends_a_path || node.children.size() > 1;
+}
+
+// Index steps keep their brackets, which is also how the device walk tells the two kinds apart.
+[[nodiscard]] bool is_index_step(std::string const& step) { return step.front() == '['; }
+
+// Gather the slots that share a parent into groups, and reserve the walk's per-depth state.
+// Requires slots in depth-first pre-order with each group's name steps ahead of its index steps,
+// which is how the descent below emits them.
+void build_sibling_groups(variant_path_trie& trie, std::vector<size_type> const& slot_parent)
+{
+  auto const num_slots = static_cast<size_type>(trie.slot_depth.size());
+  trie.slot_group.resize(num_slots);
+  trie.slot_group_pos.resize(num_slots);
+
+  std::map<size_type, size_type> group_of_parent;
+  std::vector<size_type> group_size;
+  std::vector<std::vector<size_type>> group_key_steps;
+  std::vector<bool> group_saw_index;
+
+  for (size_type slot = 0; slot < num_slots; ++slot) {
+    auto const parent = slot_parent[slot];
+    auto const [entry, is_new] =
+      group_of_parent.try_emplace(parent, static_cast<size_type>(trie.group_first.size()));
+    if (is_new) {
+      trie.group_first.push_back(slot);
+      trie.group_depth.push_back(trie.slot_depth[slot]);
+      // A parent is visited before its children, so its position is already known.
+      trie.group_parent.push_back(parent < 0 ? 0 : trie.slot_group_pos[parent]);
+      group_size.push_back(0);
+      group_key_steps.emplace_back();
+      group_saw_index.push_back(false);
+    }
+    auto const group          = entry->second;
+    trie.slot_group[slot]     = group;
+    trie.slot_group_pos[slot] = group_size[group]++;
+
+    auto const first_step = trie.slot_steps[slot];
+    if (is_index_step(trie.steps[first_step])) {
+      group_saw_index[group] = true;
+    } else {
+      // Names lead the group, so a name behind an index step would break the merge order.
+      CUDF_EXPECTS(!group_saw_index[group], "variant path trie group is out of order");
+      group_key_steps[group].push_back(first_step);
+    }
+  }
+
+  trie.group_keys.push_back(0);
+  for (auto const& keys : group_key_steps) {
+    trie.group_key_step.insert(trie.group_key_step.end(), keys.begin(), keys.end());
+    trie.group_keys.push_back(static_cast<size_type>(trie.group_key_step.size()));
+  }
+
+  // Only one group per depth is live at a time, so each depth needs room for its widest group.
+  auto const max_depth = *std::ranges::max_element(trie.slot_depth);
+  std::vector<size_type> depth_width(max_depth + 1, 0);
+  for (std::size_t group = 0; group < group_size.size(); ++group) {
+    auto& width = depth_width[trie.group_depth[group]];
+    width       = std::max(width, group_size[group]);
+  }
+  trie.state_base.assign(max_depth + 2, 0);
+  for (size_type depth = 0; depth <= max_depth; ++depth) {
+    trie.state_base[depth + 1] = trie.state_base[depth] + depth_width[depth];
+  }
 }
 
 }  // namespace
@@ -150,36 +214,52 @@ variant_path_trie build_variant_path_trie(host_span<std::string_view const> path
   struct descent_state {
     std::size_t node;
     size_type depth;
+    size_type parent_slot;
     std::vector<std::string> pending;
   };
   std::vector<descent_state> stack;
-  stack.push_back({0, 0, {}});
+  stack.push_back({0, 0, -1, {}});
+
+  std::vector<size_type> slot_parent;  // enclosing slot of each slot, -1 at depth 0
 
   while (!stack.empty()) {
     auto state = std::move(stack.back());
     stack.pop_back();
 
     // The root is the value blob itself and never becomes a slot.
-    auto child_depth = state.depth;
+    auto child_depth  = state.depth;
+    auto child_parent = state.parent_slot;
     std::vector<std::string> child_pending;
     if (state.node != 0 && needs_slot(nodes[state.node])) {
       slot_of_node[state.node] = static_cast<size_type>(trie.slot_depth.size());
       trie.steps.insert(trie.steps.end(), state.pending.begin(), state.pending.end());
       trie.slot_steps.push_back(static_cast<size_type>(trie.steps.size()));
       trie.slot_depth.push_back(state.depth);
-      child_depth = state.depth + 1;
+      slot_parent.push_back(state.parent_slot);
+      child_depth  = state.depth + 1;
+      child_parent = slot_of_node[state.node];
     } else {
       child_pending = std::move(state.pending);
     }
 
     // Reverse order, so that popping visits the first child first and keeps each subtree
-    // contiguous.
-    for (auto const& [step, child] : std::ranges::reverse_view(nodes[state.node].children)) {
+    // contiguous. Index steps are pushed ahead of the names so that they pop last, which leaves
+    // every group's mergeable keys at its front, in ascending order.
+    auto const& children = nodes[state.node].children;
+    auto const push      = [&](auto const& step, std::size_t child) {
       auto pending = child_pending;
       pending.push_back(step);
-      stack.push_back({child, child_depth, std::move(pending)});
+      stack.push_back({child, child_depth, child_parent, std::move(pending)});
+    };
+    for (auto const& [step, child] : std::ranges::reverse_view(children)) {
+      if (is_index_step(step)) { push(step, child); }
+    }
+    for (auto const& [step, child] : std::ranges::reverse_view(children)) {
+      if (!is_index_step(step)) { push(step, child); }
     }
   }
+
+  build_sibling_groups(trie, slot_parent);
 
   // Invert the path-to-slot mapping into CSR form, counting then filling.
   auto const num_slots = trie.slot_depth.size();

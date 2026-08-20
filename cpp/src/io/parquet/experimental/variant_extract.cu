@@ -46,6 +46,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <string_view>
@@ -233,8 +234,8 @@ __device__ cuda::std::optional<uint64_t> variant_value_length(device_span<uint8_
  * @param key The key to search for
  * @return The dictionary index of `key`, or nullopt if absent or the blob is malformed
  */
-__device__ cuda::std::optional<size_type> find_key_in_metadata(device_span<uint8_t const> meta,
-                                                               cudf::string_view key)
+[[maybe_unused]] __device__ cuda::std::optional<size_type> find_key_in_metadata(
+  device_span<uint8_t const> meta, cudf::string_view key)
 {
   auto const meta_len = static_cast<size_type>(meta.size());
   if (meta_len < 1) { return cuda::std::nullopt; }
@@ -313,8 +314,8 @@ __device__ cuda::std::optional<size_type> find_key_in_metadata(device_span<uint8
   return cuda::std::nullopt;
 }
 
-/**
- * @brief Locate the encoded bytes of a single field within an object value by field id.
+/*
+ * Locating fields within an object value.
  *
  * Object value layout, following the 1-byte value metadata header (basic_type=object in the low 2
  * bits; value_header in the high 6 bits, see decode_object_array_header):
@@ -333,62 +334,78 @@ __device__ cuda::std::optional<size_type> find_key_in_metadata(device_span<uint8
  * so `field_offsets` are not necessarily monotonic -- hence the value length is taken from each
  * field's own header rather than from offset deltas.
  *
- * Because field_ids are name-ordered rather than id-ordered, `id` cannot be binary searched
- * directly. Instead, at each probe this turns `field_ids[mid]` into its dictionary name via an
- * O(1) lookup in `meta` (the metadata offset table is indexed directly by id, independent of
- * whether the dictionary strings themselves are sorted) and compares that name against the target
- * field's name -- resolved the same way, once, up front -- giving O(log N) unconditionally.
- *
- * Not using thrust::lower_bound since it does not propagate entry read failures.
- *
- * @param meta The metadata blob for this row, used to resolve field ids to names
- * @param val The object value bytes
- * @param id The dictionary index of the field to locate
- * @return The encoded bytes of the field value, or an empty span if `val` is not an object, the
- *         field is absent, or either blob is malformed
+ * Because field_ids are name-ordered rather than id-ordered, a field id cannot be binary searched
+ * directly. Instead, each probe turns `field_ids[mid]` into its dictionary name via an O(1) lookup
+ * in `meta` -- the metadata offset table is indexed directly by id, independent of whether the
+ * dictionary strings themselves are sorted -- and compares that name against the target's,
+ * giving O(log N) unconditionally.
  */
-__device__ device_span<uint8_t const> locate_object_field(device_span<uint8_t const> meta,
-                                                          device_span<uint8_t const> val,
-                                                          int id)
+
+// The metadata dictionary's offset table, parsed once so that field ids resolve to names in O(1).
+// `valid` is false for a malformed or unsupported blob, and every lookup on it then fails.
+struct metadata_dictionary {
+  device_span<uint8_t const> meta;
+  size_type offsets_start;
+  size_type strings_base;
+  size_type strings_extent;
+  int offset_size;
+  bool valid;
+};
+
+__device__ metadata_dictionary parse_metadata_dictionary(device_span<uint8_t const> meta)
 {
-  // --- Parse metadata header (for O(1) id -> name lookups) ---
   auto const meta_len = static_cast<size_type>(meta.size());
   if (meta_len < 1) { return {}; }
-  auto const meta_header = meta[0];
-  if ((meta_header & 0x0F) != variant_version_v1) { return {}; }
-  int const meta_offset_size = ((meta_header >> 6) & 0x03) + 1;
+  auto const header = meta[0];
+  if ((header & 0x0F) != variant_version_v1) { return {}; }
+  int const offset_size = ((header >> 6) & 0x03) + 1;
 
-  size_type meta_pos          = 1;
-  auto const num_meta_entries = narrow_cast(read_uint64(meta, meta_pos, meta_offset_size));
-  if (!num_meta_entries.has_value()) { return {}; }
-  meta_pos += meta_offset_size;
+  size_type pos          = 1;
+  auto const num_entries = narrow_cast(read_uint64(meta, pos, offset_size));
+  if (!num_entries.has_value()) { return {}; }
+  pos += offset_size;
 
-  auto const meta_offsets_start = meta_pos;
-  auto const meta_offsets_bytes =
-    (static_cast<uint64_t>(num_meta_entries.value()) + 1) * meta_offset_size;
-  if (cuda::std::cmp_greater(meta_offsets_bytes, meta_len - meta_offsets_start)) { return {}; }
-  auto const meta_strings_base   = meta_offsets_start + static_cast<size_type>(meta_offsets_bytes);
-  auto const meta_strings_extent = meta_len - meta_strings_base;
+  auto const offsets_start = pos;
+  auto const offsets_bytes = (static_cast<uint64_t>(num_entries.value()) + 1) * offset_size;
+  if (cuda::std::cmp_greater(offsets_bytes, meta_len - offsets_start)) { return {}; }
+  auto const strings_base = offsets_start + static_cast<size_type>(offsets_bytes);
 
-  // O(1) name lookup by id: two offset reads into the metadata table.
-  auto name_for_id = [&](size_type field_id) -> cuda::std::optional<cudf::string_view> {
-    auto const s =
-      read_uint64(meta, meta_offsets_start + field_id * meta_offset_size, meta_offset_size);
-    auto const e =
-      read_uint64(meta, meta_offsets_start + (field_id + 1) * meta_offset_size, meta_offset_size);
-    if (!s.has_value() || !e.has_value()) { return cuda::std::nullopt; }
-    if (e.value() < s.value() || cuda::std::cmp_greater(e.value(), meta_strings_extent)) {
-      return cuda::std::nullopt;
-    }
-    return cudf::string_view{
-      reinterpret_cast<char const*>(meta.data() + meta_strings_base + s.value()),
-      static_cast<size_type>(e.value() - s.value())};
-  };
+  return {meta, offsets_start, strings_base, meta_len - strings_base, offset_size, true};
+}
 
-  auto const key = name_for_id(id);
-  if (!key.has_value()) { return {}; }
+// O(1) name lookup by field id: two offset reads into the metadata table.
+__device__ cuda::std::optional<cudf::string_view> name_for_id(metadata_dictionary const& dict,
+                                                              size_type field_id)
+{
+  auto const s =
+    read_uint64(dict.meta, dict.offsets_start + field_id * dict.offset_size, dict.offset_size);
+  auto const e = read_uint64(
+    dict.meta, dict.offsets_start + (field_id + 1) * dict.offset_size, dict.offset_size);
+  if (!s.has_value() || !e.has_value()) { return cuda::std::nullopt; }
+  if (e.value() < s.value() || cuda::std::cmp_greater(e.value(), dict.strings_extent)) {
+    return cuda::std::nullopt;
+  }
+  return cudf::string_view{
+    reinterpret_cast<char const*>(dict.meta.data() + dict.strings_base + s.value()),
+    static_cast<size_type>(e.value() - s.value())};
+}
 
-  // --- Parse object value header ---
+// An object value's header, parsed once so that several of its fields can be located in one pass.
+// `valid` is false when `val` is not an object or is truncated, and every lookup on it then fails.
+struct object_fields {
+  device_span<uint8_t const> val;
+  size_type num_fields;
+  size_type ids_start;
+  size_type offsets_start;
+  size_type values_base;
+  size_type values_extent;
+  int id_size;
+  int offset_size;
+  bool valid;
+};
+
+__device__ object_fields parse_object_fields(device_span<uint8_t const> val)
+{
   auto const val_len = static_cast<size_type>(val.size());
   if (val_len < 1) { return {}; }
   auto const value_metadata = val[0];
@@ -412,43 +429,149 @@ __device__ device_span<uint8_t const> locate_object_field(device_span<uint8_t co
 
   auto const values_base = offsets_start + static_cast<size_type>(offsets_bytes);
   // Maximum legitimate field-offset value: bytes available after values_base
-  auto const values_extent = val_len - values_base;
+  return {val,
+          num_fields.value(),
+          ids_start,
+          offsets_start,
+          values_base,
+          val_len - values_base,
+          id_size,
+          offset_size,
+          true};
+}
 
-  // --- Binary search field_ids by name ---
-  bool found           = false;
-  uint64_t match_start = 0;
-  size_type lo         = 0;
-  size_type hi         = num_fields.value();
+// The name of the field at position `index` of the object, via its field id.
+__device__ cuda::std::optional<cudf::string_view> field_name_at(object_fields const& obj,
+                                                                metadata_dictionary const& dict,
+                                                                size_type index)
+{
+  auto const id =
+    narrow_cast(read_uint64(obj.val, obj.ids_start + index * obj.id_size, obj.id_size));
+  if (!id.has_value()) { return cuda::std::nullopt; }
+  return name_for_id(dict, id.value());
+}
+
+// The encoded bytes of the field at position `index`. Field offsets are not monotonic, so the
+// length comes from the value's own header rather than from an offset delta.
+__device__ device_span<uint8_t const> field_value_at(object_fields const& obj, size_type index)
+{
+  auto const start =
+    read_uint64(obj.val, obj.offsets_start + index * obj.offset_size, obj.offset_size);
+  if (!start.has_value() || start.value() > obj.values_extent) { return {}; }
+  auto const value_len = variant_value_length(obj.val.subspan(obj.values_base + start.value()));
+  if (!value_len.has_value()) { return {}; }
+  if (start.value() + value_len.value() > obj.values_extent) { return {}; }
+  return obj.val.subspan(obj.values_base + start.value(), value_len.value());
+}
+
+// Where a search for one key landed among the object's name-ordered fields: `index` is the position
+// of the match, or the lower bound of the key when `found` is false. `ok` is false if the blob is
+// malformed, which invalidates the whole object rather than just this key.
+struct field_search {
+  size_type index;
+  bool found;
+  bool ok;
+};
+
+// Search `[begin, num_fields)` for `target`. `peek` first tests position `begin`, which resolves
+// the key in one probe when the caller is walking keys that are dense in the object.
+__device__ field_search find_field(object_fields const& obj,
+                                   metadata_dictionary const& dict,
+                                   cudf::string_view target,
+                                   size_type begin,
+                                   bool peek)
+{
+  size_type lo = begin;
+  size_type hi = obj.num_fields;
+
+  if (peek && lo < hi) {
+    auto const name = field_name_at(obj, dict, lo);
+    if (!name.has_value()) { return {lo, false, false}; }
+    auto const cmp = name.value().compare(target);
+    if (cmp == 0) { return {lo, true, true}; }
+    // The fields are name-ordered, so a greater name here puts the target before this position.
+    if (cmp > 0) { return {lo, false, true}; }
+    ++lo;
+  }
+
+  // Not using thrust::lower_bound since it does not propagate entry read failures.
   while (lo < hi) {
     size_type const mid = lo + (hi - lo) / 2;
-    auto const probe_id = narrow_cast(read_uint64(val, ids_start + mid * id_size, id_size));
-    if (!probe_id.has_value()) { return {}; }
-    auto const probe_name = name_for_id(probe_id.value());
-    if (!probe_name.has_value()) { return {}; }
-    auto const cmp = probe_name.value().compare(key.value());
-    if (cmp == 0) {
-      auto const match_offset = read_uint64(val, offsets_start + mid * offset_size, offset_size);
-      if (!match_offset.has_value()) { return {}; }
-      if (match_offset.value() > values_extent) { return {}; }
-      match_start = match_offset.value();
-      found       = true;
-      break;
-    }
+    auto const name     = field_name_at(obj, dict, mid);
+    if (!name.has_value()) { return {mid, false, false}; }
+    auto const cmp = name.value().compare(target);
+    if (cmp == 0) { return {mid, true, true}; }
     if (cmp < 0) {
       lo = mid + 1;
     } else {
       hi = mid;
     }
   }
-  if (!found) { return {}; }
+  return {lo, false, true};
+}
 
-  // Derive field's value length from its header
-  auto const value     = val.subspan(values_base + match_start);
-  auto const value_len = variant_value_length(value);
-  if (!value_len.has_value()) { return {}; }
-  auto const match_end = match_start + value_len.value();
-  if (match_end > values_extent) { return {}; }
-  return val.subspan(values_base + match_start, value_len.value());
+// The encoded bytes of the field named `target_name`, or an empty span if `val` is not an object,
+// the field is absent, or either blob is malformed.
+__device__ device_span<uint8_t const> locate_object_field(device_span<uint8_t const> meta,
+                                                          device_span<uint8_t const> val,
+                                                          cudf::string_view target_name)
+{
+  auto const dict = parse_metadata_dictionary(meta);
+  if (!dict.valid) { return {}; }
+  auto const obj = parse_object_fields(val);
+  if (!obj.valid) { return {}; }
+
+  auto const match = find_field(obj, dict, target_name, 0, false);
+  if (!match.ok || !match.found) { return {}; }
+  return field_value_at(obj, match.index);
+}
+
+/**
+ * @brief Locate several fields of one object in a single pass over its field ids.
+ *
+ * The object's field ids are ordered by name, so a sorted list of keys can be resolved in one
+ * forward sweep: each key is searched only in the fields left after the previous key's match. Two
+ * probes are saved on top of that, since the metadata and object headers are parsed once for the
+ * whole group rather than once per key.
+ *
+ * Where the keys are dense in what remains of the object -- the case worth batching, e.g. asking
+ * for most of its fields -- the next field is likely the next key, and testing it costs one probe
+ * against the `log2(num_fields)` of a search. Where they are sparse, that test is wasted, so it is
+ * only made when the remaining keys can be expected to land within a few fields of each other.
+ *
+ * Keys must be sorted ascending by name, as `variant_path_trie` guarantees for a group's keys.
+ *
+ * @param emit Receives each key's index and the encoded bytes of its field, empty if absent
+ */
+template <typename Emit>
+__device__ void locate_object_fields(device_span<uint8_t const> meta,
+                                     device_span<uint8_t const> val,
+                                     column_device_view steps,
+                                     device_span<size_type const> key_steps,
+                                     Emit emit)
+{
+  auto const num_keys = static_cast<size_type>(key_steps.size());
+  auto const dict     = parse_metadata_dictionary(meta);
+  auto const obj      = parse_object_fields(val);
+
+  size_type key = 0;
+  if (dict.valid && obj.valid) {
+    size_type at = 0;
+    for (; key < num_keys; ++key) {
+      auto const target = steps.element<cudf::string_view>(key_steps[key]);
+      // Four fields per key is where a peek that misses still costs less than the search it
+      // replaces two keys out of three.
+      bool const dense = (obj.num_fields - at) <= 4 * (num_keys - key);
+      auto const match = find_field(obj, dict, target, at, dense);
+      if (!match.ok) { break; }
+      emit(key, match.found ? field_value_at(obj, match.index) : device_span<uint8_t const>{});
+      at = match.index + (match.found ? 1 : 0);
+    }
+  }
+  // A malformed blob fails the object as a whole, as does one that is not an object at all.
+  for (; key < num_keys; ++key) {
+    emit(key, device_span<uint8_t const>{});
+  }
 }
 
 // Parse an array value header and return the sub-span of the element at `index` (0-based) within
@@ -635,9 +758,7 @@ __device__ device_span<uint8_t const> resolve_steps(device_span<uint8_t const> m
       if (!index.has_value()) { return {}; }
       sub_val = locate_array_element(sub_val, index.value());
     } else {
-      auto const field_id = find_key_in_metadata(meta, step);
-      if (!field_id.has_value()) { return {}; }
-      sub_val = locate_object_field(meta, sub_val, field_id.value());
+      sub_val = locate_object_field(meta, sub_val, step);
     }
     if (sub_val.empty()) { return {}; }
   }
@@ -772,61 +893,91 @@ __device__ device_span<uint8_t const> slot_span(device_span<uint8_t const> val,
   return val.subspan(result.src_offset, result.size);
 }
 
-// Tries up to this deep are walked with a per-thread stack the compiler can keep in registers or
-// local memory; a deeper one uses a global scratch allocation instead.
-constexpr size_type max_local_trie_depth = 16;
+// Walks needing at most this many located values keep them in a per-thread array the compiler can
+// place in registers or local memory; a larger one uses a global scratch allocation instead. One
+// value per depth is enough without sibling merging, but merging holds a group's resolved children
+// while the walk is inside any of their subtrees.
+constexpr size_type max_local_walk_state = 128;
 
 // Global scratch is allocated per thread, so the grid has to be capped for the allocation to stay
 // independent of the row count. This many blocks still saturates the walk.
 constexpr int max_global_scratch_blocks = 256;
 
+// The trie arrays a walk reads, gathered to keep the kernel's parameter list manageable.
+struct trie_device_view {
+  column_device_view steps;
+  device_span<size_type const> slot_steps;
+  device_span<size_type const> slot_depth;
+  device_span<size_type const> output_offsets;
+  device_span<size_type const> output_paths;
+  device_span<size_type const> slot_group;
+  device_span<size_type const> slot_group_pos;
+  device_span<size_type const> group_keys;
+  device_span<size_type const> group_key_step;
+  device_span<size_type const> group_first;
+  device_span<size_type const> group_parent;
+  device_span<size_type const> state_base;
+};
+
 /**
  * @brief Resolves a whole trie of VARIANT paths in each row, recording each path's result.
  *
- * Slots are visited in index order, which is depth-first pre-order, so the walk only has to
- * remember one located value per depth: a slot's parent is the entry one level up, still untouched
- * from when the walk descended. A shared prefix is therefore resolved once per row and reused by
- * every path below it, and a prefix that fails leaves an empty span behind that makes its whole
- * subtree fail at its first step.
+ * Slots are visited in index order, which is depth-first pre-order, so a slot's parent is always
+ * still in the walk's state from when it descended. A shared prefix is therefore resolved once per
+ * row and reused by every path below it, and a prefix that fails leaves an empty span behind that
+ * makes its whole subtree fail at its first step.
+ *
+ * Without `MergeSiblings`, each slot's first step is searched for on its own and the walk only has
+ * to remember one located value per depth. With it, the first steps of all the slots sharing a
+ * parent are resolved together in one pass over that object (see locate_object_fields), which
+ * trades holding a group's resolved children for the whole of their subtrees against searching that
+ * object once per key instead of once per group.
  *
  * For each path `p` and row, the located field's byte length is written to
  * `d_sizes[p * num_rows + row]` and its offset within the row's value blob to `d_src_offsets`, so
  * each path's outputs are contiguous. Rows that are null in `d_row_valid`, or whose path does not
  * resolve, get a size of 0 and are marked null in that path's mask in `d_null_masks`.
  *
- * @tparam UseLocalScratch Keep the per-thread depth stack in local memory rather than `d_scratch`
+ * @tparam UseLocalScratch Keep the per-thread located values in local memory rather than
+ * `d_scratch`
+ * @tparam MergeSiblings Resolve the first steps of sibling slots in one pass per object
  */
-template <bool UseLocalScratch>
+template <bool UseLocalScratch, bool MergeSiblings>
 CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
   cudf::lists_column_device_view metadata,
   cudf::lists_column_device_view values,
-  column_device_view steps,
-  device_span<size_type const> slot_steps,
-  device_span<size_type const> slot_depth,
-  device_span<size_type const> output_offsets,
-  device_span<size_type const> output_paths,
+  trie_device_view trie,
   bitmask_type const* d_row_valid,
   size_type num_rows,
-  size_type trie_depth,
+  size_type walk_state_size,
   device_span<size_type> d_sizes,
   device_span<size_type> d_src_offsets,
   device_span<bitmask_type* const> d_null_masks,
   device_span<slot_result> d_scratch)
 {
-  auto const num_slots = static_cast<size_type>(slot_depth.size());
+  auto const num_slots = static_cast<size_type>(trie.slot_depth.size());
   auto const num_paths = static_cast<size_type>(d_null_masks.size());
   auto const tid       = cudf::detail::grid_1d::global_thread_id<block_size>();
   auto const stride    = cudf::detail::grid_1d::grid_stride<block_size>();
 
-  [[maybe_unused]] cuda::std::array<slot_result, UseLocalScratch ? max_local_trie_depth : 1>
-    local_stack;
+  [[maybe_unused]] cuda::std::array<slot_result, UseLocalScratch ? max_local_walk_state : 1> local;
   auto* const located = [&]() -> slot_result* {
     if constexpr (UseLocalScratch) {
-      return local_stack.data();
+      return local.data();
     } else {
-      return d_scratch.data() + tid * trie_depth;
+      return d_scratch.data() + tid * walk_state_size;
     }
   }();
+
+  // Where a slot's located value lives: one entry per depth, or one per live group member when
+  // sibling merging needs a whole group's children at once.
+  auto const state_of = [&](size_type slot, size_type depth) {
+    if constexpr (MergeSiblings) {
+      return trie.state_base[depth] + trie.slot_group_pos[slot];
+    } else {
+      return depth;
+    }
+  };
 
   for (auto row = tid; row < num_rows; row += stride) {
     bool const row_valid = d_row_valid == nullptr || cudf::bit_is_set(d_row_valid, row);
@@ -844,17 +995,55 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
     auto const [meta, val] = metadata_and_value_at(metadata, values, row);
 
     for (size_type slot = 0; slot < num_slots; ++slot) {
-      auto const depth  = slot_depth[slot];
-      auto const parent = depth == 0 ? val : slot_span(val, located[depth - 1]);
-      auto const field = resolve_steps(meta, parent, steps, slot_steps[slot], slot_steps[slot + 1]);
-      located[depth]   = make_slot_result(field, val.data());
+      auto const depth = trie.slot_depth[slot];
+      auto const me    = state_of(slot, depth);
+      auto step_begin  = trie.slot_steps[slot];
 
-      for (auto out_idx = output_offsets[slot]; out_idx < output_offsets[slot + 1]; ++out_idx) {
-        auto const path = output_paths[out_idx];
+      auto parent = val;
+      if (depth > 0) {
+        if constexpr (MergeSiblings) {
+          auto const group = trie.slot_group[slot];
+          parent = slot_span(val, located[trie.state_base[depth - 1] + trie.group_parent[group]]);
+        } else {
+          parent = slot_span(val, located[depth - 1]);
+        }
+      }
+
+      if constexpr (MergeSiblings) {
+        auto const group     = trie.slot_group[slot];
+        auto const key_begin = trie.group_keys[group];
+        auto const num_keys  = trie.group_keys[group + 1] - key_begin;
+        auto const base      = trie.state_base[depth];
+
+        // The group's first slot resolves every mergeable key of the group, so that the siblings
+        // behind it find their first step already applied.
+        if (num_keys > 0 && slot == trie.group_first[group]) {
+          locate_object_fields(meta,
+                               parent,
+                               trie.steps,
+                               trie.group_key_step.subspan(key_begin, num_keys),
+                               [&](size_type key, device_span<uint8_t const> field) {
+                                 located[base + key] = make_slot_result(field, val.data());
+                               });
+        }
+        // Keys lead their group, so a slot within that prefix starts from its merged result.
+        if (trie.slot_group_pos[slot] < num_keys) {
+          parent = slot_span(val, located[me]);
+          ++step_begin;
+        }
+      }
+
+      auto const field =
+        resolve_steps(meta, parent, trie.steps, step_begin, trie.slot_steps[slot + 1]);
+      located[me] = make_slot_result(field, val.data());
+
+      for (auto out_idx = trie.output_offsets[slot]; out_idx < trie.output_offsets[slot + 1];
+           ++out_idx) {
+        auto const path = trie.output_paths[out_idx];
         auto const out  = path * num_rows + static_cast<size_type>(row);
-        if (slot_is_valid(located[depth])) {
-          d_sizes[out]       = located[depth].size;
-          d_src_offsets[out] = located[depth].src_offset;
+        if (slot_is_valid(located[me])) {
+          d_sizes[out]       = located[me].size;
+          d_src_offsets[out] = located[me].src_offset;
         } else {
           d_sizes[out]       = 0;
           d_src_offsets[out] = 0;
@@ -1104,6 +1293,17 @@ std::unique_ptr<column> build_path_column(cudf::host_span<std::string const> ste
     depth, std::move(offsets_col), d_chars.release(), 0, rmm::device_buffer{});
 }
 
+// Prototype switch, so that both lookup schemes can be measured from one build. Set
+// CUDF_VARIANT_MERGE_SIBLINGS=0 to search each sibling's first step on its own instead.
+bool merge_sibling_lookups()
+{
+  static bool const enabled = [] {
+    auto const* setting = std::getenv("CUDF_VARIANT_MERGE_SIBLINGS");
+    return setting == nullptr || std::string_view{setting} != "0";
+  }();
+  return enabled;
+}
+
 }  // namespace
 
 namespace detail {
@@ -1244,14 +1444,20 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
 
   auto steps_column      = build_path_column(trie.steps, stream, temp_mr);
   auto steps_device_view = column_device_view::create(steps_column->view(), stream);
-  auto const d_slot_steps =
-    cudf::detail::make_device_uvector_async(trie.slot_steps, stream, temp_mr);
-  auto const d_slot_depth =
-    cudf::detail::make_device_uvector_async(trie.slot_depth, stream, temp_mr);
-  auto const d_output_offsets =
-    cudf::detail::make_device_uvector_async(trie.output_offsets, stream, temp_mr);
-  auto const d_output_paths =
-    cudf::detail::make_device_uvector_async(trie.output_paths, stream, temp_mr);
+  auto const upload      = [&](auto const& host_array) {
+    return cudf::detail::make_device_uvector_async(host_array, stream, temp_mr);
+  };
+  auto const d_slot_steps     = upload(trie.slot_steps);
+  auto const d_slot_depth     = upload(trie.slot_depth);
+  auto const d_output_offsets = upload(trie.output_offsets);
+  auto const d_output_paths   = upload(trie.output_paths);
+  auto const d_slot_group     = upload(trie.slot_group);
+  auto const d_slot_group_pos = upload(trie.slot_group_pos);
+  auto const d_group_keys     = upload(trie.group_keys);
+  auto const d_group_key_step = upload(trie.group_key_step);
+  auto const d_group_first    = upload(trie.group_first);
+  auto const d_group_parent   = upload(trie.group_parent);
+  auto const d_state_base     = upload(trie.state_base);
 
   // Resolve children with respect to any slice/offset on the parent struct
   structs_column_view const variant_struct{variant_column};
@@ -1287,41 +1493,60 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   }
   auto const d_null_masks = cudf::detail::make_device_uvector_async(h_null_masks, stream, temp_mr);
 
-  // Resolve the whole trie per row and compute the output sizes. The walk keeps one located value
-  // per trie level, so only a pathologically deep trie needs scratch outside the thread.
-  auto const trie_depth = 1 + *std::max_element(trie.slot_depth.begin(), trie.slot_depth.end());
-  bool const use_local_scratch = trie_depth <= max_local_trie_depth;
+  // Resolve the whole trie per row and compute the output sizes. Without merging, the walk keeps
+  // one located value per trie level, so only a pathologically deep trie needs scratch outside the
+  // thread; merging instead keeps a group's resolved children live across their subtrees.
+  bool const merge_siblings = merge_sibling_lookups();
+  auto const trie_depth     = 1 + *std::max_element(trie.slot_depth.begin(), trie.slot_depth.end());
+  auto const walk_state_size   = merge_siblings ? trie.state_base.back() : trie_depth;
+  bool const use_local_scratch = walk_state_size <= max_local_walk_state;
   auto const grid              = cudf::detail::grid_1d{num_rows, block_size};
   auto const num_blocks =
     use_local_scratch
       ? grid.num_blocks
       : std::min(grid.num_blocks, static_cast<thread_index_type>(max_global_scratch_blocks));
   rmm::device_uvector<slot_result> d_scratch(
-    use_local_scratch ? 0 : static_cast<std::size_t>(num_blocks) * block_size * trie_depth,
+    use_local_scratch ? 0 : static_cast<std::size_t>(num_blocks) * block_size * walk_state_size,
     stream,
     temp_mr);
 
-  auto const launch = [&](auto use_local) {
-    locate_variant_field_trie_kernel<decltype(use_local)::value>
+  trie_device_view const d_trie{*steps_device_view,
+                                d_slot_steps,
+                                d_slot_depth,
+                                d_output_offsets,
+                                d_output_paths,
+                                d_slot_group,
+                                d_slot_group_pos,
+                                d_group_keys,
+                                d_group_key_step,
+                                d_group_first,
+                                d_group_parent,
+                                d_state_base};
+
+  auto const launch = [&](auto use_local, auto merge) {
+    locate_variant_field_trie_kernel<decltype(use_local)::value, decltype(merge)::value>
       <<<num_blocks, block_size, 0, stream.get()>>>(meta_lists_device_view,
                                                     val_lists_device_view,
-                                                    *steps_device_view,
-                                                    d_slot_steps,
-                                                    d_slot_depth,
-                                                    d_output_offsets,
-                                                    d_output_paths,
+                                                    d_trie,
                                                     d_row_valid,
                                                     num_rows,
-                                                    trie_depth,
+                                                    walk_state_size,
                                                     d_sizes,
                                                     d_src_offsets,
                                                     d_null_masks,
                                                     d_scratch);
   };
-  if (use_local_scratch) {
-    launch(cuda::std::true_type{});
+  auto const dispatch = [&](auto merge) {
+    if (use_local_scratch) {
+      launch(cuda::std::true_type{}, merge);
+    } else {
+      launch(cuda::std::false_type{}, merge);
+    }
+  };
+  if (merge_siblings) {
+    dispatch(cuda::std::true_type{});
   } else {
-    launch(cuda::std::false_type{});
+    dispatch(cuda::std::false_type{});
   }
   CUDF_CUDA_TRY(cudaGetLastError());
 
