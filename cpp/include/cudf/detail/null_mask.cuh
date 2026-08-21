@@ -124,24 +124,24 @@ CUDF_KERNEL void offset_bitmask_binop(Binop op,
  * 3. Counts the number of unset bits (nulls) in the resulting bitmask for each segment
  * 4. Writes the results to the destination mask and accumulates into the null counts array
  *
- * @tparam block_size        Number of threads per block
- * @tparam Binop             Type of binary operator
+ * @tparam block_size      Number of threads per block
+ * @tparam Binop           Type of binary operator
  *
- * @param op                 The binary operator to apply to the bitmasks
- * @param identity           Identity element of `op`, used to seed each segment's reduction; a
+ * @param op               The binary operator to apply to the bitmasks
+ * @param identity         Identity element of `op`, used to seed each segment's reduction; a
  * segment containing no masks therefore produces a destination filled with `identity`
- * @param num_segments       Number of segments to process
+ * @param num_segments     Number of segments to process
  * @param blocks_per_segment Number of blocks cooperating on each segment
- * @param destinations       Array of pointers to destination bitmasks where results will be written
- * @param destination_size   Size of each destination mask in bitmask words (not bits)
- * @param sources            Array of pointers to source bitmasks to be operated on
- * @param source_begin_bits  Array of bit offsets from which each source mask is to be processed
- * @param source_size_bits   The number of bits to process in each mask
- * @param segment_offsets    Array of `num_segments + 1` indices defining the segments in the
- * sources array, segment `i` covering `[segment_offsets[i], segment_offsets[i + 1])`; behavior is
- * undefined unless the indices are non-decreasing and none exceeds the number of masks in `sources`
- * @param null_counts        Array the count of unset bits for each segment is accumulated into;
- * must be zeroed before launch
+ * @param destinations     Array of pointers to destination bitmasks where results will be written
+ * @param destination_size Size of each destination mask in bitmask words (not bits)
+ * @param sources          Array of pointers to source bitmasks to be operated on
+ * @param source_begin_bits Array of bit offsets from which each source mask is to be processed
+ * @param source_size_bits The number of bits to process in each mask
+ * @param segment_offsets  Array of `num_segments + 1` indices defining the segments in the sources
+ * array, segment `i` covering `[segment_offsets[i], segment_offsets[i + 1])`; behavior is undefined
+ * unless the indices are non-decreasing and none exceeds the number of masks in `sources`
+ * @param null_counts      Array the count of unset bits for each segment is accumulated into; must
+ * be zeroed before launch
  *
  */
 template <int block_size, typename Binop>
