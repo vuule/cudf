@@ -419,23 +419,24 @@ rmm::device_uvector<size_type> inplace_segmented_bitmask_binop(
 
   auto constexpr block_size = 256;
 
-  // Splitting the segments is only worth it up to a few times the number of blocks the device can
-  // hold at once. Past that the extra blocks just queue, while each one still pays for its own
-  // reduction and atomic. The multiplier is empirical: on an A100 both a single wave and an
-  // uncapped grid are measurably slower than this on the shapes the benchmarks cover.
-  auto constexpr waves           = 8;
+  // Any block past this one would find no words left to process
+  auto const blocks_to_cover_segment = util::div_rounding_up_safe<int>(dest_mask_size, block_size);
+
+  // Splitting the segments beyond a few waves of resident blocks only adds blocks that queue behind
+  // the ones already running, and each block pays for its own reduction and atomic however few
+  // words it ends up owning. The number of waves is empirical: on an A100 both a single wave and an
+  // uncapped grid are measurably slower on the shapes the benchmarks cover.
+  auto constexpr target_waves    = 8;
   auto blocks_per_multiprocessor = int{};
   CUDF_CUDA_TRY(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
     &blocks_per_multiprocessor, segmented_offset_bitmask_binop<block_size, Binop>, block_size, 0));
-  auto const max_blocks = waves * blocks_per_multiprocessor * cudf::detail::num_multiprocessors();
+  auto const block_budget_per_segment =
+    target_waves * blocks_per_multiprocessor * cudf::detail::num_multiprocessors() / num_segments;
 
-  // A batch of a few wide segments needs the words of each segment split across several blocks to
-  // fill the device, while a batch of many segments already has enough parallelism with one block
-  // each.
+  // A few wide segments need their words spread over blocks to fill the device, while many segments
+  // have enough parallelism with one block each and can exhaust the budget
   auto const blocks_per_segment =
-    std::max(1,
-             std::min(util::div_rounding_up_safe<int>(dest_mask_size, block_size),
-                      max_blocks / num_segments));
+    std::max(1, std::min(blocks_to_cover_segment, block_budget_per_segment));
 
   segmented_offset_bitmask_binop<block_size>
     <<<num_segments * blocks_per_segment, block_size, 0, stream.get()>>>(op,

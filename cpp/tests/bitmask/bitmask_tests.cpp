@@ -733,9 +733,7 @@ TEST_F(MergeBitmaskTest, TestSegmentedBitmaskAndEmptySegments)
 
 TEST_F(MergeBitmaskTest, TestSegmentedBitmaskAndMultipleBlocksPerSegment)
 {
-  // Wide enough that a segment spans more than one block of the reduction kernel, so the null count
-  // is accumulated across blocks. Not a multiple of the word size, so the last word is partial, and
-  // not a multiple of the block's word count, so the last block covers only part of its range.
+  // Wide enough that a segment spans more than one block of the reduction kernel
   auto const num_rows = 100'003;
   cudf::test::fixed_width_column_wrapper<int32_t> const col1(
     cuda::make_counting_iterator(0),
@@ -750,11 +748,9 @@ TEST_F(MergeBitmaskTest, TestSegmentedBitmaskAndMultipleBlocksPerSegment)
     cuda::make_counting_iterator(num_rows),
     cudf::test::iterators::nulls_at_multiples_of(7));
 
-  // Rows null in the first segment are those at a multiple of 3 or of 5, and in the second those at
-  // a multiple of 7.
   auto const multiples_of = [&](int n) { return (num_rows - 1) / n + 1; };
-  auto const first_nulls  = multiples_of(3) + multiples_of(5) - multiples_of(15);
-  auto const second_nulls = multiples_of(7);
+  std::vector<cudf::size_type> const expected_null_counts{
+    multiples_of(3) + multiples_of(5) - multiples_of(15), multiples_of(7)};
 
   std::vector<cudf::column_view> const colviews{col1, col2, col3};
   std::vector<cudf::size_type> const segment_offsets{0, 2, 3};
@@ -762,11 +758,11 @@ TEST_F(MergeBitmaskTest, TestSegmentedBitmaskAndMultipleBlocksPerSegment)
     cudf::segmented_bitmask_and(colviews, segment_offsets);
 
   ASSERT_EQ(result_masks.size(), 2);
-  EXPECT_EQ(result_null_count, std::vector<cudf::size_type>({first_nulls, second_nulls}));
+  EXPECT_EQ(result_null_count, expected_null_counts);
 
   auto const [expected_mask, expected_null_count] =
     cudf::bitmask_and(cudf::table_view({col1, col2}));
-  EXPECT_EQ(expected_null_count, first_nulls);
+  EXPECT_EQ(expected_null_count, expected_null_counts[0]);
   CUDF_TEST_EXPECT_EQUAL_BUFFERS(
     result_masks[0]->data(), expected_mask.data(), cudf::num_bitmask_words(num_rows));
   CUDF_TEST_EXPECT_EQUAL_BUFFERS(result_masks[1]->data(),
