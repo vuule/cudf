@@ -158,8 +158,8 @@ CUDF_KERNEL void segmented_offset_bitmask_binop(Binop op,
 {
   // Each segment is processed by `blocks_per_segment` consecutive blocks, so that the words of a
   // segment are spread across enough threads even when there are few segments.
-  auto const block_rank    = static_cast<size_type>(blockIdx.x);
-  auto const segment_id    = block_rank / blocks_per_segment;
+  auto const block_rank       = static_cast<size_type>(blockIdx.x);
+  auto const segment_id       = block_rank / blocks_per_segment;
   auto const block_in_segment = block_rank % blocks_per_segment;
   if (segment_id >= num_segments) { return; }
 
@@ -429,16 +429,16 @@ rmm::device_uvector<size_type> inplace_segmented_bitmask_binop(
     d_null_counts.data(), 0, d_null_counts.size() * sizeof(size_type), stream.get()));
   segmented_offset_bitmask_binop<block_size>
     <<<num_segments * blocks_per_segment, block_size, 0, stream.get()>>>(op,
-                                                                        identity,
-                                                                        num_segments,
-                                                                        blocks_per_segment,
-                                                                        dest_masks.data(),
-                                                                        dest_mask_size,
-                                                                        d_masks.data(),
-                                                                        d_begin_bits.data(),
-                                                                        mask_size_bits,
-                                                                        d_segment_offsets.data(),
-                                                                        d_null_counts.data());
+                                                                         identity,
+                                                                         num_segments,
+                                                                         blocks_per_segment,
+                                                                         dest_masks.data(),
+                                                                         dest_mask_size,
+                                                                         d_masks.data(),
+                                                                         d_begin_bits.data(),
+                                                                         mask_size_bits,
+                                                                         d_segment_offsets.data(),
+                                                                         d_null_counts.data());
   CUDF_CHECK_CUDA(stream.get());
   return d_null_counts;
 }

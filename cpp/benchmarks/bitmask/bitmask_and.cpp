@@ -87,10 +87,7 @@ void BM_segmented_bitmask_and(nvbench::state& state)
   set_throughputs(state);
 }
 
-void BM_segmented_bitmask_and_wide_masks(nvbench::state& state)
-{
-  BM_segmented_bitmask_and(state);
-}
+void BM_segmented_bitmask_and_wide_masks(nvbench::state& state) { BM_segmented_bitmask_and(state); }
 
 void BM_multi_segment_bitmask_and(nvbench::state& state)
 {
