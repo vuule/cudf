@@ -1191,10 +1191,10 @@ dayfirst : bool, default False
     DD/MM format dates, international and European format.
 compression : {{'infer', 'gzip', 'bz2', 'zip', 'zstd', None}}, default 'infer'
     For on-the-fly decompression of on-disk data. If 'infer', then detect
-    compression from the following extensions: '.gz','.zip' (otherwise no
-    decompression). If using 'zip', the ZIP file must contain only one
-    data file to be read in, otherwise the first non-zero-sized file will
-    be used. Set to None for no decompression.
+    compression from the following extensions: '.gz', '.bz2', '.zip', '.zst'
+    (otherwise no decompression). If using 'zip', the ZIP file must contain
+    only one data file to be read in, otherwise the first non-zero-sized file
+    will be used. Set to None for no decompression.
 thousands : char, default None
     Character used as a thousands delimiter.
 decimal : char, default '.'

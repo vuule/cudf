@@ -2105,11 +2105,13 @@ def test_to_csv_zstd_compression(tmp_path, data, chunksize):
         decompressed = zstd.ZstdDecompressor().stream_reader(f).read()
     assert decompressed.decode("utf-8") == expected
 
-    # the reader must be able to consume the output too
-    assert_eq(
-        cudf.read_csv(StringIO(expected)),
-        cudf.read_csv(fname, compression="zstd"),
-    )
+    # the reader must be able to consume the output too, both when told the
+    # codec and when inferring it from the ".zst" extension
+    for read_compression in ("zstd", "infer"):
+        assert_eq(
+            cudf.read_csv(StringIO(expected)),
+            cudf.read_csv(fname, compression=read_compression),
+        )
 
 
 def test_empty_df_no_index():
