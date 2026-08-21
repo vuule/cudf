@@ -6,6 +6,7 @@
 
 #include <cudf/detail/device_scalar.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
+#include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
@@ -123,24 +124,24 @@ CUDF_KERNEL void offset_bitmask_binop(Binop op,
  * 3. Counts the number of unset bits (nulls) in the resulting bitmask for each segment
  * 4. Writes the results to the destination mask and accumulates into the null counts array
  *
- * @tparam block_size      Number of threads per block
- * @tparam Binop           Type of binary operator
+ * @tparam block_size        Number of threads per block
+ * @tparam Binop             Type of binary operator
  *
- * @param op               The binary operator to apply to the bitmasks
- * @param identity         Identity element of `op`, used to seed each segment's reduction; a
+ * @param op                 The binary operator to apply to the bitmasks
+ * @param identity           Identity element of `op`, used to seed each segment's reduction; a
  * segment containing no masks therefore produces a destination filled with `identity`
- * @param num_segments     Number of segments to process
+ * @param num_segments       Number of segments to process
  * @param blocks_per_segment Number of blocks cooperating on each segment
- * @param destinations     Array of pointers to destination bitmasks where results will be written
- * @param destination_size Size of each destination mask in bitmask words (not bits)
- * @param sources          Array of pointers to source bitmasks to be operated on
- * @param source_begin_bits Array of bit offsets from which each source mask is to be processed
- * @param source_size_bits The number of bits to process in each mask
- * @param segment_offsets  Array of `num_segments + 1` indices defining the segments in the sources
- * array, segment `i` covering `[segment_offsets[i], segment_offsets[i + 1])`; behavior is undefined
- * unless the indices are non-decreasing and none exceeds the number of masks in `sources`
- * @param null_counts      Array the count of unset bits for each segment is accumulated into; must
- * be zeroed before launch
+ * @param destinations       Array of pointers to destination bitmasks where results will be written
+ * @param destination_size   Size of each destination mask in bitmask words (not bits)
+ * @param sources            Array of pointers to source bitmasks to be operated on
+ * @param source_begin_bits  Array of bit offsets from which each source mask is to be processed
+ * @param source_size_bits   The number of bits to process in each mask
+ * @param segment_offsets    Array of `num_segments + 1` indices defining the segments in the
+ * sources array, segment `i` covering `[segment_offsets[i], segment_offsets[i + 1])`; behavior is
+ * undefined unless the indices are non-decreasing and none exceeds the number of masks in `sources`
+ * @param null_counts        Array the count of unset bits for each segment is accumulated into;
+ * must be zeroed before launch
  *
  */
 template <int block_size, typename Binop>
@@ -407,7 +408,9 @@ rmm::device_uvector<size_type> inplace_segmented_bitmask_binop(
   CUDF_EXPECTS(segment_offsets.size() >= 2,
                "At least one segment needs to be passed for bitwise operations");
   auto const num_segments = static_cast<size_type>(segment_offsets.size() - 1);
-  rmm::device_uvector<size_type> d_null_counts(num_segments, stream, mr);
+  // The kernel accumulates into the null counts, so they have to start at zero
+  auto d_null_counts =
+    cudf::detail::make_zeroed_device_uvector_async<size_type>(num_segments, stream, mr);
   auto temp_mr      = cudf::get_current_device_resource_ref();
   auto d_masks      = cudf::detail::make_device_uvector_async(masks, stream, temp_mr);
   auto d_begin_bits = cudf::detail::make_device_uvector_async(masks_begin_bits, stream, temp_mr);
@@ -415,7 +418,16 @@ rmm::device_uvector<size_type> inplace_segmented_bitmask_binop(
     cudf::detail::make_device_uvector_async(segment_offsets, stream, temp_mr);
 
   auto constexpr block_size = 256;
-  auto constexpr max_blocks = 4096;
+
+  // Splitting the segments is only worth it up to a few times the number of blocks the device can
+  // hold at once. Past that the extra blocks just queue, while each one still pays for its own
+  // reduction and atomic. The multiplier is empirical: on an A100 both a single wave and an
+  // uncapped grid are measurably slower than this on the shapes the benchmarks cover.
+  auto constexpr waves           = 8;
+  auto blocks_per_multiprocessor = int{};
+  CUDF_CUDA_TRY(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+    &blocks_per_multiprocessor, segmented_offset_bitmask_binop<block_size, Binop>, block_size, 0));
+  auto const max_blocks = waves * blocks_per_multiprocessor * cudf::detail::num_multiprocessors();
 
   // A batch of a few wide segments needs the words of each segment split across several blocks to
   // fill the device, while a batch of many segments already has enough parallelism with one block
@@ -425,8 +437,6 @@ rmm::device_uvector<size_type> inplace_segmented_bitmask_binop(
              std::min(util::div_rounding_up_safe<int>(dest_mask_size, block_size),
                       max_blocks / num_segments));
 
-  CUDF_CUDA_TRY(cudaMemsetAsync(
-    d_null_counts.data(), 0, d_null_counts.size() * sizeof(size_type), stream.get()));
   segmented_offset_bitmask_binop<block_size>
     <<<num_segments * blocks_per_segment, block_size, 0, stream.get()>>>(op,
                                                                          identity,
