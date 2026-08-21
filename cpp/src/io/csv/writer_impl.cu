@@ -72,7 +72,7 @@ namespace {
  * @param data Device data to write
  * @param stream CUDA stream
  */
-void write_to_sink(data_sink* out_sink, device_span<char const> data, rmm::cuda_stream_view stream)
+void write_to_sink(data_sink* out_sink, device_span<char const> data, cuda::stream_ref stream)
 {
   if (out_sink->is_device_write_preferred(data.size())) {
     out_sink->device_write(data.data(), data.size(), stream);
@@ -100,41 +100,63 @@ size_t compression_block_size(compression_type compression, size_t requested_siz
  * fixed-size blocks at arbitrary byte offsets, each compressed into its own frame by a single
  * batched call.
  *
+ * `tail` is compressed as one more block in the same batched call, so appending it does not
+ * require copying `data`.
+ *
  * @param out_sink Output data sink
  * @param data Uncompressed device data
+ * @param tail Uncompressed device data to write after `data`; may be empty
  * @param compression Compression type (only ZSTD is supported)
  * @param requested_block_size Size of the blocks the data is split into
  * @param stream CUDA stream
  */
 void write_compressed_to_sink(data_sink* out_sink,
                               device_span<char const> data,
+                              device_span<char const> tail,
                               compression_type compression,
                               size_t requested_block_size,
-                              rmm::cuda_stream_view stream)
+                              cuda::stream_ref stream)
 {
   CUDF_EXPECTS(compression == compression_type::ZSTD,
                "Only ZSTD compression is supported for CSV writer. "
                "ZSTD supports concatenated frames which enables progressive compression "
                "compatible with standard decompression tools.");
 
-  if (data.empty()) { return; }
+  if (data.empty() and tail.empty()) { return; }
 
-  auto const block_size     = compression_block_size(compression, requested_block_size);
-  auto const num_blocks     = cudf::util::div_rounding_up_safe(data.size(), block_size);
-  auto const max_block_size = io::detail::max_compressed_size(compression, block_size);
-
-  rmm::device_uvector<uint8_t> comp_buffer(num_blocks * max_block_size, stream);
+  auto const block_size      = compression_block_size(compression, requested_block_size);
+  auto const num_data_blocks = cudf::util::div_rounding_up_safe(data.size(), block_size);
+  auto const num_blocks      = num_data_blocks + (tail.empty() ? 0 : 1);
 
   cudf::detail::hostdevice_vector<device_span<uint8_t const>> inputs(num_blocks, stream);
   cudf::detail::hostdevice_vector<device_span<uint8_t>> outputs(num_blocks, stream);
   cudf::detail::hostdevice_vector<io::detail::codec_exec_result> results(num_blocks, stream);
-  for (size_t block = 0; block < num_blocks; ++block) {
+
+  auto const as_bytes = [](device_span<char const> span) {
+    return reinterpret_cast<uint8_t const*>(span.data());
+  };
+  for (size_t block = 0; block < num_data_blocks; ++block) {
     auto const offset = block * block_size;
-    inputs[block] =
-      device_span<uint8_t const>{reinterpret_cast<uint8_t const*>(data.data()) + offset,
-                                 std::min(block_size, data.size() - offset)};
-    outputs[block] =
-      device_span<uint8_t>{comp_buffer.data() + block * max_block_size, max_block_size};
+    inputs[block]     = device_span<uint8_t const>{as_bytes(data) + offset,
+                                                   std::min(block_size, data.size() - offset)};
+  }
+  if (not tail.empty()) {
+    inputs[num_blocks - 1] = device_span<uint8_t const>{as_bytes(tail), tail.size()};
+  }
+
+  // the blocks are not all the same size, so the output buffer is laid out using the maximum
+  // compressed size of each individual block
+  auto out_offsets = cudf::detail::make_host_vector<size_t>(num_blocks + 1, stream);
+  out_offsets[0]   = 0;
+  for (size_t block = 0; block < num_blocks; ++block) {
+    out_offsets[block + 1] =
+      out_offsets[block] + io::detail::max_compressed_size(compression, inputs[block].size());
+  }
+  rmm::device_uvector<uint8_t> comp_buffer(out_offsets.back(), stream);
+
+  for (size_t block = 0; block < num_blocks; ++block) {
+    outputs[block] = device_span<uint8_t>{comp_buffer.data() + out_offsets[block],
+                                          out_offsets[block + 1] - out_offsets[block]};
     results[block] = io::detail::codec_exec_result{0, io::detail::codec_status::FAILURE};
   }
   inputs.host_to_device_async(stream);
@@ -164,7 +186,7 @@ void write_compressed_to_sink(data_sink* out_sink,
                     [](size_t sum, auto const& result) { return sum + result.bytes_written; }),
     stream);
   for (size_t block = 0; block < num_blocks; ++block) {
-    h_sources[block] = comp_buffer.data() + block * max_block_size;
+    h_sources[block] = comp_buffer.data() + out_offsets[block];
     h_dests[block]   = packed_buffer.data() + total_comp_size;
     h_sizes[block]   = results[block].bytes_written;
     total_comp_size += results[block].bytes_written;
@@ -182,28 +204,6 @@ void write_compressed_to_sink(data_sink* out_sink,
     out_sink,
     device_span<char const>{reinterpret_cast<char const*>(packed_buffer.data()), total_comp_size},
     stream);
-}
-
-/**
- * @brief Writes device data to the sink, compressing it first when compression is enabled.
- *
- * @param out_sink Output data sink
- * @param data Uncompressed device data
- * @param compression Compression type
- * @param block_size Size of the blocks the data is split into when compressing
- * @param stream CUDA stream
- */
-void write_data_with_compression(data_sink* out_sink,
-                                 device_span<char const> data,
-                                 compression_type compression,
-                                 size_t block_size,
-                                 rmm::cuda_stream_view stream)
-{
-  if (compression == compression_type::NONE) {
-    write_to_sink(out_sink, data, stream);
-  } else {
-    write_compressed_to_sink(out_sink, data, compression, block_size, stream);
-  }
 }
 
 /**
@@ -481,7 +481,7 @@ void write_chunked_begin(data_sink* out_sink,
       auto const d_header = cudf::detail::make_device_uvector_async(
         host_span<char const>{header}, stream, cudf::get_current_device_resource_ref());
       write_compressed_to_sink(
-        out_sink, d_header, compression, options.get_compression_block_size(), stream);
+        out_sink, d_header, {}, compression, options.get_compression_block_size(), stream);
     } else {
       out_sink->host_write(header.data(), header.size());
     }
@@ -541,23 +541,24 @@ void write_chunked(data_sink* out_sink,
   auto const compression = options.get_compression();
   auto const block_size  = options.get_compression_block_size();
 
-  write_data_with_compression(out_sink,
-                              device_span<char const>{ptr_all_bytes, total_num_bytes},
-                              compression,
-                              block_size,
-                              stream);
-
-  // Needs newline at the end, to separate from next chunk
+  auto const data = device_span<char const>{ptr_all_bytes, total_num_bytes};
   if (compression != compression_type::NONE) {
-    // Written as a separate ZSTD frame; concatenated frames are joined during decompression.
-    // This avoids copying the entire data buffer just to append a newline.
+    // The trailing newline that separates this chunk from the next one is compressed as an extra
+    // block of the same batched call, so it costs neither a copy of the chunk nor a second write.
     write_compressed_to_sink(
       out_sink,
+      data,
       device_span<char const>{newline.data(), static_cast<size_t>(newline.size())},
       compression,
       block_size,
       stream);
-  } else if (out_sink->is_device_write_preferred(newline.size())) {
+    return;
+  }
+
+  write_to_sink(out_sink, data, stream);
+
+  // Needs newline at the end, to separate from next chunk
+  if (out_sink->is_device_write_preferred(newline.size())) {
     out_sink->device_write(newline.data(), newline.size(), stream);
   } else {
     out_sink->host_write(options.get_line_terminator().data(),
