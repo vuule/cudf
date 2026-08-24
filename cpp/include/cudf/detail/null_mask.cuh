@@ -157,8 +157,7 @@ CUDF_KERNEL void segmented_offset_bitmask_binop(Binop op,
                                                 size_type const* const segment_offsets,
                                                 size_type* const null_counts)
 {
-  // Each segment is processed by `blocks_per_segment` consecutive blocks, so that the words of a
-  // segment are spread across enough threads even when there are few segments.
+  // Blocks are assigned to segments in consecutive groups of `blocks_per_segment`
   auto const block_rank       = static_cast<size_type>(blockIdx.x);
   auto const segment_id       = block_rank / blocks_per_segment;
   auto const block_in_segment = block_rank % blocks_per_segment;
