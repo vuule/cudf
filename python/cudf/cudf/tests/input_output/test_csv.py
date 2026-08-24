@@ -2070,48 +2070,42 @@ def test_to_csv_compression_no_path_error():
         df.to_csv(compression="zstd")
 
 
-# chunksize=None writes a single chunk; the small value forces multiple chunks
-@pytest.mark.parametrize("chunksize", [None, 10])
-@pytest.mark.parametrize(
-    "data",
-    [
-        {
-            "int_col": [1, 2, 3, 4, 5],
-            "str_col": ["a", "b", "c", "d", "e"],
-            "float_col": [1.1, 2.2, 3.3, 4.4, 5.5],
-        },
-        {
-            "int_col": list(range(100)),
-            "str_col": [f"row_{i}" for i in range(100)],
-        },
-        {"a": [1]},
-        {"a": []},
-        {},
-        {"a": [1, None, 3], "b": ["x", None, "z"]},
-        {"a": [None, None]},
-        # highly repetitive strings exercise a large compression ratio
-        {"str_col": ["x" * 100] * 500},
-    ],
-)
-def test_to_csv_zstd_compression(tmp_path, data, chunksize):
-    df = cudf.DataFrame(data)
+# The compressed content itself is covered by the libcudf tests; what only
+# Python can check is that a third-party zstd implementation accepts what the
+# writer emits. 8 is the smallest chunk size the writer accepts, and is used
+# verbatim since it is already a multiple of 8; it forces multiple frames.
+@pytest.mark.parametrize("chunksize", [None, 8])
+def test_to_csv_zstd_compression(tmp_path, chunksize):
+    df = cudf.DataFrame(
+        {"int_col": list(range(100)), "str_col": ["x" * 100] * 100}
+    )
     fname = tmp_path / "test_zstd.csv.zst"
     df.to_csv(fname, index=False, compression="zstd", chunksize=chunksize)
 
     # the compressed output must hold exactly what an uncompressed write produces
     expected = df.to_csv(index=False, chunksize=chunksize)
     with open(fname, "rb") as f:
-        # the writer emits concatenated frames, so the streaming API is required
-        decompressed = zstd.ZstdDecompressor().stream_reader(f).read()
+        # the writer emits concatenated frames, and the default for reading past
+        # the first one varies by zstandard version, so ask for it explicitly
+        decompressed = (
+            zstd.ZstdDecompressor()
+            .stream_reader(f, read_across_frames=True)
+            .read()
+        )
     assert decompressed.decode("utf-8") == expected
 
-    # the reader must be able to consume the output too, both when told the
-    # codec and when inferring it from the ".zst" extension
-    for read_compression in ("zstd", "infer"):
-        assert_eq(
-            cudf.read_csv(StringIO(expected)),
-            cudf.read_csv(fname, compression=read_compression),
-        )
+
+@pytest.mark.parametrize("compression", ["zstd", "infer"])
+def test_read_csv_zstd_written_by_to_csv(tmp_path, compression):
+    # "infer" has to recognize ".zst" and not only ".zstd", otherwise a file
+    # written by to_csv cannot be read back without naming the codec. The file
+    # has to come from to_csv rather than a streaming writer: our reader needs
+    # the decompressed size in the frame header, which streaming writers omit.
+    df = cudf.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+    fname = tmp_path / "test_zstd.csv.zst"
+    df.to_csv(fname, index=False, compression="zstd")
+
+    assert_eq(df, cudf.read_csv(fname, compression=compression))
 
 
 def test_empty_df_no_index():
