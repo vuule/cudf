@@ -407,6 +407,8 @@ rmm::device_uvector<size_type> inplace_segmented_bitmask_binop(
                "Mask pointer cannot be null");
   CUDF_EXPECTS(segment_offsets.size() >= 2,
                "At least one segment needs to be passed for bitwise operations");
+  CUDF_EXPECTS(dest_mask_size > 0, "Invalid destination mask size.");
+
   auto const num_segments = static_cast<size_type>(segment_offsets.size() - 1);
   // The kernel accumulates into the null counts, so they have to start at zero
   auto d_null_counts =
@@ -422,21 +424,14 @@ rmm::device_uvector<size_type> inplace_segmented_bitmask_binop(
   // Any block past this one would find no words left to process
   auto const blocks_to_cover_segment = util::div_rounding_up_safe<int>(dest_mask_size, block_size);
 
-  // Splitting the segments beyond a few waves of resident blocks only adds blocks that queue behind
-  // the ones already running, and each block pays for its own reduction and atomic however few
-  // words it ends up owning. The number of waves is empirical: on an A100 both a single wave and an
-  // uncapped grid are measurably slower on the shapes the benchmarks cover.
+  // The number of waves was chosen empirically based on Parquet and segmented bitmask benchmarks.
   auto constexpr target_waves    = 8;
   auto blocks_per_multiprocessor = int{};
   CUDF_CUDA_TRY(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
     &blocks_per_multiprocessor, segmented_offset_bitmask_binop<block_size, Binop>, block_size, 0));
   auto const block_budget_per_segment =
     target_waves * blocks_per_multiprocessor * cudf::detail::num_multiprocessors() / num_segments;
-
-  // A few wide segments need their words spread over blocks to fill the device, while many segments
-  // have enough parallelism with one block each and can exhaust the budget
-  auto const blocks_per_segment =
-    std::max(1, std::min(blocks_to_cover_segment, block_budget_per_segment));
+  auto const blocks_per_segment = std::clamp(block_budget_per_segment, 1, blocks_to_cover_segment);
 
   segmented_offset_bitmask_binop<block_size>
     <<<num_segments * blocks_per_segment, block_size, 0, stream.get()>>>(op,
