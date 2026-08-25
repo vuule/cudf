@@ -20,6 +20,7 @@
 
 #include <cub/block/block_reduce.cuh>
 #include <cub/device/device_segmented_reduce.cuh>
+#include <cuda/atomic>
 #include <cuda/functional>
 #include <cuda/iterator>
 #include <cuda/std/tuple>
@@ -215,7 +216,8 @@ CUDF_KERNEL void segmented_offset_bitmask_binop(Binop op,
   __shared__ typename BlockReduce::TempStorage temp_storage;
   auto const block_null_count = BlockReduce(temp_storage).Sum(thread_null_count);
   if (threadIdx.x == 0 && block_null_count > 0) {
-    atomicAdd(&null_counts[segment_id], block_null_count);
+    cuda::atomic_ref<size_type, cuda::thread_scope_device>{null_counts[segment_id]}.fetch_add(
+      block_null_count, cuda::std::memory_order_relaxed);
   }
 }
 
