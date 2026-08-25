@@ -27,6 +27,9 @@ constexpr int num_warps  = 32;
 constexpr int block_size = 32 * num_warps;
 // Add some margin to look ahead to future rows in case there are many zeroes
 constexpr int row_decoder_buffer_size = block_size + 128;
+// A byte RLE run encodes at most 130 values, so a position within one cannot exceed that many
+// bits' worth once the values are boolean
+constexpr uint32_t max_byte_rle_run_bits = 130 * 8;
 inline __device__ uint8_t is_rlev1(uint8_t encoding_mode) { return encoding_mode < DIRECT_V2; }
 
 inline __device__ uint8_t is_dictionary(uint8_t encoding_mode) { return encoding_mode & 1; }
@@ -1270,7 +1273,10 @@ CUDF_KERNEL void __launch_bounds__(block_size)
                                               dictionary_entry* global_dictionary,
                                               size_type num_columns,
                                               size_type num_stripes,
-                                              int64_t first_row)
+                                              int64_t first_row,
+                                              device_2dspan<row_group> row_groups,
+                                              size_type rowidx_stride,
+                                              size_t level)
 {
   __shared__ __align__(16) orcdec_state_s state_g;
   using warp_reduce  = cub::WarpReduce<uint32_t>;
@@ -1280,31 +1286,36 @@ CUDF_KERNEL void __launch_bounds__(block_size)
     typename block_reduce::TempStorage bk_storage;
   } temp_storage;
 
-  orcdec_state_s* const s = &state_g;
-  // Need the modulo because we have twice as many threads as columns*stripes
-  uint32_t const column   = blockIdx.x / num_stripes;
-  uint32_t const stripe   = blockIdx.x % num_stripes;
-  uint32_t const chunk_id = stripe * num_columns + column;
-  int t                   = threadIdx.x;
+  orcdec_state_s* const s  = &state_g;
+  int t                    = threadIdx.x;
+  auto const num_rowgroups = static_cast<size_type>(row_groups.size().first);
+  bool const is_nulldec    = (blockIdx.y == 0);
+  // When a row index is available the null decode is spread over row groups, which is what lets it
+  // scale with row count instead of stripe count. The dictionary build is per (column, stripe) and
+  // so uses only the leading blocks of the grid.
+  bool const split_nulls = is_nulldec && num_rowgroups > 0;
+
+  uint32_t column, stripe, chunk_id;
+  size_type rowgroup_idx = 0;
+  if (split_nulls) {
+    column       = blockIdx.x / num_rowgroups;
+    rowgroup_idx = blockIdx.x % num_rowgroups;
+    chunk_id     = row_groups[rowgroup_idx][column].chunk_id;
+    stripe       = chunk_id / num_columns;
+  } else {
+    if (blockIdx.x >= static_cast<uint32_t>(num_columns) * num_stripes) { return; }
+    // Need the modulo because we have twice as many threads as columns*stripes
+    column   = blockIdx.x / num_stripes;
+    stripe   = blockIdx.x % num_stripes;
+    chunk_id = stripe * num_columns + column;
+  }
 
   if (t == 0) s->chunk = chunks[chunk_id];
   __syncthreads();
   size_t const max_num_rows = s->chunk.column_num_rows - s->chunk.parent_validity_info.null_count;
 
-  bool const is_nulldec = (blockIdx.y == 0);
   if (is_nulldec) {
     uint32_t null_count = 0;
-    // Decode NULLs
-    if (t == 0) {
-      s->chunk.skip_count   = 0;
-      s->top.nulls_desc_row = 0;
-      bytestream_init(&s->bs, s->chunk.streams[CI_PRESENT], s->chunk.strm_len[CI_PRESENT]);
-    }
-    __syncthreads();
-    if (s->chunk.strm_len[CI_PRESENT] == 0) {
-      // No present stream: all rows are valid
-      s->vals.u32[t] = ~0;
-    }
     auto const prev_parent_null_count =
       (s->chunk.parent_null_count_prefix_sums != nullptr && stripe > 0)
         ? s->chunk.parent_null_count_prefix_sums[stripe - 1]
@@ -1314,20 +1325,67 @@ CUDF_KERNEL void __launch_bounds__(block_size)
         ? s->chunk.parent_null_count_prefix_sums[stripe] - prev_parent_null_count
         : 0;
     auto const num_elems = s->chunk.num_rows - parent_null_count;
-    while (s->top.nulls_desc_row < num_elems) {
+
+    // Nested levels reach their row groups through a parent whose nulls shift the PRESENT stream
+    // away from the row index positions, so they stay on the whole-stripe path, run by the block
+    // that owns the chunk's first row group.
+    bool const by_rowgroup = split_nulls && level == 0;
+    if (split_nulls && !by_rowgroup && rowgroup_idx != s->chunk.rowgroup_id) { return; }
+
+    // Row range of this chunk that this block is responsible for. Partial words at either end are
+    // written with disjoint-mask atomics below, so neighbouring row groups do not clobber one
+    // another even though the stride need not be a multiple of 32.
+    int64_t begin_row = 0;
+    int64_t end_row   = num_elems;
+    // Bits of the seeked-to RLE run that belong to earlier row groups and must be discarded
+    uint32_t bit_skip = 0;
+    if (by_rowgroup) {
+      auto const& rg = row_groups[rowgroup_idx][column];
+      // Row groups are laid out at a fixed stride within the chunk; `rg.start_row` only carries
+      // that offset for nested levels, which do not take this path.
+      begin_row = static_cast<int64_t>(rowgroup_idx - min(s->chunk.rowgroup_id, rowgroup_idx)) *
+                  rowidx_stride;
+      end_row = min(begin_row + static_cast<int64_t>(rg.num_rows), num_elems);
+      if (begin_row >= end_row) { return; }
+      // Clamping keeps a corrupt index from underflowing the batch size below.
+      bit_skip = min(static_cast<uint32_t>(rg.run_pos[CI_PRESENT]), max_byte_rle_run_bits);
+    }
+
+    // Decode NULLs
+    if (t == 0) {
+      s->chunk.skip_count   = 0;
+      s->top.nulls_desc_row = begin_row;
+      auto const strm_ofs   = by_rowgroup
+                                ? min(row_groups[rowgroup_idx][column].strm_offset[CI_PRESENT],
+                                    s->chunk.strm_len[CI_PRESENT])
+                                : 0;
+      bytestream_init(&s->bs,
+                      s->chunk.streams[CI_PRESENT] + strm_ofs,
+                      static_cast<uint32_t>(s->chunk.strm_len[CI_PRESENT] - strm_ofs));
+    }
+    __syncthreads();
+    if (s->chunk.strm_len[CI_PRESENT] == 0) {
+      // No present stream: all rows are valid
+      s->vals.u32[t] = ~0;
+      bit_skip       = 0;
+    }
+    while (s->top.nulls_desc_row < end_row) {
+      // The skipped bits share the decode buffer with the rows we want, so leave room for them
       auto const nrows_max =
-        static_cast<uint32_t>(min(num_elems - s->top.nulls_desc_row, blockDim.x * 32ul));
+        static_cast<uint32_t>(min(end_row - s->top.nulls_desc_row, blockDim.x * 32ul - bit_skip));
 
       bytestream_fill(&s->bs, t);
       __syncthreads();
 
       uint32_t nrows;
       if (s->chunk.strm_len[CI_PRESENT] > 0) {
-        uint32_t nbytes = byte_rle(&s->bs, &s->u.rle8, s->vals.u8, (nrows_max + 7) >> 3, t);
-        nrows           = min(nrows_max, nbytes * 8u);
+        uint32_t nbytes =
+          byte_rle(&s->bs, &s->u.rle8, s->vals.u8, (bit_skip + nrows_max + 7) >> 3, t);
+        nrows = min(nrows_max, nbytes * 8u - min(bit_skip, nbytes * 8u));
         if (!nrows) {
           // Error: mark all remaining rows as null
-          nrows = nrows_max;
+          nrows    = nrows_max;
+          bit_skip = 0;
           if (t * 32 < nrows) { s->vals.u32[t] = 0; }
         }
       } else {
@@ -1340,7 +1398,7 @@ CUDF_KERNEL void __launch_bounds__(block_size)
           s->chunk.valid_map_base != nullptr) {
         int64_t dst_row   = row_in - first_row;
         int64_t dst_pos   = max(dst_row, (int64_t)0);
-        uint32_t startbit = -static_cast<int32_t>(min(dst_row, (int64_t)0));
+        uint32_t startbit = bit_skip - static_cast<int32_t>(min(dst_row, (int64_t)0));
         uint32_t nbits    = nrows - min(startbit, nrows);
         uint32_t* valid   = s->chunk.valid_map_base + (dst_pos >> 5);
         uint32_t bitpos   = static_cast<uint32_t>(dst_pos) & 0x1f;
@@ -1393,14 +1451,26 @@ CUDF_KERNEL void __launch_bounds__(block_size)
       }
       __syncthreads();
       if (t == 0) { s->top.nulls_desc_row += nrows; }
+      // Only the first batch starts part-way into an RLE run
+      bit_skip = 0;
       __syncthreads();
     }
     __syncthreads();
     // Sum up the valid counts and infer null_count
     null_count = block_reduce(temp_storage.bk_storage).Sum(null_count);
     if (t == 0) {
-      chunks[chunk_id].null_count = parent_null_count + null_count;
-      chunks[chunk_id].skip_count = s->chunk.skip_count;
+      if (by_rowgroup) {
+        // Every row group of the chunk contributes, and `parent_null_count` is zero on this path.
+        atomicAdd(reinterpret_cast<unsigned long long*>(&chunks[chunk_id].null_count),
+                  static_cast<unsigned long long>(null_count));
+        // `skip_count` arrives holding the index-stream bitmap that `parse_row_group_index_kernel`
+        // consumed, so it has to be overwritten even though `first_row` is zero here. One block per
+        // chunk does it, to keep the write unshared.
+        if (rowgroup_idx == s->chunk.rowgroup_id) { chunks[chunk_id].skip_count = 0; }
+      } else {
+        chunks[chunk_id].null_count = parent_null_count + null_count;
+        chunks[chunk_id].skip_count = s->chunk.skip_count;
+      }
     }
   } else {
     // Decode string dictionary
@@ -2064,13 +2134,27 @@ void __host__ decode_nulls_and_string_dictionaries(column_desc* chunks,
                                                    size_type num_columns,
                                                    size_type num_stripes,
                                                    int64_t first_row,
+                                                   device_2dspan<row_group> row_groups,
+                                                   size_type rowidx_stride,
+                                                   size_t level,
                                                    cuda::stream_ref stream)
 {
-  dim3 dim_grid(num_columns * num_stripes, 2);
+  // A row index lets the null decode run one block per row group instead of one per stripe, which
+  // is the difference between a handful of blocks and a full device on a narrow table. The
+  // dictionary half of the grid stays per (column, stripe) and ignores the extra blocks.
+  auto const num_rowgroups  = static_cast<size_type>(row_groups.size().first);
+  auto const nulldec_blocks = num_columns * (num_rowgroups > 0 ? num_rowgroups : num_stripes);
+  dim3 dim_grid(nulldec_blocks, 2);
 
   decode_nulls_and_string_dictionaries_kernel<block_size>
-    <<<dim_grid, block_size, 0, stream.get()>>>(
-      chunks, global_dictionary, num_columns, num_stripes, first_row);
+    <<<dim_grid, block_size, 0, stream.get()>>>(chunks,
+                                                global_dictionary,
+                                                num_columns,
+                                                num_stripes,
+                                                first_row,
+                                                row_groups,
+                                                rowidx_stride,
+                                                level);
   CUDF_CUDA_TRY(cudaGetLastError());
 }
 

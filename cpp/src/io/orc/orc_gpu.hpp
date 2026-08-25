@@ -79,6 +79,10 @@ enum stream_index_type {
   CI_NUM_STREAMS
 };
 
+// Streams that carry per-row-group positions in the row index, in the order they appear there.
+// Relies on CI_DATA, CI_DATA2 and CI_PRESENT being the first three entries above.
+constexpr int num_indexed_streams = CI_PRESENT + 1;
+
 /**
  * @brief Struct to describe a single entry in the global dictionary
  */
@@ -120,9 +124,12 @@ struct column_desc {
  * @brief Struct to describe a groups of row belonging to a column stripe
  */
 struct row_group {
-  uint32_t chunk_id;        // Column chunk this entry belongs to
-  int64_t strm_offset[2];   // Index offset for CI_DATA and CI_DATA2 streams
-  uint16_t run_pos[2];      // Run position for CI_DATA and CI_DATA2
+  uint32_t chunk_id;  // Column chunk this entry belongs to
+  // Index offset for the CI_DATA, CI_DATA2 and CI_PRESENT streams
+  int64_t strm_offset[num_indexed_streams];
+  // Run position for the same streams. For CI_PRESENT, and for CI_DATA of a BOOLEAN column, this is
+  // a bit position within the run rather than a value count.
+  uint16_t run_pos[num_indexed_streams];
   uint32_t num_rows;        // number of rows in rowgroup
   int64_t start_row;        // starting row of the rowgroup
   uint32_t num_child_rows;  // number of rows of children in rowgroup in case of list type
@@ -289,6 +296,9 @@ void parse_row_group_index(row_group* row_groups,
  * @param[in] num_columns Number of columns
  * @param[in] num_stripes Number of stripes
  * @param[in] first_row Crop all rows below first_row
+ * @param[in] row_groups Row group descriptors [rowgroup][column], empty if the row index is unused
+ * @param[in] rowidx_stride Number of rows per row group
+ * @param[in] level Nesting level being decoded
  * @param[in] stream CUDA stream used for device memory operations and kernel launches
  */
 void decode_nulls_and_string_dictionaries(column_desc* chunks,
@@ -296,6 +306,9 @@ void decode_nulls_and_string_dictionaries(column_desc* chunks,
                                           size_type num_columns,
                                           size_type num_stripes,
                                           int64_t first_row,
+                                          device_2dspan<row_group> row_groups,
+                                          size_type rowidx_stride,
+                                          size_t level,
                                           cuda::stream_ref stream);
 
 /**

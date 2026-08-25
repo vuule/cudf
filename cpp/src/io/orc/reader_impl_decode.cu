@@ -396,8 +396,15 @@ void decode_stream_data(int64_t num_dicts,
   rmm::device_uvector<dictionary_entry> global_dict(num_dicts, stream);
 
   chunks.host_to_device_async(stream);
-  decode_nulls_and_string_dictionaries(
-    chunks.base_device_ptr(), global_dict.data(), num_columns, num_stripes, skip_rows, stream);
+  decode_nulls_and_string_dictionaries(chunks.base_device_ptr(),
+                                       global_dict.data(),
+                                       num_columns,
+                                       num_stripes,
+                                       skip_rows,
+                                       row_groups,
+                                       row_index_stride,
+                                       level,
+                                       stream);
 
   if (level > 0) {
     // Update nullmasks for children if parent was a struct and had null mask
