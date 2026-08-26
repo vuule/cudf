@@ -392,6 +392,7 @@ std::vector<std::unique_ptr<column>> superimpose_nulls(
     masks_begin_bits,
     num_rows,
     segment_offsets,
+    ~bitmask_type{0},  // identity of bitwise AND
     stream,
     mr);
   auto const result_null_counts = cudf::detail::make_std_vector<size_type>(d_null_counts, stream);
