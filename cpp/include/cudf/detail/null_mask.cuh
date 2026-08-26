@@ -162,9 +162,7 @@ CUDF_KERNEL void segmented_offset_bitmask_binop(Binop op,
 {
   namespace cg = cooperative_groups;
 
-  // Treat the whole block as a single tile, so that the null count reduction below is one
-  // group-wide collective. `cg::reduce` rejects a plain thread block, which is why the tile needs
-  // explicitly declared scratch memory.
+  // Treat the whole block as a single tile
   __shared__ cg::block_tile_memory<block_size> tile_memory;
   auto const block = cg::this_thread_block(tile_memory);
   auto const tile  = cg::tiled_partition<block_size>(block);
@@ -225,9 +223,11 @@ CUDF_KERNEL void segmented_offset_bitmask_binop(Binop op,
 
   // Reduce the null counts across the block, then across the blocks of the segment
   auto const block_null_count = cg::reduce(tile, thread_null_count, cg::plus<size_type>());
-  if (tile.thread_rank() == 0 && block_null_count > 0) {
-    cuda::atomic_ref<size_type, cuda::thread_scope_device>{null_counts[segment_id]}.fetch_add(
-      block_null_count, cuda::std::memory_order_relaxed);
+  if (block_null_count > 0) {
+    cg::invoke_one(tile, [&] {
+      cuda::atomic_ref<size_type, cuda::thread_scope_device>{null_counts[segment_id]}.fetch_add(
+        block_null_count, cuda::std::memory_order_relaxed);
+    });
   }
 }
 
