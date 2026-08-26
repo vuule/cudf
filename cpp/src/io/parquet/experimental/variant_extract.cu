@@ -30,6 +30,7 @@
 #include <cudf/utilities/type_dispatcher.hpp>
 
 #include <rmm/device_buffer.hpp>
+#include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
@@ -463,41 +464,85 @@ __device__ int compare_keys(cudf::string_view lhs, cudf::string_view rhs)
   return lhs.size_bytes() - rhs.size_bytes();
 }
 
-// Search `[begin, num_fields)` for `target`. `peek` first tests position `begin`, which resolves
-// the key in one probe when the caller is walking keys that are dense in the object.
-__device__ field_search find_field(object_fields const& obj,
-                                   metadata_dictionary const& dict,
-                                   cudf::string_view target,
-                                   size_type begin,
-                                   bool peek)
+// Search `[begin, num_fields)` with `compare_at`, which orders the field at a position against the
+// caller's target and returns nullopt when the entry cannot be read. `peek` first tests position
+// `begin`, which resolves the key in one probe when the caller is walking keys that are dense in
+// the object.
+template <typename CompareAt>
+__device__ field_search
+find_field_with(object_fields const& obj, size_type begin, bool peek, CompareAt compare_at)
 {
   size_type lo = begin;
   size_type hi = obj.num_fields;
 
   if (peek && lo < hi) {
-    auto const name = field_name_at(obj, dict, lo);
-    if (!name.has_value()) { return {lo, false, op_status::MALFORMED_VARIANT}; }
-    auto const cmp = compare_keys(name.value(), target);
-    if (cmp == 0) { return {lo, true, op_status::SUCCESS}; }
+    auto const cmp = compare_at(lo);
+    if (!cmp.has_value()) { return {lo, false, op_status::MALFORMED_VARIANT}; }
+    if (cmp.value() == 0) { return {lo, true, op_status::SUCCESS}; }
     // The fields are name-ordered, so a greater name here puts the target before this position.
-    if (cmp > 0) { return {lo, false, op_status::SUCCESS}; }
+    if (cmp.value() > 0) { return {lo, false, op_status::SUCCESS}; }
     ++lo;
   }
 
   // Not using thrust::lower_bound since it does not propagate entry read failures.
   while (lo < hi) {
     size_type const mid = lo + (hi - lo) / 2;
-    auto const name     = field_name_at(obj, dict, mid);
-    if (!name.has_value()) { return {mid, false, op_status::MALFORMED_VARIANT}; }
-    auto const cmp = compare_keys(name.value(), target);
-    if (cmp == 0) { return {mid, true, op_status::SUCCESS}; }
-    if (cmp < 0) {
+    auto const cmp      = compare_at(mid);
+    if (!cmp.has_value()) { return {mid, false, op_status::MALFORMED_VARIANT}; }
+    if (cmp.value() == 0) { return {mid, true, op_status::SUCCESS}; }
+    if (cmp.value() < 0) {
       lo = mid + 1;
     } else {
       hi = mid;
     }
   }
   return {lo, false, op_status::SUCCESS};
+}
+
+__device__ field_search find_field(object_fields const& obj,
+                                   metadata_dictionary const& dict,
+                                   cudf::string_view target,
+                                   size_type begin,
+                                   bool peek)
+{
+  return find_field_with(obj, begin, peek, [&](size_type index) -> cuda::std::optional<int> {
+    auto const name = field_name_at(obj, dict, index);
+    if (!name.has_value()) { return cuda::std::nullopt; }
+    return compare_keys(name.value(), target);
+  });
+}
+
+// PROTOTYPE SCAFFOLDING (shared dictionary), through to the end of locate_object_fields_ranked.
+//
+// Every row's dictionary resolved once up front, so that a probe compares two small integers
+// instead of reading and comparing name bytes out of the row's metadata blob.
+//
+// A field id cannot be compared directly: an object's ids are ordered by *name*, and a dictionary
+// need not be sorted. `rank[id]` is the position id's name takes in sorted order, which is the
+// order the object's fields are in, so comparing ranks orders fields exactly as comparing names
+// would. `step_rank[step]` is the rank each step token resolves to, or -1 when the dictionary does
+// not contain it -- then no field can match, and the search answers "absent" without a single name
+// byte.
+struct shared_dictionary_view {
+  device_span<size_type const> rank;       ///< rank[id], one entry per dictionary entry
+  device_span<size_type const> step_rank;  ///< Rank of each step token, -1 if absent
+};
+
+__device__ field_search find_field_by_rank(object_fields const& obj,
+                                           shared_dictionary_view const& shared,
+                                           size_type target_rank,
+                                           size_type begin,
+                                           bool peek)
+{
+  auto const num_entries = static_cast<size_type>(shared.rank.size());
+  return find_field_with(obj, begin, peek, [&](size_type index) -> cuda::std::optional<int> {
+    auto const id =
+      narrow_cast(read_uint64(obj.val, obj.ids_start + index * obj.id_size, obj.id_size));
+    // An id outside the dictionary is malformed, exactly as a failed name lookup would be.
+    if (!id.has_value() || id.value() >= num_entries) { return cuda::std::nullopt; }
+    auto const rank = shared.rank[id.value()];
+    return rank == target_rank ? 0 : (rank < target_rank ? -1 : 1);
+  });
 }
 
 // The encoded bytes of the field named `target_name`, or an empty span and the reason it failed if
@@ -558,6 +603,59 @@ __device__ void locate_object_fields(device_span<uint8_t const> meta,
       // replaces two keys out of three.
       bool const dense = (obj.num_fields - at) <= 4 * (num_keys - key);
       auto const match = find_field(obj, dict, target, at, dense);
+      if (match.status != op_status::SUCCESS) {
+        group_status = match.status;
+        break;
+      }
+      if (!match.found) {
+        emit(key, device_span<uint8_t const>{}, op_status::MISSING_PATH);
+        at = match.index;
+        continue;
+      }
+      auto const [field, status] = field_value_at(obj, match.index);
+      emit(key, field, status);
+      at = match.index + 1;
+    }
+  }
+  for (; key < num_keys; ++key) {
+    emit(key, device_span<uint8_t const>{}, group_status);
+  }
+}
+
+// locate_object_field against a pre-resolved dictionary: the metadata blob is never read, so a
+// missing rank settles the lookup without touching the object at all.
+__device__ cuda::std::pair<device_span<uint8_t const>, op_status> locate_object_field_ranked(
+  shared_dictionary_view const& shared, device_span<uint8_t const> val, size_type step)
+{
+  auto const obj = parse_object_fields(val);
+  if (obj.status != op_status::SUCCESS) { return {{}, obj.status}; }
+
+  auto const match = find_field_by_rank(obj, shared, shared.step_rank[step], 0, false);
+  if (match.status != op_status::SUCCESS) { return {{}, match.status}; }
+  if (!match.found) { return {{}, op_status::MISSING_PATH}; }
+  return field_value_at(obj, match.index);
+}
+
+// locate_object_fields against a pre-resolved dictionary. Same sweep, ranks instead of names, and
+// no metadata parse for the group.
+template <typename Emit>
+__device__ void locate_object_fields_ranked(shared_dictionary_view const& shared,
+                                            device_span<uint8_t const> val,
+                                            device_span<size_type const> key_steps,
+                                            Emit emit)
+{
+  auto const num_keys = static_cast<size_type>(key_steps.size());
+  auto const obj      = parse_object_fields(val);
+
+  auto group_status = obj.status;
+
+  size_type key = 0;
+  if (group_status == op_status::SUCCESS) {
+    size_type at = 0;
+    for (; key < num_keys; ++key) {
+      bool const dense = (obj.num_fields - at) <= 4 * (num_keys - key);
+      auto const match =
+        find_field_by_rank(obj, shared, shared.step_rank[key_steps[key]], at, dense);
       if (match.status != op_status::SUCCESS) {
         group_status = match.status;
         break;
@@ -778,12 +876,15 @@ __device__ cuda::std::optional<size_type> parse_index_step(cudf::string_view ste
 //   - "<name>"  -> descend into an object by dictionary key, or
 //   - "[<N>]"   -> descend into an array by zero-based integer index.
 // The step kind is inferred from the first byte (`'['` means index).
+// `SharedDict` resolves name steps by rank against `shared` instead of by name against `meta`.
+template <bool SharedDict = false>
 __device__ cuda::std::pair<device_span<uint8_t const>, op_status> resolve_steps(
   device_span<uint8_t const> meta,
   device_span<uint8_t const> val,
   column_device_view path,
   size_type step_begin,
-  size_type step_end)
+  size_type step_end,
+  shared_dictionary_view shared = {})
 {
   // An empty starting value cannot resolve anything, and checking up front keeps a failed shared
   // prefix from paying for a metadata lookup once per path below it.
@@ -799,7 +900,13 @@ __device__ cuda::std::pair<device_span<uint8_t const>, op_status> resolve_steps(
       if (st != op_status::SUCCESS) { return {{}, st}; }
       sub_val = span;
     } else {
-      auto const [span, st] = locate_object_field(meta, sub_val, step);
+      auto const [span, st] = [&] {
+        if constexpr (SharedDict) {
+          return locate_object_field_ranked(shared, sub_val, i);
+        } else {
+          return locate_object_field(meta, sub_val, step);
+        }
+      }();
       if (st != op_status::SUCCESS) { return {{}, st}; }
       sub_val = span;
     }
@@ -1049,8 +1156,10 @@ struct trie_device_view {
  * @tparam UseLocalScratch Keep the per-thread located values in local memory rather than
  * `d_scratch`
  * @tparam MergeSiblings Resolve the first steps of sibling slots in one pass per object
+ * @tparam SharedDict Probe by rank against a dictionary resolved once for every row, rather than by
+ * name against each row's own metadata blob
  */
-template <bool UseLocalScratch, bool MergeSiblings>
+template <bool UseLocalScratch, bool MergeSiblings, bool SharedDict = false>
 CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
   cudf::lists_column_device_view metadata,
   cudf::lists_column_device_view values,
@@ -1062,7 +1171,8 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
   device_span<size_type> d_src_offsets,
   device_span<bitmask_type* const> d_null_masks,
   device_span<op_status* const> d_statuses,  // empty when no status was requested
-  device_span<slot_result> d_scratch)
+  device_span<slot_result> d_scratch,
+  shared_dictionary_view shared = {})
 {
   auto const num_slots = static_cast<size_type>(trie.slot_depth.size());
   auto const num_paths = static_cast<size_type>(d_null_masks.size());
@@ -1140,14 +1250,16 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
               located[base + key] = {0, invalid_slot_size, parent_status};
             }
           } else {
-            locate_object_fields(
-              meta,
-              parent,
-              trie.steps,
-              trie.group_key_step.subspan(key_begin, num_keys),
-              [&](size_type key, device_span<uint8_t const> field, op_status status) {
-                located[base + key] = make_slot_result(field, val.data(), status);
-              });
+            auto const emit = [&](
+                                size_type key, device_span<uint8_t const> field, op_status status) {
+              located[base + key] = make_slot_result(field, val.data(), status);
+            };
+            auto const keys = trie.group_key_step.subspan(key_begin, num_keys);
+            if constexpr (SharedDict) {
+              locate_object_fields_ranked(shared, parent, keys, emit);
+            } else {
+              locate_object_fields(meta, parent, trie.steps, keys, emit);
+            }
           }
         }
         // Keys lead their group, so a slot within that prefix starts from its merged result.
@@ -1161,8 +1273,8 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
       if (parent.empty()) {
         located[me] = {0, invalid_slot_size, parent_status};
       } else {
-        auto const [field, status] =
-          resolve_steps(meta, parent, trie.steps, step_begin, trie.slot_steps[slot + 1]);
+        auto const [field, status] = resolve_steps<SharedDict>(
+          meta, parent, trie.steps, step_begin, trie.slot_steps[slot + 1], shared);
         located[me] = make_slot_result(field, val.data(), status);
       }
 
@@ -1549,6 +1661,131 @@ std::unique_ptr<column> build_path_column(cudf::host_span<std::string const> ste
 
 // Prototype switch, so that both lookup schemes can be measured from one build. Set
 // CUDF_VARIANT_MERGE_SIBLINGS=0 to search each sibling's first step on its own instead.
+// PROTOTYPE SCAFFOLDING (shared dictionary) below, through to shared_dictionary_plan.
+
+// True when every row's metadata blob is byte-identical to row 0's, which is what lets one resolved
+// dictionary stand in for all of them. Reads the whole metadata column, and is the price of not
+// being able to assume anything about it: the format makes the dictionary a per-row field.
+//
+// Two passes so that both are coalesced. The lengths have to match first, and then a row's byte `i`
+// has to equal byte `i % blob_len` of the first row -- which, once the lengths are equal, is the
+// same as comparing row against row, but with consecutive threads reading consecutive bytes of the
+// child column rather than each thread walking a blob of its own.
+CUDF_KERNEL __launch_bounds__(block_size) void metadata_lengths_uniform_kernel(
+  cudf::lists_column_device_view metadata, size_type num_rows, int* d_uniform)
+{
+  auto const tid      = cudf::detail::grid_1d::global_thread_id<block_size>();
+  auto const stride   = cudf::detail::grid_1d::grid_stride<block_size>();
+  auto const blob_len = metadata.offset_at(1) - metadata.offset_at(0);
+  for (auto row = tid; row < num_rows; row += stride) {
+    if (metadata.offset_at(row + 1) - metadata.offset_at(row) != blob_len) {
+      atomicAnd(d_uniform, 0);
+      return;
+    }
+  }
+}
+
+// One warp per row, lanes striding the blob, so the reads coalesce and row 0's copy stays in cache.
+// A warp rather than a block because a metadata blob is tens of bytes, and a block would leave most
+// of its threads with nothing to compare.
+CUDF_KERNEL __launch_bounds__(block_size) void metadata_bytes_uniform_kernel(
+  cudf::lists_column_device_view metadata, size_type num_rows, int* d_uniform)
+{
+  auto const* child   = metadata.child().data<uint8_t>();
+  auto const first    = child + metadata.offset_at(0);
+  auto const blob_len = metadata.offset_at(1) - metadata.offset_at(0);
+  if (blob_len <= 0) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) { atomicAnd(d_uniform, 0); }
+    return;
+  }
+
+  auto const warp = static_cast<size_type>(cudf::detail::grid_1d::global_thread_id<block_size>() /
+                                           cudf::detail::warp_size);
+  auto const num_warps = static_cast<size_type>(cudf::detail::grid_1d::grid_stride<block_size>() /
+                                                cudf::detail::warp_size);
+  auto const lane      = static_cast<size_type>(threadIdx.x % cudf::detail::warp_size);
+
+  for (auto row = warp; row < num_rows; row += num_warps) {
+    auto const* blob = child + metadata.offset_at(row);
+    for (auto i = lane; i < blob_len; i += cudf::detail::warp_size) {
+      if (blob[i] != first[i]) {
+        atomicAnd(d_uniform, 0);
+        return;
+      }
+    }
+  }
+}
+
+// Resolves row 0's dictionary once: the sorted-order rank of every entry, and the rank each step
+// token of the trie maps to. One block, since both loops are quadratic in sizes that are small
+// here; a real implementation would sort rather than count.
+CUDF_KERNEL __launch_bounds__(block_size) void build_shared_dictionary_kernel(
+  cudf::lists_column_device_view metadata,
+  column_device_view steps,
+  device_span<size_type> d_rank,
+  device_span<size_type> d_step_rank,
+  int* d_ok)
+{
+  auto const dict = parse_metadata_dictionary(list_row_span(metadata, 0));
+  if (dict.status != op_status::SUCCESS || dict.num_entries != d_rank.size()) {
+    if (threadIdx.x == 0) { *d_ok = 0; }
+    return;
+  }
+
+  // rank[id] is how many entries sort before it. Unique names, per the spec, so this is a
+  // permutation.
+  for (auto id = static_cast<size_type>(threadIdx.x); id < dict.num_entries;
+       id += static_cast<size_type>(block_size)) {
+    auto const name = name_for_id(dict, id);
+    if (!name.has_value()) {
+      *d_ok = 0;
+      return;
+    }
+    size_type rank = 0;
+    for (size_type other = 0; other < dict.num_entries; ++other) {
+      auto const other_name = name_for_id(dict, other);
+      if (!other_name.has_value()) {
+        *d_ok = 0;
+        return;
+      }
+      if (compare_keys(other_name.value(), name.value()) < 0) { ++rank; }
+    }
+    d_rank[id] = rank;
+  }
+
+  // A step token's rank is where it would sort among the entries, and -1 when it is absent, which
+  // includes every index step. Computed the same way, so it does not have to wait for d_rank.
+  auto const num_steps = static_cast<size_type>(d_step_rank.size());
+  for (auto step = static_cast<size_type>(threadIdx.x); step < num_steps;
+       step += static_cast<size_type>(block_size)) {
+    auto const token = steps.element<cudf::string_view>(step);
+    size_type rank   = 0;
+    bool present     = false;
+    for (size_type other = 0; other < dict.num_entries; ++other) {
+      auto const other_name = name_for_id(dict, other);
+      if (!other_name.has_value()) {
+        *d_ok = 0;
+        return;
+      }
+      auto const cmp = compare_keys(other_name.value(), token);
+      if (cmp < 0) { ++rank; }
+      if (cmp == 0) { present = true; }
+    }
+    d_step_rank[step] = present ? rank : -1;
+  }
+}
+
+// Prototype switch: set CUDF_VARIANT_SHARED_DICT=1 to resolve the dictionary once for all rows and
+// probe by rank, when every row's metadata blob turns out to be identical.
+bool shared_dictionary_enabled()
+{
+  static bool const enabled = [] {
+    auto const* setting = std::getenv("CUDF_VARIANT_SHARED_DICT");
+    return setting != nullptr && std::string_view{setting} == "1";
+  }();
+  return enabled;
+}
+
 bool merge_sibling_lookups()
 {
   static bool const enabled = [] {
@@ -1801,8 +2038,61 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
                                 d_group_parent,
                                 d_state_base};
 
-  auto const launch = [&](auto use_local, auto merge) {
-    locate_variant_field_trie_kernel<decltype(use_local)::value, decltype(merge)::value>
+  // The shared dictionary path needs every row's metadata blob to be identical, which is a property
+  // of the data rather than a guarantee of the format, so it has to be checked. The check reads the
+  // whole metadata column and then stalls the stream to bring one flag back.
+  rmm::device_uvector<size_type> d_rank(0, stream, temp_mr);
+  rmm::device_uvector<size_type> d_step_rank(0, stream, temp_mr);
+  bool use_shared_dict = false;
+  if (shared_dictionary_enabled()) {
+    rmm::device_scalar<int> d_flags(1, stream, temp_mr);
+    metadata_lengths_uniform_kernel<<<grid.num_blocks, block_size, 0, stream.get()>>>(
+      meta_lists_device_view, num_rows, d_flags.data());
+    CUDF_CUDA_TRY(cudaGetLastError());
+    // One warp per row, capped so a tall column does not launch an unbounded grid.
+    auto constexpr warps_per_block = block_size / cudf::detail::warp_size;
+    auto const byte_blocks =
+      std::min((num_rows + warps_per_block - 1) / warps_per_block, 8 * max_global_scratch_blocks);
+    metadata_bytes_uniform_kernel<<<byte_blocks, block_size, 0, stream.get()>>>(
+      meta_lists_device_view, num_rows, d_flags.data());
+    CUDF_CUDA_TRY(cudaGetLastError());
+    use_shared_dict = d_flags.value(stream) == 1;
+
+    if (use_shared_dict) {
+      auto const num_entries = [&] {
+        // The entry count comes from the same header the device parse reads, so ask the device.
+        rmm::device_scalar<size_type> d_count(0, stream, temp_mr);
+        thrust::for_each(
+          rmm::exec_policy_nosync(stream, temp_mr),
+          cuda::counting_iterator<size_type>(0),
+          cuda::counting_iterator<size_type>(1),
+          [meta = meta_lists_device_view, count = d_count.data()] __device__(size_type) {
+            auto const dict = parse_metadata_dictionary(list_row_span(meta, 0));
+            *count          = dict.status == op_status::SUCCESS ? dict.num_entries : 0;
+          });
+        return d_count.value(stream);
+      }();
+
+      if (num_entries > 0) {
+        d_rank.resize(num_entries, stream);
+        d_step_rank.resize(steps_column->size(), stream);
+        int const ok = 1;
+        d_flags.set_value_async(ok, stream);
+        build_shared_dictionary_kernel<<<1, block_size, 0, stream.get()>>>(
+          meta_lists_device_view, *steps_device_view, d_rank, d_step_rank, d_flags.data());
+        CUDF_CUDA_TRY(cudaGetLastError());
+        use_shared_dict = d_flags.value(stream) == 1;
+      } else {
+        use_shared_dict = false;
+      }
+    }
+  }
+  shared_dictionary_view const d_shared{d_rank, d_step_rank};
+
+  auto const launch = [&](auto use_local, auto merge, auto shared_dict) {
+    locate_variant_field_trie_kernel<decltype(use_local)::value,
+                                     decltype(merge)::value,
+                                     decltype(shared_dict)::value>
       <<<num_blocks, block_size, 0, stream.get()>>>(meta_lists_device_view,
                                                     val_lists_device_view,
                                                     d_trie,
@@ -1813,19 +2103,27 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
                                                     d_src_offsets,
                                                     d_null_masks,
                                                     d_statuses,
-                                                    d_scratch);
+                                                    d_scratch,
+                                                    d_shared);
   };
-  auto const dispatch = [&](auto merge) {
+  auto const dispatch = [&](auto merge, auto shared_dict) {
     if (use_local_scratch) {
-      launch(cuda::std::true_type{}, merge);
+      launch(cuda::std::true_type{}, merge, shared_dict);
     } else {
-      launch(cuda::std::false_type{}, merge);
+      launch(cuda::std::false_type{}, merge, shared_dict);
     }
   };
-  if (merge_siblings) {
-    dispatch(cuda::std::true_type{});
+  auto const dispatch_merge = [&](auto shared_dict) {
+    if (merge_siblings) {
+      dispatch(cuda::std::true_type{}, shared_dict);
+    } else {
+      dispatch(cuda::std::false_type{}, shared_dict);
+    }
+  };
+  if (use_shared_dict) {
+    dispatch_merge(cuda::std::true_type{});
   } else {
-    dispatch(cuda::std::false_type{});
+    dispatch_merge(cuda::std::false_type{});
   }
   CUDF_CUDA_TRY(cudaGetLastError());
 
