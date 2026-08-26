@@ -157,6 +157,11 @@ thread's row is 32-bit arithmetic and a block's rows are consecutive.
 | 2M x 4 fields, shared prefix | 2.46 ms | 2.62 ms | +6.5% |
 | 2M x 4 fields, long keys | 2.63 ms | 3.11 ms | +18% |
 
+On the example, batched, it is 66.9 -> 60.7 ms, a 9% win, consistent with the workload benchmark and
+with this being a deep trie. Note it cannot be combined with the shared dictionary here: only the
+depth-first kernel takes a resolved dictionary, and the shared dictionary is worth far more (38.1 ms),
+so the two switches are alternatives rather than additive.
+
 Peak memory is unchanged everywhere. Only *interior* slots need their value kept between levels, so
 the state buffer is `interior_slots x rows x 12 B`, which is nothing next to the `list<uint8>`
 intermediates, and the flat cases allocate nothing at all.
