@@ -836,14 +836,19 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
   auto const num_fields    = static_cast<int>(state.get_int64("num_fields"));
   auto const hit_rate      = static_cast<int>(state.get_int64("hit_rate"));
   bool const shared_prefix = state.get_string("prefix") == "shared";
-  bool const batched       = state.get_string("api") == "batched";
-  bool const with_status   = state.get_string("status") == "on";
+  // Keys longer than a machine word, sharing their first eight bytes, are what a word-at-a-time
+  // comparison is meant to help; the short keys never reach its wide path.
+  auto const key_prefix =
+    state.get_string("key_len") == "long" ? std::string{"attributes_field_"} : std::string{};
+  auto const leaf_key    = [&](int i) { return key_prefix + field_key(i); };
+  bool const batched     = state.get_string("api") == "batched";
+  bool const with_status = state.get_string("status") == "on";
 
   // Dictionary: the shared parent key "a", the leaf keys f00..f{N-1}, and "z" for miss rows, in
   // sorted order. Field ids are dictionary indices, so "a" is 0 and leaf `i` is `i + 1`.
   std::vector<std::string> keys{"a"};
   for (int i = 0; i < num_fields; ++i) {
-    keys.push_back(field_key(i));
+    keys.push_back(leaf_key(i));
   }
   keys.emplace_back("z");
   auto const meta_blob = build_metadata(keys);
@@ -869,7 +874,7 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
   std::vector<std::string> path_strings;
   path_strings.reserve(num_fields);
   for (int i = 0; i < num_fields; ++i) {
-    path_strings.push_back((shared_prefix ? "$.a." : "$.") + field_key(i));
+    path_strings.push_back((shared_prefix ? "$.a." : "$.") + leaf_key(i));
   }
   std::vector<std::string_view> const paths(path_strings.begin(), path_strings.end());
   auto const target_type = cudf::data_type{cudf::type_id::INT32};
@@ -910,6 +915,7 @@ NVBENCH_BENCH(bench_variant_extract_multi_field)
   .add_int64_axis("num_rows", {262144, 2097152})
   .add_int64_axis("num_fields", {1, 4, 16, 64})
   .add_string_axis("prefix", {"shared", "disjoint"})
+  .add_string_axis("key_len", {"short", "long"})
   .add_string_axis("api", {"batched", "looped"})
   .add_string_axis("status", {"off", "on"})
   .add_int64_axis("hit_rate", {80});

@@ -423,6 +423,46 @@ struct field_search {
   op_status status;
 };
 
+// PROTOTYPE SCAFFOLDING: flip to false to measure against cudf::string_view::compare.
+constexpr bool use_word_compare = true;
+
+// Eight bytes packed big-endian, so that comparing the words as unsigned integers orders the bytes
+// exactly as an unsigned byte-by-byte comparison would.
+__device__ uint64_t pack_eight(uint8_t const* p)
+{
+  uint64_t w = 0;
+#pragma unroll
+  for (int k = 0; k < 8; ++k) {
+    w = (w << 8) | p[k];
+  }
+  return w;
+}
+
+// Lexicographic byte comparison, taking eight bytes at a time. Dictionary strings sit at arbitrary
+// offsets inside the metadata blob, so the bytes still have to be loaded one at a time; what this
+// buys over `cudf::string_view::compare` is that a block's eight loads are independent of each
+// other and resolve in one comparison, rather than forming a serial chain of load, compare and
+// branch per byte. Keys sharing a prefix are the case that pays.
+__device__ int compare_keys(cudf::string_view lhs, cudf::string_view rhs)
+{
+  if constexpr (!use_word_compare) { return lhs.compare(rhs); }
+
+  auto const* a      = reinterpret_cast<uint8_t const*>(lhs.data());
+  auto const* b      = reinterpret_cast<uint8_t const*>(rhs.data());
+  auto const overlap = cuda::std::min(lhs.size_bytes(), rhs.size_bytes());
+
+  size_type i = 0;
+  for (; i + 8 <= overlap; i += 8) {
+    auto const wa = pack_eight(a + i);
+    auto const wb = pack_eight(b + i);
+    if (wa != wb) { return wa < wb ? -1 : 1; }
+  }
+  for (; i < overlap; ++i) {
+    if (a[i] != b[i]) { return a[i] < b[i] ? -1 : 1; }
+  }
+  return lhs.size_bytes() - rhs.size_bytes();
+}
+
 // Search `[begin, num_fields)` for `target`. `peek` first tests position `begin`, which resolves
 // the key in one probe when the caller is walking keys that are dense in the object.
 __device__ field_search find_field(object_fields const& obj,
@@ -437,7 +477,7 @@ __device__ field_search find_field(object_fields const& obj,
   if (peek && lo < hi) {
     auto const name = field_name_at(obj, dict, lo);
     if (!name.has_value()) { return {lo, false, op_status::MALFORMED_VARIANT}; }
-    auto const cmp = name.value().compare(target);
+    auto const cmp = compare_keys(name.value(), target);
     if (cmp == 0) { return {lo, true, op_status::SUCCESS}; }
     // The fields are name-ordered, so a greater name here puts the target before this position.
     if (cmp > 0) { return {lo, false, op_status::SUCCESS}; }
@@ -449,7 +489,7 @@ __device__ field_search find_field(object_fields const& obj,
     size_type const mid = lo + (hi - lo) / 2;
     auto const name     = field_name_at(obj, dict, mid);
     if (!name.has_value()) { return {mid, false, op_status::MALFORMED_VARIANT}; }
-    auto const cmp = name.value().compare(target);
+    auto const cmp = compare_keys(name.value(), target);
     if (cmp == 0) { return {mid, true, op_status::SUCCESS}; }
     if (cmp < 0) {
       lo = mid + 1;
