@@ -50,6 +50,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -1130,6 +1131,12 @@ struct trie_device_view {
   device_span<size_type const> group_first;
   device_span<size_type const> group_parent;
   device_span<size_type const> state_base;
+  // PROTOTYPE SCAFFOLDING (warp-per-row, level-synchronous): each group's member slots in position
+  // order, in CSR form. A group's members are not contiguous in slot order, since a depth-first
+  // walk puts each member's subtree between it and the next, so anything that takes a group as its
+  // unit of work needs this reverse mapping. The first `num_keys` members are its mergeable keys.
+  device_span<size_type const> group_member_offsets;
+  device_span<size_type const> group_members;
 };
 
 /**
@@ -1294,6 +1301,387 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
       }
     }
   }
+}
+
+// PROTOTYPE SCAFFOLDING (warp-per-row) below, through to the end of the warp kernel.
+constexpr int warp_threads = 32;
+
+/**
+ * @brief Resolves a whole trie of VARIANT paths in each row, one warp per row.
+ *
+ * Same contract as `locate_variant_field_trie_kernel` with `MergeSiblings`, but the lanes of a warp
+ * split a sibling group's keys instead of one thread taking them in a sorted sweep. Two things
+ * change:
+ *
+ * - Every lane probes the same row's field ids and dictionary offsets, so a group's lookups read
+ *   the same few cache lines rather than 32 unrelated rows' worth of them.
+ * - A key costs a full `log2(num_fields)` search again, since a lane does not know where the key
+ *   before it landed. The group's keys are searched at once rather than one after another, trading
+ *   more probes for a shorter dependent chain.
+ *
+ * A group's key slots are resolved end to end in that parallel phase, remaining steps and outputs
+ * included, so the slot loop only has serial work left for index steps and for groups with no
+ * mergeable keys. The walk state lives in shared memory, one slice per warp, since the lanes of a
+ * warp share it.
+ */
+CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_warp_kernel(
+  cudf::lists_column_device_view metadata,
+  cudf::lists_column_device_view values,
+  trie_device_view trie,
+  bitmask_type const* d_row_valid,
+  size_type num_rows,
+  size_type walk_state_size,
+  device_span<size_type> d_sizes,
+  device_span<size_type> d_src_offsets,
+  device_span<bitmask_type* const> d_null_masks,
+  device_span<op_status* const> d_statuses)  // empty when no status was requested
+{
+  extern __shared__ slot_result shared_walk_state[];
+
+  auto const num_slots       = static_cast<size_type>(trie.slot_depth.size());
+  auto const num_paths       = static_cast<size_type>(d_null_masks.size());
+  auto const lane            = static_cast<size_type>(threadIdx.x % warp_threads);
+  auto const warp_of_block   = static_cast<size_type>(threadIdx.x / warp_threads);
+  auto const warps_per_block = size_type{block_size / warp_threads};
+  auto* const located        = shared_walk_state + warp_of_block * walk_state_size;
+
+  auto const first_row  = static_cast<size_type>(blockIdx.x) * warps_per_block + warp_of_block;
+  auto const row_stride = static_cast<size_type>(gridDim.x) * warps_per_block;
+
+  for (auto row = first_row; row < num_rows; row += row_stride) {
+    bool const row_valid = d_row_valid == nullptr || cudf::bit_is_set(d_row_valid, row);
+
+    // Writes one slot's result to every output it feeds.
+    auto const write_outputs = [&](size_type slot, slot_result const& result) {
+      for (auto out_idx = trie.output_offsets[slot]; out_idx < trie.output_offsets[slot + 1];
+           ++out_idx) {
+        auto const path = trie.output_paths[out_idx];
+        auto const out  = path * num_rows + row;
+        if (!d_statuses.empty()) { d_statuses[path][row] = result.status; }
+        if (slot_is_valid(result)) {
+          d_sizes[out]       = result.size;
+          d_src_offsets[out] = result.src_offset;
+        } else {
+          d_sizes[out]       = 0;
+          d_src_offsets[out] = 0;
+          cudf::clear_bit(d_null_masks[path], row);
+        }
+      }
+    };
+
+    if (!row_valid) {
+      for (auto path = lane; path < num_paths; path += warp_threads) {
+        auto const out     = path * num_rows + row;
+        d_sizes[out]       = 0;
+        d_src_offsets[out] = 0;
+        cudf::clear_bit(d_null_masks[path], row);
+        if (!d_statuses.empty()) { d_statuses[path][row] = op_status::ROW_NULL; }
+      }
+      continue;
+    }
+
+    auto const [meta, val] = metadata_and_value_at(metadata, values, row);
+
+    // Every lane takes the same slot, so the loop and its exits stay warp-uniform.
+    for (size_type slot = 0; slot < num_slots; ++slot) {
+      auto const depth     = trie.slot_depth[slot];
+      auto const group     = trie.slot_group[slot];
+      auto const position  = trie.slot_group_pos[slot];
+      auto const key_begin = trie.group_keys[group];
+      auto const num_keys  = trie.group_keys[group + 1] - key_begin;
+      auto const base      = trie.state_base[depth];
+
+      auto parent        = val;
+      auto parent_status = val.empty() ? op_status::MALFORMED_VARIANT : op_status::SUCCESS;
+      if (depth > 0) {
+        auto const& parent_state = located[trie.state_base[depth - 1] + trie.group_parent[group]];
+        parent                   = slot_span(val, parent_state);
+        parent_status            = parent_state.status;
+      }
+
+      // Keys lead their group, so the group's first slot is a key slot whenever it has any, and
+      // the parallel phase there covers every key slot of the group.
+      if (position < num_keys) {
+        if (slot != trie.group_first[group]) { continue; }
+
+        for (auto key = lane; key < num_keys; key += warp_threads) {
+          auto const key_of_slot = trie.group_members[trie.group_member_offsets[group] + key];
+          auto const step_end    = trie.slot_steps[key_of_slot + 1];
+
+          auto result = slot_result{0, invalid_slot_size, parent_status};
+          if (!parent.empty()) {
+            auto const target =
+              trie.steps.element<cudf::string_view>(trie.group_key_step[key_begin + key]);
+            auto const [field, status] = locate_object_field(meta, parent, target);
+            result                     = make_slot_result(field, val.data(), status);
+            // The steps of this slot below its first one. Walked even when there are none, since
+            // that is also what settles a terminal VARIANT null's status.
+            if (slot_is_valid(result)) {
+              auto const [below, below_status] = resolve_steps(meta,
+                                                               slot_span(val, result),
+                                                               trie.steps,
+                                                               trie.slot_steps[key_of_slot] + 1,
+                                                               step_end);
+              result                           = make_slot_result(below, val.data(), below_status);
+            } else {
+              result = {0, invalid_slot_size, result.status};
+            }
+          }
+          located[base + key] = result;
+          write_outputs(key_of_slot, result);
+        }
+        __syncwarp();
+        continue;
+      }
+
+      // An index step, or a group with nothing to merge: no key-level parallelism to exploit.
+      if (lane == 0) {
+        auto result = slot_result{0, invalid_slot_size, parent_status};
+        if (!parent.empty()) {
+          auto const [field, status] = resolve_steps(
+            meta, parent, trie.steps, trie.slot_steps[slot], trie.slot_steps[slot + 1]);
+          result = make_slot_result(field, val.data(), status);
+        }
+        located[base + position] = result;
+        write_outputs(slot, result);
+      }
+      __syncwarp();
+    }
+  }
+}
+
+// Prototype switch: set CUDF_VARIANT_WARP_ROW=1 to walk one row per warp instead of per thread.
+bool warp_per_row()
+{
+  static bool const enabled = [] {
+    auto const* setting = std::getenv("CUDF_VARIANT_WARP_ROW");
+    return setting != nullptr && std::string_view{setting} == "1";
+  }();
+  return enabled;
+}
+
+// PROTOTYPE SCAFFOLDING (level-synchronous) below, through to the end of the level kernel.
+
+// What a level launch needs on top of the trie: which slots' values outlive their own level, and
+// where each group's parent value is to be found.
+struct level_device_view {
+  device_span<size_type const> slot_state;  ///< Slot's row in the state buffer, -1 if it has no
+                                            ///< children and so nothing to keep
+  device_span<size_type const> group_parent_state;  ///< State row of a group's parent slot, -1 at
+                                                    ///< the root
+};
+
+/**
+ * @brief Resolves the slots at one depth of the trie, for every row.
+ *
+ * One thread per (row, group at this depth), so a depth is a kernel launch and the launches carry
+ * the ordering that the depth-first walk got from visiting slots in order. A group is still the
+ * unit of work, which keeps the merged sweep over its object intact.
+ *
+ * The point of the split is state. A depth-first walk has to keep a group's resolved children alive
+ * for as long as it is anywhere inside their subtrees, which is what puts a 1.5 KB array in local
+ * memory (`STACK:1552`) and touches it at every slot. Here a group's results are consumed as they
+ * are produced -- straight to the outputs, and to `d_state` only for the slots that have children
+ * -- so a thread holds one value at a time and only interior slots cost memory.
+ *
+ * `d_state` is indexed `[slot_state[slot] * num_rows + row]`, so the rows of one slot are
+ * contiguous, and consecutive threads take consecutive rows of the same group.
+ */
+template <bool AnyState, int BlockSize>
+CUDF_KERNEL __launch_bounds__(BlockSize) void locate_variant_field_level_kernel(
+  cudf::lists_column_device_view metadata,
+  cudf::lists_column_device_view values,
+  trie_device_view trie,
+  level_device_view level,
+  device_span<size_type const> groups_at_depth,
+  bitmask_type const* d_row_valid,
+  size_type num_rows,
+  device_span<size_type> d_sizes,
+  device_span<size_type> d_src_offsets,
+  device_span<bitmask_type* const> d_null_masks,
+  device_span<op_status* const> d_statuses,  // empty when no status was requested
+  device_span<slot_result> d_state)
+{
+  // The group is the grid's second dimension, so a thread's row is plain 32-bit arithmetic and a
+  // block's rows are consecutive.
+  auto const group      = groups_at_depth[blockIdx.y];
+  auto const first_row  = static_cast<size_type>(blockIdx.x) * BlockSize + threadIdx.x;
+  auto const row_stride = static_cast<size_type>(gridDim.x) * BlockSize;
+
+  for (auto row = static_cast<size_type>(first_row); row < num_rows; row += row_stride) {
+    auto const member_begin = trie.group_member_offsets[group];
+    auto const member_end   = trie.group_member_offsets[group + 1];
+    auto const key_begin    = trie.group_keys[group];
+    auto const num_keys     = trie.group_keys[group + 1] - key_begin;
+
+    // Publishes one slot's result: to its outputs, and to the state buffer if anything below it
+    // still has to start from it.
+    auto const finish = [&](size_type slot, slot_result const& result) {
+      // A trie one level deep keeps nothing, which is worth not even asking about per slot.
+      if constexpr (AnyState) {
+        auto const state = level.slot_state[slot];
+        if (state >= 0) { d_state[static_cast<int64_t>(state) * num_rows + row] = result; }
+      }
+      for (auto out_idx = trie.output_offsets[slot]; out_idx < trie.output_offsets[slot + 1];
+           ++out_idx) {
+        auto const path = trie.output_paths[out_idx];
+        auto const out  = path * num_rows + row;
+        if (!d_statuses.empty()) { d_statuses[path][row] = result.status; }
+        if (slot_is_valid(result)) {
+          d_sizes[out]       = result.size;
+          d_src_offsets[out] = result.src_offset;
+        } else {
+          d_sizes[out]       = 0;
+          d_src_offsets[out] = 0;
+          cudf::clear_bit(d_null_masks[path], row);
+        }
+      }
+    };
+
+    if (d_row_valid != nullptr && !cudf::bit_is_set(d_row_valid, row)) {
+      // No state is written for an invalid row, and none is read either: every level fails its own
+      // groups' slots the same way.
+      for (auto m = member_begin; m < member_end; ++m) {
+        auto const slot = trie.group_members[m];
+        for (auto out_idx = trie.output_offsets[slot]; out_idx < trie.output_offsets[slot + 1];
+             ++out_idx) {
+          auto const path    = trie.output_paths[out_idx];
+          auto const out     = path * num_rows + row;
+          d_sizes[out]       = 0;
+          d_src_offsets[out] = 0;
+          cudf::clear_bit(d_null_masks[path], row);
+          if (!d_statuses.empty()) { d_statuses[path][row] = op_status::ROW_NULL; }
+        }
+      }
+      continue;
+    }
+
+    auto const [meta, val] = metadata_and_value_at(metadata, values, row);
+
+    auto const parent_state = AnyState ? level.group_parent_state[group] : size_type{-1};
+    auto parent             = val;
+    auto parent_status      = val.empty() ? op_status::MALFORMED_VARIANT : op_status::SUCCESS;
+    if (parent_state >= 0) {
+      auto const& state = d_state[static_cast<int64_t>(parent_state) * num_rows + row];
+      parent            = slot_span(val, state);
+      parent_status     = state.status;
+    }
+
+    // Applies a member slot's steps below its first one, which is also what settles a terminal
+    // VARIANT null's status.
+    auto const below_first_step = [&](size_type slot, slot_result const& first) {
+      if (!slot_is_valid(first)) { return slot_result{0, invalid_slot_size, first.status}; }
+      auto const [below, status] = resolve_steps(meta,
+                                                 slot_span(val, first),
+                                                 trie.steps,
+                                                 trie.slot_steps[slot] + 1,
+                                                 trie.slot_steps[slot + 1]);
+      return make_slot_result(below, val.data(), status);
+    };
+
+    if (num_keys > 0) {
+      if (parent.empty()) {
+        for (size_type key = 0; key < num_keys; ++key) {
+          finish(trie.group_members[member_begin + key], {0, invalid_slot_size, parent_status});
+        }
+      } else {
+        locate_object_fields(
+          meta,
+          parent,
+          trie.steps,
+          trie.group_key_step.subspan(key_begin, num_keys),
+          [&](size_type key, device_span<uint8_t const> field, op_status status) {
+            auto const slot = trie.group_members[member_begin + key];
+            finish(slot, below_first_step(slot, make_slot_result(field, val.data(), status)));
+          });
+      }
+    }
+
+    // Index steps sit behind the keys and have nothing to merge with.
+    for (auto m = member_begin + num_keys; m < member_end; ++m) {
+      auto const slot = trie.group_members[m];
+      auto result     = slot_result{0, invalid_slot_size, parent_status};
+      if (!parent.empty()) {
+        auto const [field, status] =
+          resolve_steps(meta, parent, trie.steps, trie.slot_steps[slot], trie.slot_steps[slot + 1]);
+        result = make_slot_result(field, val.data(), status);
+      }
+      finish(slot, result);
+    }
+  }
+}
+
+// Prototype switch: CUDF_VARIANT_LEVEL_BLOCK picks the level kernel's block size, since the best
+// one turns out to depend on the trie's shape. 64, 128, or 256 (the default).
+int level_block_size()
+{
+  static int const size = [] {
+    auto const* setting = std::getenv("CUDF_VARIANT_LEVEL_BLOCK");
+    if (setting == nullptr) { return 256; }
+    auto const value = std::atoi(setting);
+    return value == 64 || value == 128 ? value : 256;
+  }();
+  return size;
+}
+
+// Prototype switch: set CUDF_VARIANT_LEVEL_SYNC=1 for one kernel launch per trie depth.
+bool level_synchronous()
+{
+  static bool const enabled = [] {
+    auto const* setting = std::getenv("CUDF_VARIANT_LEVEL_SYNC");
+    return setting != nullptr && std::string_view{setting} == "1";
+  }();
+  return enabled;
+}
+
+// The host-side arrays a level-synchronous launch needs, derived from the trie.
+struct level_plan {
+  std::vector<size_type> slot_state;          // per slot: state row, or -1
+  std::vector<size_type> group_parent_state;  // per group: parent slot's state row, or -1
+  std::vector<size_type> groups_by_depth;     // groups, bucketed by depth
+  std::vector<size_type> depth_offsets;       // size max_depth + 2; CSR into groups_by_depth
+  size_type num_states{0};
+};
+
+level_plan build_level_plan(detail::variant_path_trie const& trie)
+{
+  auto const num_slots  = static_cast<size_type>(trie.slot_depth.size());
+  auto const num_groups = static_cast<size_type>(trie.group_first.size());
+  auto const max_depth  = *std::max_element(trie.slot_depth.begin(), trie.slot_depth.end());
+
+  // Slots are in depth-first pre-order, so a slot's parent is the last slot seen one level up.
+  std::vector<size_type> parent_of_slot(num_slots, -1);
+  std::vector<size_type> last_at_depth(max_depth + 1, -1);
+  for (size_type slot = 0; slot < num_slots; ++slot) {
+    auto const depth     = trie.slot_depth[slot];
+    parent_of_slot[slot] = depth > 0 ? last_at_depth[depth - 1] : -1;
+    last_at_depth[depth] = slot;
+  }
+
+  level_plan plan;
+  plan.slot_state.assign(num_slots, -1);
+  plan.group_parent_state.assign(num_groups, -1);
+
+  // Only a slot that something below it starts from has to outlive its own level.
+  for (size_type group = 0; group < num_groups; ++group) {
+    auto const parent = parent_of_slot[trie.group_first[group]];
+    if (parent < 0) { continue; }
+    if (plan.slot_state[parent] < 0) { plan.slot_state[parent] = plan.num_states++; }
+    plan.group_parent_state[group] = plan.slot_state[parent];
+  }
+
+  plan.depth_offsets.assign(max_depth + 2, 0);
+  for (auto const depth : trie.group_depth) {
+    ++plan.depth_offsets[depth + 1];
+  }
+  std::partial_sum(
+    plan.depth_offsets.begin(), plan.depth_offsets.end(), plan.depth_offsets.begin());
+  plan.groups_by_depth.resize(num_groups);
+  auto fill = plan.depth_offsets;
+  for (size_type group = 0; group < num_groups; ++group) {
+    plan.groups_by_depth[fill[trie.group_depth[group]]++] = group;
+  }
+  return plan;
 }
 
 /**
@@ -1967,6 +2355,23 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   auto const d_group_parent   = upload(trie.group_parent);
   auto const d_state_base     = upload(trie.state_base);
 
+  // Each group's members in position order, for the prototypes that take a group as a unit of work
+  auto const num_slots  = static_cast<size_type>(trie.slot_depth.size());
+  auto const num_groups = static_cast<size_type>(trie.group_first.size());
+  std::vector<size_type> h_group_member_offsets(num_groups + 1, 0);
+  for (auto const group : trie.slot_group) {
+    ++h_group_member_offsets[group + 1];
+  }
+  std::partial_sum(
+    h_group_member_offsets.begin(), h_group_member_offsets.end(), h_group_member_offsets.begin());
+  std::vector<size_type> h_group_members(num_slots);
+  for (size_type slot = 0; slot < num_slots; ++slot) {
+    h_group_members[h_group_member_offsets[trie.slot_group[slot]] + trie.slot_group_pos[slot]] =
+      slot;
+  }
+  auto const d_group_member_offsets = upload(h_group_member_offsets);
+  auto const d_group_members        = upload(h_group_members);
+
   // Resolve children with respect to any slice/offset on the parent struct
   structs_column_view const variant_struct{variant_column};
   auto const meta_view = variant_struct.get_sliced_child(0, stream);
@@ -2036,7 +2441,9 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
                                 d_group_key_step,
                                 d_group_first,
                                 d_group_parent,
-                                d_state_base};
+                                d_state_base,
+                                d_group_member_offsets,
+                                d_group_members};
 
   // The shared dictionary path needs every row's metadata blob to be identical, which is a property
   // of the data rather than a guarantee of the format, so it has to be checked. The check reads the
@@ -2044,7 +2451,9 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   rmm::device_uvector<size_type> d_rank(0, stream, temp_mr);
   rmm::device_uvector<size_type> d_step_rank(0, stream, temp_mr);
   bool use_shared_dict = false;
-  if (shared_dictionary_enabled()) {
+  // Only the depth-first kernel takes a resolved dictionary, so with either of the other prototypes
+  // driving there is nothing to hand it to and the detection scan would be pure cost.
+  if (shared_dictionary_enabled() && !level_synchronous() && !warp_per_row()) {
     rmm::device_scalar<int> d_flags(1, stream, temp_mr);
     metadata_lengths_uniform_kernel<<<grid.num_blocks, block_size, 0, stream.get()>>>(
       meta_lists_device_view, num_rows, d_flags.data());
@@ -2120,7 +2529,79 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
       dispatch(cuda::std::false_type{}, shared_dict);
     }
   };
-  if (use_shared_dict) {
+  // The warp prototype shares the walk state across a warp, so it has to live in shared memory and
+  // only makes sense with sibling merging in the first place.
+  constexpr int warps_per_block = block_size / warp_threads;
+  auto const warp_shared_bytes =
+    static_cast<std::size_t>(warps_per_block) * walk_state_size * sizeof(slot_result);
+  bool const use_warp_per_row = warp_per_row() && merge_siblings && use_local_scratch;
+
+  if (level_synchronous()) {
+    auto const plan              = build_level_plan(trie);
+    auto const d_slot_state      = upload(plan.slot_state);
+    auto const d_parent_state    = upload(plan.group_parent_state);
+    auto const d_groups_by_depth = upload(plan.groups_by_depth);
+    level_device_view const d_level{d_slot_state, d_parent_state};
+
+    // Only interior slots are kept, one value per (slot, row)
+    rmm::device_uvector<slot_result> d_state(
+      static_cast<std::size_t>(plan.num_states) * num_rows, stream, temp_mr);
+
+    auto const num_depths = static_cast<size_type>(plan.depth_offsets.size()) - 1;
+    for (size_type depth = 0; depth < num_depths; ++depth) {
+      auto const begin = plan.depth_offsets[depth];
+      auto const count = plan.depth_offsets[depth + 1] - begin;
+      if (count == 0) { continue; }
+      auto const launch_level = [&](auto any_state, auto block) {
+        constexpr int level_block = decltype(block)::value;
+        auto const row_blocks     = cudf::detail::grid_1d{num_rows, level_block}.num_blocks;
+        dim3 const level_grid{
+          static_cast<unsigned int>(row_blocks), static_cast<unsigned int>(count), 1};
+        locate_variant_field_level_kernel<decltype(any_state)::value, level_block>
+          <<<level_grid, level_block, 0, stream.get()>>>(
+            meta_lists_device_view,
+            val_lists_device_view,
+            d_trie,
+            d_level,
+            device_span<size_type const>{d_groups_by_depth}.subspan(begin, count),
+            d_row_valid,
+            num_rows,
+            d_sizes,
+            d_src_offsets,
+            d_null_masks,
+            d_statuses,
+            d_state);
+      };
+      auto const dispatch_level = [&](auto block) {
+        if (plan.num_states > 0) {
+          launch_level(cuda::std::true_type{}, block);
+        } else {
+          launch_level(cuda::std::false_type{}, block);
+        }
+      };
+      switch (level_block_size()) {
+        case 64: dispatch_level(cuda::std::integral_constant<int, 64>{}); break;
+        case 128: dispatch_level(cuda::std::integral_constant<int, 128>{}); break;
+        default: dispatch_level(cuda::std::integral_constant<int, 256>{}); break;
+      }
+      CUDF_CUDA_TRY(cudaGetLastError());
+    }
+  } else if (use_warp_per_row) {
+    auto const warp_blocks = (num_rows + warps_per_block - 1) / warps_per_block;
+    locate_variant_field_trie_warp_kernel<<<warp_blocks,
+                                            block_size,
+                                            warp_shared_bytes,
+                                            stream.get()>>>(meta_lists_device_view,
+                                                            val_lists_device_view,
+                                                            d_trie,
+                                                            d_row_valid,
+                                                            num_rows,
+                                                            walk_state_size,
+                                                            d_sizes,
+                                                            d_src_offsets,
+                                                            d_null_masks,
+                                                            d_statuses);
+  } else if (use_shared_dict) {
     dispatch_merge(cuda::std::true_type{});
   } else {
     dispatch_merge(cuda::std::false_type{});
