@@ -352,7 +352,7 @@ std::vector<std::unique_ptr<column>> superimpose_nulls(
     // Add this column's null mask to the current path
     if (contributes_mask) { path.push_back(mask); }
 
-    // Add all null masks in current path to sources
+    // Open a segment for this column
     sources.insert(sources.end(), path.begin(), path.end());
     segment_offsets.push_back(path.size());
     destinations.push_back(mask);
@@ -404,12 +404,10 @@ std::vector<std::unique_ptr<column>> superimpose_nulls(
     mr);
   auto const result_null_counts = cudf::detail::make_std_vector<size_type>(d_null_counts, stream);
 
-  // The masks were updated in place, so all that is left is to refresh the cached null counts, in
-  // the same order in which the segments were collected
+  // The masks were updated in place; refresh the cached null counts
   std::function<int(int marker, column& input)> update_null_counts =
     [&update_null_counts, &result_null_counts](int marker, column& input) -> int {
-    // EMPTY columns should not have a null mask,
-    // so don't superimpose null mask on empty columns.
+    // EMPTY columns should not have a null mask; don't superimpose
     if (input.type().id() == cudf::type_id::EMPTY) { return marker; }
 
     input.set_null_count(result_null_counts[marker]);
