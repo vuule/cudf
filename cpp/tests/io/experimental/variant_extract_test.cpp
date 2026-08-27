@@ -1502,20 +1502,34 @@ TEST_F(CastVariantTest, DecimalOverflowYieldsNull)
 {
   // A value that does not fit the target representation after rescaling is dropped.
   auto const stream = cudf::test::get_default_stream();
-  std::vector<std::vector<uint8_t>> const val_rows{
-    enc_decimal8(1234567890123, 2),  // too large for an int32 representation
-    enc_decimal4(3000000, 0),        // fits int32 as encoded, but rescaling up by 10^3 does not
-    enc_decimal4(1234, 2)};          // fits, to show the overflow is per row
-  auto col =
-    wrap_multi_row_variant(std::vector<std::vector<uint8_t>>(3, build_metadata({})), val_rows);
-  auto const values = cudf::structs_column_view{col}.get_sliced_child(1, stream);
+  auto const cast   = [&](std::vector<std::vector<uint8_t>> const& rows, cudf::data_type target) {
+    auto col = wrap_multi_row_variant(
+      std::vector<std::vector<uint8_t>>(rows.size(), build_metadata({})), rows);
+    auto const values = cudf::structs_column_view{col}.get_sliced_child(1, stream);
+    return cudf::io::parquet::experimental::cast_variant(values, target, std::nullopt, stream);
+  };
 
-  auto got = cudf::io::parquet::experimental::cast_variant(
-    values, cudf::data_type{cudf::type_id::DECIMAL32, -3}, std::nullopt, stream);
+  {
+    auto got = cast({enc_decimal8(1234567890123, 2),  // too large for an int32 representation
+                     enc_decimal4(3000000, 0),  // fits int32 as encoded, rescaling up by 10^3 does
+                                                // not
+                     enc_decimal4(1234, 2)},    // fits, to show the overflow is per row
+                    cudf::data_type{cudf::type_id::DECIMAL32, -3});
+    cudf::test::fixed_point_column_wrapper<int32_t> expected{
+      {0, 0, 12340}, {false, false, true}, numeric::scale_type{-3}};
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
+  }
 
-  cudf::test::fixed_point_column_wrapper<int32_t> expected{
-    {0, 0, 12340}, {false, false, true}, numeric::scale_type{-3}};
-  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
+  // The int64 representation has its own bound, reachable only from a 16-byte encoded value.
+  {
+    constexpr __int128_t past_int64_max = static_cast<__int128_t>(10000000000000000000ULL);
+    auto got                            = cast(
+      {enc_decimal16(past_int64_max, 0), enc_decimal16(-past_int64_max, 0), enc_decimal8(1234, 2)},
+      cudf::data_type{cudf::type_id::DECIMAL64, 0});
+    cudf::test::fixed_point_column_wrapper<int64_t> expected{
+      {0, 0, 12}, {false, false, true}, numeric::scale_type{0}};
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
+  }
 }
 
 TEST_F(CastVariantTest, DecimalSlicedMultiBlock)
