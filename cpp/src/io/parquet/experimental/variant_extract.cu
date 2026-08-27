@@ -507,15 +507,11 @@ constexpr bool is_variant_int =
 template <typename T>
 constexpr bool is_variant_numerical = is_variant_int<T> || cudf::is_floating_point<T>();
 
-// The fixed-point types a VARIANT decimal value can be decoded into: DECIMAL32/64/128.
-template <typename T>
-constexpr bool is_variant_decimal = cudf::is_fixed_point<T>();
-
 // The output types a VARIANT value can be cast to: the fixed-width signed integers, floats,
 // decimals, bool, and strings.
 template <typename T>
 constexpr bool is_variant_castable =
-  is_variant_numerical<T> || is_variant_decimal<T> || cuda::std::is_same_v<T, bool> ||
+  is_variant_numerical<T> || cudf::is_fixed_point<T>() || cuda::std::is_same_v<T, bool> ||
   cuda::std::is_same_v<T, cudf::string_view>;
 
 // Maps a fixed-width output type to the VARIANT primitive type header id that encodes it.
@@ -1123,7 +1119,7 @@ struct cast_variant_fn {
 
   template <typename T>
   std::unique_ptr<column> operator()()
-    requires(is_variant_decimal<T>)
+    requires(cudf::is_fixed_point<T>())
   {
     using Rep = typename T::rep;
     rmm::device_buffer data{num_rows * sizeof(Rep), stream, mr};
