@@ -313,9 +313,16 @@ std::vector<std::unique_ptr<column>> superimpose_nulls(
   auto const num_rows = inputs[0]->size();
   if (num_rows == 0) { return inputs; }
 
+  // Upper bound on the number of segments; EMPTY columns are skipped below
+  auto const max_num_segments =
+    std::accumulate(inputs.begin(), inputs.end(), size_t{0}, [](size_t sum, auto const& col) {
+      return sum + 1 + cudf::count_descendants(col->view());
+    });
+
   std::vector<bitmask_type const*> sources;
   std::vector<size_type> segment_offsets;
-  std::vector<bitmask_type*> destinations;
+  auto destinations =
+    cudf::detail::make_empty_pinned_vector<bitmask_type*>(max_num_segments, stream);
   std::vector<bitmask_type const*> path;
 
   // This recursive function navigates the column hierarchy and for each path in the tree, it
