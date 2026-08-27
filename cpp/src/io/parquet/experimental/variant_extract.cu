@@ -891,6 +891,35 @@ __device__ cuda::std::pair<Rep, op_status> decode_decimal(device_span<uint8_t co
 }
 
 /**
+ * @brief Shared per-row preamble for the cast paths: decides whether row `row` should be decoded.
+ *
+ * When a row must be skipped, the null bit is cleared and the status recorded before returning:
+ * a row carrying non-success status from a prior `get_variant_field` call keeps that status, and a
+ * SQL-null row becomes `ROW_NULL`. Callers are left to zero the output element themselves, since
+ * only they know its type.
+ *
+ * `d_status`, when present, is the in-out status buffer described on `cast_variant`; it is nullptr
+ * when no status was requested, in which case the null bit alone decides.
+ *
+ * @return True when the row's value blob should be decoded
+ */
+__device__ bool should_decode_row(size_type row, bitmask_type* d_null_mask, op_status* d_status)
+{
+  if (d_status == nullptr) { return cudf::bit_is_set(d_null_mask, row); }
+
+  // Status column is always non-nullable; ROW_NULL replaces the null bit.
+  if (d_status[row] != op_status::SUCCESS) {
+    if (cudf::bit_is_set(d_null_mask, row)) { cudf::clear_bit(d_null_mask, row); }
+    return false;
+  }
+  if (!cudf::bit_is_set(d_null_mask, row)) {
+    d_status[row] = op_status::ROW_NULL;
+    return false;
+  }
+  return true;
+}
+
+/**
  * @brief Per-row kernel: decode each VARIANT value blob into a fixed-width primitive of type `T`.
  *
  * Writes the decoded value to `d_output[row]` for non-null rows whose blob is a variant primitive
@@ -915,24 +944,9 @@ CUDF_KERNEL __launch_bounds__(block_size) void cast_variant_primitive_kernel(
   auto const stride   = cudf::detail::grid_1d::grid_stride<block_size>();
 
   for (auto row = tid; row < num_rows; row += stride) {
-    if (d_status != nullptr) {
-      // Status column is always non-nullable; row_null replaces the null bit.
-      auto const s = d_status[row];
-      if (s != op_status::SUCCESS) {
-        d_output[row] = T{};
-        if (cudf::bit_is_set(d_null_mask, row)) { cudf::clear_bit(d_null_mask, row); }
-        continue;
-      }
-      if (!cudf::bit_is_set(d_null_mask, row)) {
-        d_output[row] = T{};
-        d_status[row] = op_status::ROW_NULL;
-        continue;
-      }
-    } else {
-      if (!cudf::bit_is_set(d_null_mask, row)) {
-        d_output[row] = T{};
-        continue;
-      }
+    if (!should_decode_row(row, d_null_mask, d_status)) {
+      d_output[row] = T{};
+      continue;
     }
 
     auto const val     = list_row_span(values, row);
@@ -968,24 +982,9 @@ CUDF_KERNEL __launch_bounds__(block_size) void cast_variant_decimal_kernel(
   auto const stride   = cudf::detail::grid_1d::grid_stride<block_size>();
 
   for (auto row = tid; row < num_rows; row += stride) {
-    if (d_status != nullptr) {
-      // Status column is always non-nullable; row_null replaces the null bit.
-      auto const s = d_status[row];
-      if (s != op_status::SUCCESS) {
-        d_output[row] = Rep{};
-        if (cudf::bit_is_set(d_null_mask, row)) { cudf::clear_bit(d_null_mask, row); }
-        continue;
-      }
-      if (!cudf::bit_is_set(d_null_mask, row)) {
-        d_output[row] = Rep{};
-        d_status[row] = op_status::ROW_NULL;
-        continue;
-      }
-    } else {
-      if (!cudf::bit_is_set(d_null_mask, row)) {
-        d_output[row] = Rep{};
-        continue;
-      }
+    if (!should_decode_row(row, d_null_mask, d_status)) {
+      d_output[row] = Rep{};
+      continue;
     }
 
     auto const [value, status] = decode_decimal<Rep>(list_row_span(values, row), desired_scale);
@@ -1177,14 +1176,16 @@ struct cast_variant_fn {
                       d_out = static_cast<bool*>(data.data()),
                       dnm   = this->d_null_mask,
                       dp_s] __device__(size_type row) {
+                       if (!should_decode_row(row, dnm, dp_s)) {
+                         d_out[row] = false;
+                         return;
+                       }
+                       // The row is known live here, so a decode failure always clears its bit.
                        auto const fail = [&](op_status s) {
                          d_out[row] = false;
-                         if (cudf::bit_is_set(dnm, row)) { cudf::clear_bit(dnm, row); }
+                         cudf::clear_bit(dnm, row);
                          if (dp_s) { dp_s[row] = s; }
                        };
-                       if (dp_s and dp_s[row] != op_status::SUCCESS) { return fail(dp_s[row]); }
-                       // Status column is always non-nullable; ROW_NULL replaces the null bit.
-                       if (!cudf::bit_is_set(dnm, row)) { return fail(op_status::ROW_NULL); }
                        auto const val     = list_row_span(vals, row);
                        auto const decoded = decode_bool(val);
                        if (!decoded) { return fail(cast_status_for_bool(val)); }
