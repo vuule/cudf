@@ -313,7 +313,7 @@ std::vector<std::unique_ptr<column>> superimpose_nulls(
   auto const num_rows = inputs[0]->size();
   if (num_rows == 0) { return inputs; }
 
-  // Upper bound on the number of segments; EMPTY columns are skipped below
+  // Upper bound on the number of segments; some columns may be skipped
   auto const max_num_segments =
     std::accumulate(inputs.begin(), inputs.end(), size_t{0}, [](size_t sum, auto const& col) {
       return sum + 1 + cudf::count_descendants(col->view());
@@ -352,7 +352,10 @@ std::vector<std::unique_ptr<column>> superimpose_nulls(
     // Add this column's null mask to the current path
     if (contributes_mask) { path.push_back(mask); }
 
-    // Open a segment for this column
+    // Open a segment for this column. Each segment lists all masks on the path, not just the
+    // closest ancestor, so that segments remain independent of the order in which the in-place
+    // updates become visible: an ancestor's updated mask is the AND of masks that this segment
+    // already includes, and AND is idempotent.
     sources.insert(sources.end(), path.begin(), path.end());
     segment_offsets.push_back(path.size());
     destinations.push_back(mask);
