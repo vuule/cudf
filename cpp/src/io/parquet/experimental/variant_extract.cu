@@ -507,11 +507,16 @@ constexpr bool is_variant_int =
 template <typename T>
 constexpr bool is_variant_numerical = is_variant_int<T> || cudf::is_floating_point<T>();
 
-// The output types a VARIANT value can be cast to: the fixed-width signed integers, floats, bool,
-// and strings.
+// The fixed-point types a VARIANT decimal value can be decoded into: DECIMAL32/64/128.
 template <typename T>
-constexpr bool is_variant_castable = is_variant_numerical<T> || cuda::std::is_same_v<T, bool> ||
-                                     cuda::std::is_same_v<T, cudf::string_view>;
+constexpr bool is_variant_decimal = cudf::is_fixed_point<T>();
+
+// The output types a VARIANT value can be cast to: the fixed-width signed integers, floats,
+// decimals, bool, and strings.
+template <typename T>
+constexpr bool is_variant_castable =
+  is_variant_numerical<T> || is_variant_decimal<T> || cuda::std::is_same_v<T, bool> ||
+  cuda::std::is_same_v<T, cudf::string_view>;
 
 // Maps a fixed-width output type to the VARIANT primitive type header id that encodes it.
 template <typename T>
@@ -775,6 +780,116 @@ __device__ op_status cast_status_for_primitive(device_span<uint8_t const> val)
                                              : op_status::MALFORMED_VARIANT;
 }
 
+// Largest number of fractional digits a VARIANT decimal may declare (the spec caps the scale at the
+// maximum precision of the widest decimal, DECIMAL16).
+constexpr int variant_decimal_max_scale = 38;
+
+// Multiply `value` by 10^exp, or return nullopt if the result does not fit in `__int128_t`. The
+// step-by-step check keeps the bound exact for any `exp`, including values far beyond the range of
+// a decimal scale.
+__device__ cuda::std::optional<__int128_t> multiply_pow10(__int128_t value, int exp)
+{
+  constexpr __int128_t max_over_10 = cuda::std::numeric_limits<__int128_t>::max() / 10;
+  constexpr __int128_t min_over_10 = cuda::std::numeric_limits<__int128_t>::min() / 10;
+  for (int i = 0; i < exp && value != 0; ++i) {
+    if (value > max_over_10 || value < min_over_10) { return cuda::std::nullopt; }
+    value *= 10;
+  }
+  return value;
+}
+
+// Divide `value` by 10^exp, truncating toward zero. Iterating instead of dividing by a single power
+// of ten keeps the result exact for an `exp` whose power of ten would itself overflow, where every
+// value truncates to zero.
+__device__ __int128_t divide_pow10(__int128_t value, int exp)
+{
+  for (int i = 0; i < exp && value != 0; ++i) {
+    value /= 10;
+  }
+  return value;
+}
+
+// Byte width of a VARIANT decimal's unscaled integer payload, or 0 if `ptype` is not a decimal.
+__device__ int variant_decimal_unscaled_width(primitive_type ptype)
+{
+  switch (ptype) {
+    case primitive_type::DECIMAL4: return 4;
+    case primitive_type::DECIMAL8: return 8;
+    case primitive_type::DECIMAL16: return 16;
+    default: return 0;
+  }
+}
+
+/**
+ * @brief Decode a single VARIANT decimal value blob into the representation of a cuDF fixed-point
+ * type, rescaled to `desired_scale`.
+ *
+ * A decimal value is encoded as the value metadata byte, a one-byte unsigned scale (the number of
+ * fractional digits), and the little-endian two's-complement unscaled integer, 4, 8, or 16 bytes
+ * wide depending on the primitive type id. Any of the three widths decodes into any `Rep`, provided
+ * the rescaled value fits.
+ *
+ * cuDF carries a single scale for the whole column while the encoding scales each value
+ * individually, so every value is rescaled to `desired_scale` (a base-10 exponent, hence the
+ * negation of the encoded fractional digit count). Digits below the target scale are truncated
+ * toward zero.
+ *
+ * @return The rescaled representation, valid only when the returned status is `SUCCESS`
+ */
+template <typename Rep>
+__device__ cuda::std::pair<Rep, op_status> decode_decimal(device_span<uint8_t const> enc,
+                                                          int desired_scale)
+{
+  auto const fail = [](op_status status) { return cuda::std::pair<Rep, op_status>{Rep{}, status}; };
+
+  if (enc.empty()) { return fail(op_status::MALFORMED_VARIANT); }
+  if (is_variant_null(enc)) { return fail(op_status::VARIANT_NULL); }
+  if (decode_basic_type(enc[0]) != basic_type::PRIMITIVE) { return fail(op_status::TYPE_MISMATCH); }
+
+  auto const ptype = static_cast<primitive_type>(variant_value_header(enc[0]));
+  auto const width = variant_decimal_unscaled_width(ptype);
+  if (width == 0) {
+    return fail(is_recognized_primitive_type(ptype) ? op_status::TYPE_MISMATCH
+                                                    : op_status::MALFORMED_VARIANT);
+  }
+
+  // Header byte, scale byte, then the unscaled integer.
+  constexpr size_type scale_bytes = 1;
+  if (cuda::std::cmp_less(enc.size(), variant_header_bytes + scale_bytes + width)) {
+    return fail(op_status::MALFORMED_VARIANT);
+  }
+  int const encoded_scale = enc[variant_header_bytes];
+  if (encoded_scale > variant_decimal_max_scale) { return fail(op_status::MALFORMED_VARIANT); }
+
+  auto const* unscaled_data = enc.data() + variant_header_bytes + scale_bytes;
+  auto const unscaled       = [&]() -> __int128_t {
+    switch (width) {
+      case 4: return cudf::io::unaligned_load<int32_t>(unscaled_data);
+      case 8: return cudf::io::unaligned_load<int64_t>(unscaled_data);
+      default: return cudf::io::unaligned_load<__int128_t>(unscaled_data);
+    }
+  }();
+
+  // The encoded value is `unscaled * 10^-encoded_scale` and the output is `rep * 10^desired_scale`.
+  auto const shift = -encoded_scale - desired_scale;
+  __int128_t rescaled{};
+  if (shift >= 0) {
+    auto const scaled = multiply_pow10(unscaled, shift);
+    if (!scaled.has_value()) { return fail(op_status::OVERFLOW); }
+    rescaled = scaled.value();
+  } else {
+    rescaled = divide_pow10(unscaled, -shift);
+  }
+
+  if constexpr (!cuda::std::is_same_v<Rep, __int128_t>) {
+    if (rescaled < static_cast<__int128_t>(cuda::std::numeric_limits<Rep>::min()) ||
+        rescaled > static_cast<__int128_t>(cuda::std::numeric_limits<Rep>::max())) {
+      return fail(op_status::OVERFLOW);
+    }
+  }
+  return {static_cast<Rep>(rescaled), op_status::SUCCESS};
+}
+
 /**
  * @brief Per-row kernel: decode each VARIANT value blob into a fixed-width primitive of type `T`.
  *
@@ -830,6 +945,57 @@ CUDF_KERNEL __launch_bounds__(block_size) void cast_variant_primitive_kernel(
       cudf::clear_bit(d_null_mask, row);
       if (d_status != nullptr) { d_status[row] = cast_status_for_primitive<T>(val); }
     }
+  }
+}
+
+/**
+ * @brief Per-row kernel: decode each VARIANT decimal value blob into a fixed-point representation
+ * of type `Rep`, rescaled to `desired_scale`.
+ *
+ * Follows the same null and status protocol as `cast_variant_primitive_kernel`; see
+ * `decode_decimal` for the accepted encodings.
+ */
+template <typename Rep>
+CUDF_KERNEL __launch_bounds__(block_size) void cast_variant_decimal_kernel(
+  cudf::lists_column_device_view values,
+  device_span<Rep> d_output,
+  int desired_scale,
+  bitmask_type* d_null_mask,
+  op_status* d_status)  // nullptr when no status was requested
+{
+  auto const num_rows = static_cast<size_type>(d_output.size());
+  auto const tid      = cudf::detail::grid_1d::global_thread_id<block_size>();
+  auto const stride   = cudf::detail::grid_1d::grid_stride<block_size>();
+
+  for (auto row = tid; row < num_rows; row += stride) {
+    if (d_status != nullptr) {
+      // Status column is always non-nullable; row_null replaces the null bit.
+      auto const s = d_status[row];
+      if (s != op_status::SUCCESS) {
+        d_output[row] = Rep{};
+        if (cudf::bit_is_set(d_null_mask, row)) { cudf::clear_bit(d_null_mask, row); }
+        continue;
+      }
+      if (!cudf::bit_is_set(d_null_mask, row)) {
+        d_output[row] = Rep{};
+        d_status[row] = op_status::ROW_NULL;
+        continue;
+      }
+    } else {
+      if (!cudf::bit_is_set(d_null_mask, row)) {
+        d_output[row] = Rep{};
+        continue;
+      }
+    }
+
+    auto const [value, status] = decode_decimal<Rep>(list_row_span(values, row), desired_scale);
+    if (status == op_status::SUCCESS) {
+      d_output[row] = value;
+    } else {
+      d_output[row] = Rep{};
+      cudf::clear_bit(d_null_mask, row);
+    }
+    if (d_status != nullptr) { d_status[row] = status; }
   }
 }
 
@@ -963,6 +1129,28 @@ struct cast_variant_fn {
       device_span<T>{static_cast<T*>(data.data()), static_cast<std::size_t>(num_rows)};
     cast_variant_primitive_kernel<T>
       <<<grid.num_blocks, block_size, 0, stream.get()>>>(values, d_out, d_null_mask, d_status);
+    CUDF_CUDA_TRY(cudaGetLastError());
+
+    auto const null_count =
+      num_rows - cudf::detail::count_set_bits(d_null_mask, 0, num_rows, stream);
+    return std::make_unique<column>(desired_type,
+                                    num_rows,
+                                    std::move(data),
+                                    null_count > 0 ? std::move(null_mask) : rmm::device_buffer{},
+                                    null_count);
+  }
+
+  template <typename T>
+  std::unique_ptr<column> operator()()
+    requires(is_variant_decimal<T>)
+  {
+    using Rep = typename T::rep;
+    rmm::device_buffer data{num_rows * sizeof(Rep), stream, mr};
+    auto const grid = cudf::detail::grid_1d{num_rows, block_size};
+    auto const d_out =
+      device_span<Rep>{static_cast<Rep*>(data.data()), static_cast<std::size_t>(num_rows)};
+    cast_variant_decimal_kernel<Rep><<<grid.num_blocks, block_size, 0, stream.get()>>>(
+      values, d_out, desired_type.scale(), d_null_mask, d_status);
     CUDF_CUDA_TRY(cudaGetLastError());
 
     auto const null_count =
@@ -1239,7 +1427,10 @@ std::unique_ptr<column> cast_variant(column_view const& values,
     case type_id::FLOAT32:
     case type_id::FLOAT64:
     case type_id::BOOL8:
-    case type_id::STRING: break;
+    case type_id::STRING:
+    case type_id::DECIMAL32:
+    case type_id::DECIMAL64:
+    case type_id::DECIMAL128: break;
     default: CUDF_FAIL("unsupported type for variant cast", std::invalid_argument);
   }
 
