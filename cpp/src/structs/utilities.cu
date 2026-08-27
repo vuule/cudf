@@ -391,7 +391,8 @@ std::vector<std::unique_ptr<column>> superimpose_nulls(
   }
 
   auto const masks_begin_bits = std::vector<size_type>(sources.size(), 0);
-  auto d_destinations         = cudf::detail::make_device_uvector_async(destinations, stream, mr);
+  auto const temp_mr  = cudf::get_current_device_resource_ref();
+  auto d_destinations = cudf::detail::make_device_uvector_async(destinations, stream, temp_mr);
 
   // for destination size, pass the number of words in each destination instead of number of bits
   auto const d_null_counts = cudf::detail::inplace_segmented_bitmask_binop(
@@ -404,7 +405,7 @@ std::vector<std::unique_ptr<column>> superimpose_nulls(
     segment_offsets,
     ~bitmask_type{0},  // identity of bitwise AND
     stream,
-    mr);
+    temp_mr);
   auto const result_null_counts = cudf::detail::make_std_vector<size_type>(d_null_counts, stream);
 
   // The masks were updated in place; refresh the cached null counts
