@@ -57,8 +57,7 @@ bench_variant_type parse_bench_variant_type(std::string const& type_str)
   CUDF_FAIL("Unrecognized benchmark type: " + type_str);
 }
 
-// Number of fractional digits encoded by the decimal leaf values, and the matching cuDF column
-// scale. The two agree so the cast measures decoding rather than rescaling.
+// Shared by the encoded leaf values and the target column, so the cast measures decoding only.
 constexpr uint8_t bench_decimal_scale = 2;
 
 // Compose a value-metadata header byte from a basic type and its 6-bit value_header.
@@ -183,15 +182,13 @@ std::vector<uint8_t> build_leaf_value(bench_variant_type type)
       return out;
     }
     case bench_variant_type::DECIMAL32: {
-      // Narrowest decimal encoding: 1-byte scale + 4-byte little-endian unscaled value.
       std::vector<uint8_t> out{make_variant_primitive_header(variant_primitive_type::DECIMAL4),
                                bench_decimal_scale};
       append_le(out, 1234u, 4);
       return out;
     }
     case bench_variant_type::DECIMAL128: {
-      // Widest decimal encoding: 1-byte scale + 16-byte little-endian unscaled value. The value
-      // needs more than 64 bits so the decode is not measured on an all-zero high half.
+      // The value needs more than 64 bits, so the decode is not measured on an all-zero high half.
       std::vector<uint8_t> out{make_variant_primitive_header(variant_primitive_type::DECIMAL16),
                                bench_decimal_scale};
       auto const unscaled = (static_cast<__uint128_t>(1234u) << 64) | 5678u;

@@ -780,13 +780,10 @@ __device__ op_status cast_status_for_primitive(device_span<uint8_t const> val)
                                              : op_status::MALFORMED_VARIANT;
 }
 
-// Largest number of fractional digits a VARIANT decimal may declare (the spec caps the scale at the
-// maximum precision of the widest decimal, DECIMAL16).
+// The spec allows a scale in [0, 38] for every decimal width.
 constexpr int variant_decimal_max_scale = 38;
 
-// Multiply `value` by 10^exp, or return nullopt if the result does not fit in `__int128_t`. The
-// step-by-step check keeps the bound exact for any `exp`, including values far beyond the range of
-// a decimal scale.
+// Multiply `value` by 10^exp, or return nullopt if the result does not fit in `__int128_t`.
 __device__ cuda::std::optional<__int128_t> multiply_pow10(__int128_t value, int exp)
 {
   constexpr __int128_t max_over_10 = cuda::std::numeric_limits<__int128_t>::max() / 10;
@@ -798,9 +795,8 @@ __device__ cuda::std::optional<__int128_t> multiply_pow10(__int128_t value, int 
   return value;
 }
 
-// Divide `value` by 10^exp, truncating toward zero. Iterating instead of dividing by a single power
-// of ten keeps the result exact for an `exp` whose power of ten would itself overflow, where every
-// value truncates to zero.
+// Divide `value` by 10^exp, truncating toward zero. Iterating keeps an `exp` whose power of ten
+// would itself overflow exact, since every value truncates to zero there.
 __device__ __int128_t divide_pow10(__int128_t value, int exp)
 {
   for (int i = 0; i < exp && value != 0; ++i) {
@@ -809,7 +805,7 @@ __device__ __int128_t divide_pow10(__int128_t value, int exp)
   return value;
 }
 
-// Byte width of a VARIANT decimal's unscaled integer payload, or 0 if `ptype` is not a decimal.
+// Returns 0 for a `ptype` that is not a decimal.
 __device__ int variant_decimal_unscaled_width(primitive_type ptype)
 {
   switch (ptype) {
@@ -824,15 +820,9 @@ __device__ int variant_decimal_unscaled_width(primitive_type ptype)
  * @brief Decode a single VARIANT decimal value blob into the representation of a cuDF fixed-point
  * type, rescaled to `desired_scale`.
  *
- * A decimal value is encoded as the value metadata byte, a one-byte unsigned scale (the number of
- * fractional digits), and the little-endian two's-complement unscaled integer, 4, 8, or 16 bytes
- * wide depending on the primitive type id. Any of the three widths decodes into any `Rep`, provided
- * the rescaled value fits.
- *
- * cuDF carries a single scale for the whole column while the encoding scales each value
- * individually, so every value is rescaled to `desired_scale` (a base-10 exponent, hence the
- * negation of the encoded fractional digit count). Digits below the target scale are truncated
- * toward zero.
+ * Encoded as the value metadata byte, a one-byte scale (fractional digit count), then the
+ * little-endian two's-complement unscaled integer. Any of the three widths decodes into any `Rep`
+ * whose range fits the rescaled value; digits below `desired_scale` truncate toward zero.
  *
  * @return The rescaled representation, valid only when the returned status is `SUCCESS`
  */
@@ -853,7 +843,6 @@ __device__ cuda::std::pair<Rep, op_status> decode_decimal(device_span<uint8_t co
                                                     : op_status::MALFORMED_VARIANT);
   }
 
-  // Header byte, scale byte, then the unscaled integer.
   constexpr size_type scale_bytes = 1;
   if (cuda::std::cmp_less(enc.size(), variant_header_bytes + scale_bytes + width)) {
     return fail(op_status::MALFORMED_VARIANT);
@@ -870,7 +859,7 @@ __device__ cuda::std::pair<Rep, op_status> decode_decimal(device_span<uint8_t co
     }
   }();
 
-  // The encoded value is `unscaled * 10^-encoded_scale` and the output is `rep * 10^desired_scale`.
+  // The encoded value is `unscaled * 10^-encoded_scale`; the output is `rep * 10^desired_scale`.
   auto const shift = -encoded_scale - desired_scale;
   __int128_t rescaled{};
   if (shift >= 0) {
@@ -893,13 +882,8 @@ __device__ cuda::std::pair<Rep, op_status> decode_decimal(device_span<uint8_t co
 /**
  * @brief Shared per-row preamble for the cast paths: decides whether row `row` should be decoded.
  *
- * When a row must be skipped, the null bit is cleared and the status recorded before returning:
- * a row carrying non-success status from a prior `get_variant_field` call keeps that status, and a
- * SQL-null row becomes `ROW_NULL`. Callers are left to zero the output element themselves, since
- * only they know its type.
- *
- * `d_status`, when present, is the in-out status buffer described on `cast_variant`; it is nullptr
- * when no status was requested, in which case the null bit alone decides.
+ * A skipped row has its null bit cleared and its status recorded here, but its output element is
+ * left to the caller, which alone knows the output type.
  *
  * @return True when the row's value blob should be decoded
  */
@@ -964,10 +948,8 @@ CUDF_KERNEL __launch_bounds__(block_size) void cast_variant_primitive_kernel(
 
 /**
  * @brief Per-row kernel: decode each VARIANT decimal value blob into a fixed-point representation
- * of type `Rep`, rescaled to `desired_scale`.
- *
- * Follows the same null and status protocol as `cast_variant_primitive_kernel`; see
- * `decode_decimal` for the accepted encodings.
+ * of type `Rep`, rescaled to `desired_scale`. Same null and status protocol as
+ * `cast_variant_primitive_kernel`.
  */
 template <typename Rep>
 CUDF_KERNEL __launch_bounds__(block_size) void cast_variant_decimal_kernel(

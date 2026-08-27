@@ -77,10 +77,9 @@ namespace io::parquet::experimental {
  * A null value is produced when the input row is null or the encoded type does not match
  * `desired_type`.
  *
- * For a decimal `desired_type`, any of the encoded decimal widths decodes into the requested type
- * and each value is rescaled from its own encoded scale to `desired_type.scale()`, truncating
- * toward zero. A value that does not fit the target after rescaling produces a null row with
- * `variant_operation_status::OVERFLOW`.
+ * For a decimal `desired_type`, every encoded width is accepted and each value is rescaled from its
+ * own encoded scale to `desired_type.scale()`, truncating toward zero; a value that no longer fits
+ * produces a null row with `variant_operation_status::OVERFLOW`.
  *
  * @param values `list<uint8>` column of VARIANT-encoded value bytes
  * @param desired_type Target cuDF type (`STRING`, `INT8`/`INT16`/`INT32`/`INT64`,
@@ -98,8 +97,7 @@ namespace io::parquet::experimental {
  * @throws std::invalid_argument if `values` is not a `list<uint8>` column; if `desired_type`
  *         is not one of the supported types (`STRING`, `INT8`/`INT16`/`INT32`/`INT64`,
  *         `FLOAT32`/`FLOAT64`, `BOOL8`, or `DECIMAL32`/`DECIMAL64`/`DECIMAL128`); or if `status`
- *         is provided but is nullable, not
- *         `UINT8`, or has a different row count than `values`
+ *         is provided but is nullable, not `UINT8`, or has a different row count than `values`
  */
 [[nodiscard]] std::unique_ptr<column> cast_variant(
   column_view const& values,

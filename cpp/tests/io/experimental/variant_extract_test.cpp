@@ -491,8 +491,7 @@ inline std::vector<uint8_t> enc_float64(double v)
   return out;
 }
 
-// Decimal primitive blobs: header + 1-byte scale (the number of fractional digits) + the
-// little-endian two's-complement unscaled integer, 4, 8, or 16 bytes wide.
+// Decimal primitive blobs: header + 1-byte scale + little-endian two's-complement unscaled integer.
 inline std::vector<uint8_t> enc_decimal4(int32_t unscaled, uint8_t scale)
 {
   std::vector<uint8_t> out{make_variant_primitive(variant_primitive_type::DECIMAL4), scale};
@@ -1408,8 +1407,7 @@ TEST_F(CastVariantTest, ApachePrimitiveDecimals)
 
 TEST_F(CastVariantTest, DecimalWidthsAreInterchangeable)
 {
-  // Unlike the integer targets, a decimal target accepts every encoded decimal width: writers pick
-  // the narrowest width that holds each value, so one column can mix all three.
+  // Writers pick the narrowest width per value, so one column can mix all three.
   auto const stream = cudf::test::get_default_stream();
   std::vector<std::vector<uint8_t>> const val_rows{
     enc_decimal4(1234, 2), enc_decimal8(1234, 2), enc_decimal16(1234, 2)};
@@ -1442,8 +1440,8 @@ TEST_F(CastVariantTest, DecimalWidthsAreInterchangeable)
 
 TEST_F(CastVariantTest, Decimal16FullRange)
 {
-  // Exercises the high half of a 16-byte unscaled payload, which the values above and the Apache
-  // fixture all leave zeroed: every one of them fits in an int64_t.
+  // Exercises the high half of a 16-byte payload, which every other decimal case here leaves
+  // zeroed.
   auto const stream = cudf::test::get_default_stream();
   constexpr __int128_t int128_max =
     static_cast<__int128_t>((~static_cast<__uint128_t>(0)) >> 1);  // 2^127 - 1
@@ -1457,8 +1455,7 @@ TEST_F(CastVariantTest, Decimal16FullRange)
     wrap_multi_row_variant(std::vector<std::vector<uint8_t>>(4, build_metadata({})), val_rows);
   auto const values = cudf::structs_column_view{col}.get_sliced_child(1, stream);
 
-  // Scale 0 target: the scale-0 rows pass through untouched, while the scale-38 rows lose all their
-  // fractional digits (|int128_max| is just over 1.7e38, so it truncates to 1).
+  // The scale-38 rows lose every fractional digit; |int128_max| is just over 1.7e38.
   {
     auto got = cudf::io::parquet::experimental::cast_variant(
       values, cudf::data_type{cudf::type_id::DECIMAL128, 0}, std::nullopt, stream);
@@ -1467,8 +1464,7 @@ TEST_F(CastVariantTest, Decimal16FullRange)
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
   }
 
-  // Scale -38 target: the scale-0 rows would need 10^38 more digits than the representation holds,
-  // while the scale-38 rows are already at that scale and pass through.
+  // The scale-0 rows would need 10^38 more digits than the representation holds.
   {
     auto got = cudf::io::parquet::experimental::cast_variant(
       values, cudf::data_type{cudf::type_id::DECIMAL128, -38}, std::nullopt, stream);
@@ -1480,8 +1476,7 @@ TEST_F(CastVariantTest, Decimal16FullRange)
 
 TEST_F(CastVariantTest, DecimalRescaledToRequestedScale)
 {
-  // A column carries one scale while the encoding scales each value individually, so every value is
-  // rescaled. Digits below the requested scale are truncated toward zero, never rounded.
+  // Digits below the requested scale are truncated toward zero, never rounded.
   auto const stream = cudf::test::get_default_stream();
   std::vector<std::vector<uint8_t>> const val_rows{
     enc_decimal4(125, 2),   // 1.25 -> 1.2 at scale -1 (truncated, not rounded to 1.3)
@@ -1539,10 +1534,8 @@ TEST_F(CastVariantTest, DecimalOverflowYieldsNull)
 
 TEST_F(CastVariantTest, DecimalSlicedMultiBlock)
 {
-  // The sliced window (slice_end - slice_beg = 512) spans more than one
-  // cast_variant_decimal_kernel block (block_size = 256), so this covers the grid-stride loop and
-  // a non-zero slice offset. Each row encodes a distinct value, so a row-indexing mistake cannot
-  // pass by coincidence, and the rows vary in encoded width to keep the value offsets irregular.
+  // The 512-row sliced window spans several kernel blocks (block_size = 256) at a non-zero offset.
+  // Values and encoded widths differ per row, so a row-indexing mistake cannot pass by coincidence.
   auto const stream       = cudf::test::get_default_stream();
   constexpr int num_rows  = 516;
   constexpr int slice_beg = 3;
@@ -1608,8 +1601,7 @@ TEST_F(CastVariantTest, DecimalMalformedYieldsNull)
 
 TEST_F(CastVariantTest, NonDecimalSourceYieldsNullForDecimalTarget)
 {
-  // Only the decimal primitives decode into a decimal target; there is no conversion from the
-  // integer, float, string, bool, or object encodings.
+  // Only the decimal primitives decode into a decimal target; nothing is converted.
   auto const stream = cudf::test::get_default_stream();
   std::vector<std::vector<uint8_t>> const val_rows{
     enc_int32(1234),
@@ -1745,8 +1737,7 @@ TEST_F(CastVariantTest, CastSourceTargetMatrix)
   // are INT8/16/32/64 and STRING. Expected behaviour:
   //   - integer targets: only a source whose physical type has the *exact* same width decodes;
   //   every
-  //     other source (including narrower/wider ints and the decimals) yields null — cast_variant
-  //     does not widen or convert between logical types.
+  //     other source (including narrower/wider ints and the decimals) yields null.
   //   - STRING target: short_string and long_string sources decode; every other source yields null.
   auto const stream = cudf::test::get_default_stream();
 
@@ -2825,8 +2816,7 @@ TEST_F(CastVariantStatusTest, BoolStatusTracking)
 
 TEST_F(CastVariantStatusTest, DecimalStatusTracking)
 {
-  // Status for a decimal target: a decode, a variant null, a non-decimal primitive, a value that
-  // overflows the target representation, and a scale beyond the spec maximum.
+  // A decode, a variant null, a non-decimal primitive, an overflow, and an out-of-spec scale.
   auto stream = cudf::test::get_default_stream();
 
   std::vector<std::vector<uint8_t>> const val_rows{
