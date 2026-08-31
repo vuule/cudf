@@ -794,9 +794,38 @@ NVBENCH_BENCH(bench_variant_extract_fields)
   .add_int64_axis("hit_rate", {20, 80})
   .add_string_axis("sorted", {"true", "false"});
 
+// One status column per path, for the benchmarks' `status` axis, or none when it is off. The
+// extraction APIs read a status buffer as incoming status before overwriting it, so the buffers
+// start at SUCCESS.
+struct status_columns {
+  std::vector<std::unique_ptr<cudf::column>> columns;
+  std::vector<cudf::mutable_column_view> views;
+};
+
+status_columns make_status_columns(std::size_t num_paths,
+                                   cudf::size_type num_rows,
+                                   rmm::cuda_stream_view stream,
+                                   rmm::device_async_resource_ref mr)
+{
+  status_columns out;
+  out.columns.reserve(num_paths);
+  out.views.reserve(num_paths);
+  for (std::size_t p = 0; p < num_paths; ++p) {
+    out.columns.push_back(cudf::make_numeric_column(
+      cudf::data_type{cudf::type_id::UINT8}, num_rows, cudf::mask_state::UNALLOCATED, stream, mr));
+    auto view = out.columns.back()->mutable_view();
+    CUDF_CUDA_TRY(
+      cudaMemsetAsync(view.data<uint8_t>(), 0, static_cast<std::size_t>(num_rows), stream.value()));
+    out.views.push_back(view);
+  }
+  CUDF_CUDA_TRY(cudaStreamSynchronize(stream.value()));
+  return out;
+}
+
 // Compares extracting many fields in one batched call against looping the single-field API, with
 // and without a prefix shared by all the requested paths. Type is fixed to int32_t; both APIs
-// decode, so the two sides of the comparison are end-to-end equivalent.
+// decode, so the two sides of the comparison are end-to-end equivalent. The `status` axis asks both
+// for per-row status, which the batched walk writes once per path and row.
 static void bench_variant_extract_multi_field(nvbench::state& state)
 {
   auto stream = cudf::get_default_stream();
@@ -807,6 +836,7 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
   auto const hit_rate      = static_cast<int>(state.get_int64("hit_rate"));
   bool const shared_prefix = state.get_string("prefix") == "shared";
   bool const batched       = state.get_string("api") == "batched";
+  bool const with_status   = state.get_string("status") == "on";
 
   // Dictionary: the shared parent key "a", the leaf keys f00..f{N-1}, and "z" for miss rows, in
   // sorted order. Field ids are dictionary indices, so "a" is 0 and leaf `i` is `i + 1`.
@@ -844,6 +874,8 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
   auto const target_type = cudf::data_type{cudf::type_id::INT32};
   std::vector<cudf::data_type> const target_types(num_fields, target_type);
 
+  auto status = make_status_columns(with_status ? paths.size() : 0, num_rows, stream, mr);
+
   auto const data_size = static_cast<std::size_t>(num_rows) * (meta_blob.size() + hit_val.size());
 
   auto mem_stats_logger = cudf::memory_stats_logger();
@@ -852,11 +884,16 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     if (batched) {
       std::ignore = cudf::io::parquet::experimental::extract_variant_fields(
-        col->view(), paths, target_types, stream, mr);
+        col->view(), paths, target_types, status.views, stream, mr);
     } else {
-      for (auto const& path : path_strings) {
+      for (std::size_t p = 0; p < path_strings.size(); ++p) {
         std::ignore = cudf::io::parquet::experimental::extract_variant_field(
-          col->view(), path, target_type, std::nullopt, stream, mr);
+          col->view(),
+          path_strings[p],
+          target_type,
+          with_status ? std::optional{status.views[p]} : std::nullopt,
+          stream,
+          mr);
       }
     }
   });
@@ -873,6 +910,7 @@ NVBENCH_BENCH(bench_variant_extract_multi_field)
   .add_int64_axis("num_fields", {1, 4, 16, 64})
   .add_string_axis("prefix", {"shared", "disjoint"})
   .add_string_axis("api", {"batched", "looped"})
+  .add_string_axis("status", {"off", "on"})
   .add_int64_axis("hit_rate", {80});
 
 // Compares batched against looped extraction on a workload shaped like a real one: an 85-key
@@ -883,8 +921,9 @@ static void bench_variant_extract_workload(nvbench::state& state)
   auto stream = cudf::get_default_stream();
   auto mr     = cudf::get_current_device_resource_ref();
 
-  auto const num_rows = static_cast<cudf::size_type>(state.get_int64("num_rows"));
-  bool const batched  = state.get_string("api") == "batched";
+  auto const num_rows    = static_cast<cudf::size_type>(state.get_int64("num_rows"));
+  bool const batched     = state.get_string("api") == "batched";
+  bool const with_status = state.get_string("status") == "on";
 
   std::vector<std::string> dict;
   dict.reserve(85);
@@ -905,6 +944,8 @@ static void bench_variant_extract_workload(nvbench::state& state)
   auto const target_type = cudf::data_type{cudf::type_id::STRING};
   std::vector<cudf::data_type> const target_types(paths.size(), target_type);
 
+  auto status = make_status_columns(with_status ? paths.size() : 0, num_rows, stream, mr);
+
   auto const data_size = static_cast<std::size_t>(num_rows) * (meta_blob.size() + val_blob.size());
 
   auto mem_stats_logger = cudf::memory_stats_logger();
@@ -913,11 +954,16 @@ static void bench_variant_extract_workload(nvbench::state& state)
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     if (batched) {
       std::ignore = cudf::io::parquet::experimental::extract_variant_fields(
-        col->view(), paths, target_types, stream, mr);
+        col->view(), paths, target_types, status.views, stream, mr);
     } else {
-      for (auto const& path : path_strings) {
+      for (std::size_t p = 0; p < path_strings.size(); ++p) {
         std::ignore = cudf::io::parquet::experimental::extract_variant_field(
-          col->view(), path, target_type, std::nullopt, stream, mr);
+          col->view(),
+          path_strings[p],
+          target_type,
+          with_status ? std::optional{status.views[p]} : std::nullopt,
+          stream,
+          mr);
       }
     }
   });
@@ -931,4 +977,5 @@ static void bench_variant_extract_workload(nvbench::state& state)
 NVBENCH_BENCH(bench_variant_extract_workload)
   .set_name("bench_variant_extract_workload")
   .add_int64_axis("num_rows", {262144, 1048576})
-  .add_string_axis("api", {"batched", "looped"});
+  .add_string_axis("api", {"batched", "looped"})
+  .add_string_axis("status", {"off", "on"});
