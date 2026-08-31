@@ -265,7 +265,7 @@ auto filter_row_groups_with_dictionaries_impl(InputType& inputs,
       dict_page_data, row_group_indices, options, stream);
   } else {
     auto const dict_page_byte_ranges =
-      reader.secondary_filters_byte_ranges(row_group_indices, options).second;
+      reader.dictionary_pages_byte_ranges(row_group_indices, options);
     CUDF_EXPECTS(dict_page_byte_ranges.size() > 0, "No dictionary page byte ranges found");
 
     [[maybe_unused]] auto [dict_page_buffers, dict_page_data, dict_page_tasks] =
@@ -420,6 +420,7 @@ std::pair<std::unique_ptr<cudf::table>, std::vector<char>> create_parquet_with_s
   INSTANTIATE_CREATE_PARQUET_WITH_STATS(T, 1, true, true)
 
 INSTANTIATE_CREATE_PARQUET_WITH_STATS(uint32_t, 4, true, false);
+INSTANTIATE_CREATE_PARQUET_WITH_STATS(int32_t, 2, true, false);
 INSTANTIATE_CREATE_PARQUET_WITH_STATS(cudf::timestamp_ms, 2, true, false);
 INSTANTIATE_CREATE_PARQUET_WITH_STATS(cudf::duration_ms, 2, true, false);
 
