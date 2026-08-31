@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cudf/detail/utilities/cuda.hpp>
+#include <cudf/detail/utilities/host_writable_resource.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/export.hpp>
@@ -16,6 +17,7 @@
 
 #include <thrust/host_vector.h>
 
+#include <chrono>
 #include <cstddef>
 #include <limits>
 #include <new>  // for bad_alloc
@@ -23,6 +25,28 @@
 
 namespace CUDF_EXPORT cudf {
 namespace detail {
+
+/**
+ * @brief Get the memory resource to be used for pageable memory allocations.
+ *
+ * @return Reference to the pageable memory resource
+ */
+CUDF_EXPORT rmm::host_async_resource_ref get_pageable_memory_resource();
+
+/**
+ * @brief Whether allocations and deallocations on `mr` are ordered on the stream they are passed.
+ *
+ * Only libcudf's pageable resource is known not to be stream-ordered; it allocates with
+ * `operator new` and frees immediately, ignoring the stream. Any other resource is assumed to be
+ * stream-ordered.
+ *
+ * @param mr The host memory resource to query
+ * @return true if the resource is (assumed to be) stream-ordered
+ */
+inline bool is_stream_ordered_host_resource(rmm::host_async_resource_ref mr)
+{
+  return mr != get_pageable_memory_resource();
+}
 
 /*! \p rmm_host_allocator is a CUDA-specific host memory allocator
  *  that employs \c a `cudf::host_async_resource_ref` for allocation.
@@ -105,7 +129,9 @@ class rmm_host_allocator {
     : mr(std::move(_mr)),
       stream(std::move(_stream)),
       _is_device_accessible{
-        cuda::mr::synchronous_resource_with<ResourceType, cuda::mr::device_accessible>}
+        cuda::mr::synchronous_resource_with<ResourceType, cuda::mr::device_accessible>},
+      _is_stream_ordered{is_stream_ordered_host_resource(mr)},
+      _host_writable{get_host_writable_resource(mr)}
   {
   }
 
@@ -140,12 +166,92 @@ class rmm_host_allocator {
    */
   inline pointer allocate(size_type cnt)
   {
+    // The resource can make the memory safe to write with a wait narrower than a stream sync
+    if (_host_writable != nullptr) { return allocate_host_writable(cnt); }
+
+    auto const result = allocate_async(cnt);
+    // A stream-ordered resource can hand back a block whose previous owner still has work in
+    // flight on this stream, so the host must not write to it before synchronizing. Resources that
+    // are not stream-ordered return memory that no stream can be referencing.
+    if (_is_stream_ordered) {
+      auto const start = std::chrono::steady_clock::now();
+      cudf::detail::sync_stream(stream);
+      record_host_alloc_wait(
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count()));
+    }
+    return result;
+  }
+
+  /**
+   * @brief Allocates storage the host may write to on return, using the resource's host-writable
+   * entry point.
+   *
+   * Only valid when `has_host_writable()`. Storage obtained this way must be released with
+   * `deallocate_host_writable`.
+   *
+   * @param cnt The number of objects to allocate
+   * @return a \c pointer to the newly allocated objects
+   */
+  inline pointer allocate_host_writable(size_type cnt)
+  {
     if (cnt > this->max_size()) { throw std::bad_alloc(); }  // end if
-    auto const result = mr.allocate(stream, cnt * sizeof(value_type), alignof(value_type));
-    // Synchronize to ensure the memory is allocated before thrust::host_vector initialization
-    // TODO: replace thrust::host_vector with a type that does not require synchronization
-    cudf::detail::sync_stream(stream);
+    auto const start = std::chrono::steady_clock::now();
+    auto* const result =
+      _host_writable->allocate_host_writable(stream, cnt * sizeof(value_type), alignof(value_type));
+    record_host_alloc_wait(static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+        .count()));
     return static_cast<pointer>(result);
+  }
+
+  /**
+   * @brief Deallocates storage obtained from `allocate_host_writable`.
+   *
+   * @param p A \c pointer to the previously allocated memory
+   * @param cnt Number of objects that were previously allocated
+   * @param device_exposed Whether device work on the stream ever accessed the storage
+   */
+  inline void deallocate_host_writable(pointer p, size_type cnt, bool device_exposed) noexcept
+  {
+    _host_writable->deallocate_host_writable(
+      stream, p, cnt * sizeof(value_type), alignof(value_type), device_exposed);
+  }
+
+  /**
+   * @brief Deallocates storage obtained from `allocate_async`.
+   *
+   * Unlike `deallocate`, this never routes to the host-writable entry point, so callers that mix
+   * the two allocation paths can match each one explicitly.
+   *
+   * @param p A \c pointer to the previously allocated memory
+   * @param cnt Number of objects that were previously allocated
+   */
+  inline void deallocate_async(pointer p, size_type cnt) noexcept
+  {
+    mr.deallocate(stream, p, cnt * sizeof(value_type), alignof(value_type));
+  }
+
+  /**
+   * @brief Whether the resource offers a host-writable entry point.
+   *
+   * @return true if `allocate_host_writable` may be used
+   */
+  [[nodiscard]] bool has_host_writable() const { return _host_writable != nullptr; }
+
+  /**
+   * @brief Allocates uninitialized storage without synchronizing the stream.
+   *
+   * The host may not access the returned storage before synchronizing with the allocator's stream.
+   *
+   * @param cnt The number of objects to allocate
+   * @return a \c pointer to the newly allocated objects
+   */
+  inline pointer allocate_async(size_type cnt)
+  {
+    if (cnt > this->max_size()) { throw std::bad_alloc(); }  // end if
+    return static_cast<pointer>(mr.allocate(stream, cnt * sizeof(value_type), alignof(value_type)));
   }
 
   /**
@@ -160,6 +266,11 @@ class rmm_host_allocator {
    */
   inline void deallocate(pointer p, size_type cnt) noexcept
   {
+    // `allocate` used the host-writable entry point, so the matching deallocate must too
+    if (_host_writable != nullptr) {
+      deallocate_host_writable(p, cnt, true);
+      return;
+    }
     mr.deallocate(stream, p, cnt * sizeof(value_type), alignof(value_type));
   }
 
@@ -198,10 +309,26 @@ class rmm_host_allocator {
 
   [[nodiscard]] bool is_device_accessible() const { return _is_device_accessible; }
 
+  /**
+   * @brief Whether the underlying resource orders its allocations on the stream.
+   *
+   * @return true if the resource is stream-ordered
+   */
+  [[nodiscard]] bool is_stream_ordered() const { return _is_stream_ordered; }
+
+  /**
+   * @brief The stream that this allocator's allocations are ordered on.
+   *
+   * @return The allocator's stream
+   */
+  [[nodiscard]] cuda::stream_ref get_stream() const { return stream; }
+
  private:
   rmm::host_async_resource_ref mr;
   cuda::stream_ref stream;
   bool _is_device_accessible;
+  bool _is_stream_ordered;
+  host_writable_resource* _host_writable;
 };
 
 /**

@@ -459,6 +459,11 @@ ConfigureTest(
 ConfigureTest(SPAN_TEST utilities_tests/span_tests.cu)
 
 # ##################################################################################################
+# * host_uvector tests ----------------------------------------------------------------------------
+
+ConfigureTest(HOST_UVECTOR_TEST utilities_tests/host_uvector_tests.cpp)
+
+# ##################################################################################################
 # * iterator tests --------------------------------------------------------------------------------
 ConfigureTest(
   ITERATOR_TEST

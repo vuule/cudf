@@ -14,13 +14,6 @@
 
 namespace cudf::detail {
 /**
- * @brief Get the memory resource to be used for pageable memory allocations.
- *
- * @return Reference to the pageable memory resource
- */
-CUDF_EXPORT rmm::host_async_resource_ref get_pageable_memory_resource();
-
-/**
  * @brief Get the allocator to be used for the host memory allocation.
  *
  * @param size The number of elements of type T to allocate

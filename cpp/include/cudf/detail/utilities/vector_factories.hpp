@@ -13,6 +13,7 @@
 #include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/host_memory.hpp>
+#include <cudf/detail/utilities/host_uvector.hpp>
 #include <cudf/detail/utilities/host_vector.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
@@ -616,6 +617,267 @@ host_vector<T> make_pinned_vector(host_span<T const> v, cuda::stream_ref stream)
 {
   auto result = make_pinned_vector<T>(v.size(), stream);
   std::copy(v.begin(), v.end(), result.begin());
+  return result;
+}
+
+/**
+ * @brief Construct a `cudf::detail::host_uvector` of the given size, without initializing it.
+ *
+ * @note This function does not synchronize `stream`; the host may not access the returned buffer
+ * before doing so, which `host_uvector::host_writable` takes care of. The returned buffer may be
+ * using a pinned memory resource.
+ *
+ * @tparam T The type of the buffer data
+ * @param size The number of elements in the created buffer
+ * @param stream The stream on which to allocate memory
+ * @param intent Whether the host will write to the buffer immediately
+ * @return A host_uvector of the given size
+ */
+template <typename T>
+host_uvector<T> make_host_uvector(size_t size,
+                                  cuda::stream_ref stream,
+                                  host_write_intent intent = host_write_intent::immediate)
+{
+  return host_uvector<T>(size, get_host_allocator<T>(size, stream), intent);
+}
+
+/**
+ * @brief Construct an empty `cudf::detail::host_uvector` with the given capacity.
+ *
+ * @note This function does not synchronize `stream`. The returned buffer may be using a pinned
+ * memory resource.
+ *
+ * @tparam T The type of the buffer data
+ * @param capacity Capacity of the buffer, which it cannot grow beyond
+ * @param stream The stream on which to allocate memory
+ * @return An empty host_uvector with the given capacity
+ */
+template <typename T>
+host_uvector<T> make_empty_host_uvector(size_t capacity, cuda::stream_ref stream)
+{
+  auto result = make_host_uvector<T>(capacity, stream);
+  result.resize_uninitialized(0);
+  return result;
+}
+
+/**
+ * @brief Asynchronously construct a `cudf::detail::host_uvector` containing a copy of data from a
+ * `device_span`
+ *
+ * @note This function does not synchronize `stream`, so the host may not read the returned buffer
+ * before doing so.
+ *
+ * @tparam T The type of the data to copy
+ * @param v The device data to copy
+ * @param stream The stream on which to perform the copy
+ * @return The data copied to the host
+ */
+template <typename T>
+host_uvector<T> make_host_uvector_async(device_span<T const> v, cuda::stream_ref stream)
+{
+  // The device fills this buffer, so the host has nothing to write and needs no wait
+  auto result = make_host_uvector<T>(v.size(), stream, host_write_intent::deferred);
+  cuda_memcpy_async<T>(host_span<T>{result}, v, stream);
+  return result;
+}
+
+/**
+ * @brief Asynchronously construct a `cudf::detail::host_uvector` containing a copy of data from a
+ * device container
+ *
+ * @note This function does not synchronize `stream`, so the host may not read the returned buffer
+ * before doing so.
+ *
+ * @tparam Container The type of the container to copy from
+ * @param c The input device container from which to copy
+ * @param stream The stream on which to perform the copy
+ * @return The data copied to the host
+ */
+template <typename Container>
+host_uvector<typename Container::value_type> make_host_uvector_async(Container const& c,
+                                                                     cuda::stream_ref stream)
+  requires(std::is_convertible_v<Container, device_span<typename Container::value_type const>>)
+{
+  return make_host_uvector_async(device_span<typename Container::value_type const>{c}, stream);
+}
+
+/**
+ * @brief Synchronously construct a `cudf::detail::host_uvector` containing a copy of data from a
+ * `device_span`
+ *
+ * @note This function synchronizes `stream` after the copy, so the host may read the result
+ * without synchronizing again.
+ *
+ * @tparam T The type of the data to copy
+ * @param v The device data to copy
+ * @param stream The stream on which to perform the copy
+ * @return The data copied to the host
+ */
+template <typename T>
+host_uvector<T> make_host_uvector(device_span<T const> v, cuda::stream_ref stream)
+{
+  auto result = make_host_uvector_async(v, stream);
+  cudf::detail::sync_stream(stream);
+  result.mark_stream_synchronized();
+  return result;
+}
+
+/**
+ * @brief Synchronously construct a `cudf::detail::host_uvector` containing a copy of data from a
+ * device container
+ *
+ * @note This function synchronizes `stream` after the copy, so the host may read the result
+ * without synchronizing again.
+ *
+ * @tparam Container The type of the container to copy from
+ * @param c The input device container from which to copy
+ * @param stream The stream on which to perform the copy
+ * @return The data copied to the host
+ */
+template <typename Container>
+host_uvector<typename Container::value_type> make_host_uvector(Container const& c,
+                                                               cuda::stream_ref stream)
+  requires(std::is_convertible_v<Container, device_span<typename Container::value_type const>>)
+{
+  return make_host_uvector(device_span<typename Container::value_type const>{c}, stream);
+}
+
+/**
+ * @brief Construct a pinned `cudf::detail::host_uvector` of the given size, without initializing
+ * it.
+ *
+ * @note This function does not synchronize `stream`; the host may not access the returned buffer
+ * before doing so, which `host_uvector::host_writable` takes care of.
+ *
+ * @tparam T The type of the buffer data
+ * @param size The number of elements in the created buffer
+ * @param stream The stream on which to allocate memory
+ * @param intent Whether the host will write to the buffer immediately
+ * @return A pinned host_uvector of the given size
+ */
+template <typename T>
+host_uvector<T> make_pinned_uvector(size_t size,
+                                    cuda::stream_ref stream,
+                                    host_write_intent intent = host_write_intent::immediate)
+{
+  return host_uvector<T>(size, {cudf::get_pinned_memory_resource(), stream}, intent);
+}
+
+/**
+ * @brief Construct an empty pinned `cudf::detail::host_uvector` with the given capacity.
+ *
+ * @note This function does not synchronize `stream`.
+ *
+ * @tparam T The type of the buffer data
+ * @param capacity Capacity of the buffer, which it cannot grow beyond
+ * @param stream The stream on which to allocate memory
+ * @return An empty pinned host_uvector with the given capacity
+ */
+template <typename T>
+host_uvector<T> make_empty_pinned_uvector(size_t capacity, cuda::stream_ref stream)
+{
+  auto result = make_pinned_uvector<T>(capacity, stream);
+  result.resize_uninitialized(0);
+  return result;
+}
+
+/**
+ * @brief Asynchronously construct a pinned `cudf::detail::host_uvector` containing a copy of data
+ * from a `device_span`
+ *
+ * @note This function does not synchronize `stream`, so the host may not read the returned buffer
+ * before doing so.
+ *
+ * @tparam T The type of the data to copy
+ * @param v The device data to copy
+ * @param stream The stream on which to perform the copy
+ * @return The data copied to pinned host memory
+ */
+template <typename T>
+host_uvector<T> make_pinned_uvector_async(device_span<T const> v, cuda::stream_ref stream)
+{
+  // The device fills this buffer, so the host has nothing to write and needs no wait
+  auto result = make_pinned_uvector<T>(v.size(), stream, host_write_intent::deferred);
+  cuda_memcpy_async<T>(host_span<T>{result}, v, stream);
+  return result;
+}
+
+/**
+ * @brief Asynchronously construct a pinned `cudf::detail::host_uvector` containing a copy of data
+ * from a device container
+ *
+ * @note This function does not synchronize `stream`, so the host may not read the returned buffer
+ * before doing so.
+ *
+ * @tparam Container The type of the container to copy from
+ * @param c The input device container from which to copy
+ * @param stream The stream on which to perform the copy
+ * @return The data copied to pinned host memory
+ */
+template <typename Container>
+host_uvector<typename Container::value_type> make_pinned_uvector_async(Container const& c,
+                                                                       cuda::stream_ref stream)
+  requires(std::is_convertible_v<Container, device_span<typename Container::value_type const>>)
+{
+  return make_pinned_uvector_async(device_span<typename Container::value_type const>{c}, stream);
+}
+
+/**
+ * @brief Synchronously construct a pinned `cudf::detail::host_uvector` containing a copy of data
+ * from a `device_span`
+ *
+ * @note This function synchronizes `stream` after the copy, so the host may read the result
+ * without synchronizing again.
+ *
+ * @tparam T The type of the data to copy
+ * @param v The device data to copy
+ * @param stream The stream on which to perform the copy
+ * @return The data copied to pinned host memory
+ */
+template <typename T>
+host_uvector<T> make_pinned_uvector(device_span<T const> v, cuda::stream_ref stream)
+{
+  auto result = make_pinned_uvector_async(v, stream);
+  cudf::detail::sync_stream(stream);
+  result.mark_stream_synchronized();
+  return result;
+}
+
+/**
+ * @brief Synchronously construct a pinned `cudf::detail::host_uvector` containing a copy of data
+ * from a device container
+ *
+ * @note This function synchronizes `stream` after the copy, so the host may read the result
+ * without synchronizing again.
+ *
+ * @tparam Container The type of the container to copy from
+ * @param c The input device container from which to copy
+ * @param stream The stream on which to perform the copy
+ * @return The data copied to pinned host memory
+ */
+template <typename Container>
+host_uvector<typename Container::value_type> make_pinned_uvector(Container const& c,
+                                                                 cuda::stream_ref stream)
+  requires(std::is_convertible_v<Container, device_span<typename Container::value_type const>>)
+{
+  return make_pinned_uvector(device_span<typename Container::value_type const>{c}, stream);
+}
+
+/**
+ * @brief Synchronously construct a pinned `cudf::detail::host_uvector` containing a copy of data
+ * from a `host_span`
+ *
+ * @tparam T The type of the data to copy
+ * @param v The host data to copy
+ * @param stream The stream on which to allocate memory
+ * @return The data copied to pinned host memory
+ */
+template <typename T>
+host_uvector<T> make_pinned_uvector(host_span<T const> v, cuda::stream_ref stream)
+{
+  auto result = make_pinned_uvector<T>(v.size(), stream);
+  auto dst    = result.host_writable();
+  std::copy(v.begin(), v.end(), dst.begin());
   return result;
 }
 

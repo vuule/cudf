@@ -123,6 +123,10 @@ ConfigureNVBench(SET_OPS_NVBENCH lists/set_operations.cpp)
 ConfigureNVBench(TRANSPOSE_NVBENCH transpose/transpose.cpp)
 
 # ##################################################################################################
+# * host allocation benchmark ---------------------------------------------------------------------
+ConfigureNVBench(HOST_ALLOCATION_NVBENCH utilities/host_allocation.cpp)
+
+# ##################################################################################################
 # * nds-h benchmark --------------------------------------------------------------------------------
 ConfigureNVBench(NDSH_Q01_NVBENCH ndsh/q01.cpp ndsh/utilities.cpp)
 ConfigureNVBench(NDSH_Q05_NVBENCH ndsh/q05.cpp ndsh/utilities.cpp)

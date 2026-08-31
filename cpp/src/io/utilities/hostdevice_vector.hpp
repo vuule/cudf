@@ -9,7 +9,8 @@
 
 #include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
-#include <cudf/detail/utilities/host_vector.hpp>
+#include <cudf/detail/utilities/getenv_or.hpp>
+#include <cudf/detail/utilities/host_uvector.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/io/config_utils.hpp>
 #include <cudf/utilities/default_stream.hpp>
@@ -19,6 +20,8 @@
 #include <rmm/device_uvector.hpp>
 
 #include <cuda/stream>
+
+#include <cstring>
 
 namespace cudf::detail {
 
@@ -46,10 +49,18 @@ class hostdevice_vector {
 
   explicit hostdevice_vector(size_t size, cuda::stream_ref stream)
     : keep_single_copy{cudf::io::integrated_memory_optimization::is_enabled()},
-      h_data{make_pinned_vector_async<T>(size, stream)},
+      h_data{make_pinned_uvector<T>(size, stream)},
       d_data{keep_single_copy ? 0 : size, stream},
       _device_ptr{keep_single_copy ? h_data.data() : d_data.data()}
   {
+    // The accessors below hand out raw host pointers, so the storage has to be writable on return
+    // rather than at first use. Elements are left uninitialized.
+    h_data.make_host_writable();
+    // Recycled pool memory is often zero, which hides a dependency on the value-initialization
+    // this class used to perform. Filling with a non-zero pattern exposes those.
+    if (poison_uninitialized()) {
+      std::memset(static_cast<void*>(h_data.data()), 0xab, size * sizeof(T));
+    }
   }
 
   [[nodiscard]] size_t size() const noexcept { return h_data.size(); }
@@ -68,11 +79,11 @@ class hostdevice_vector {
   [[nodiscard]] T* end() { return host_ptr(size()); }
   [[nodiscard]] T const* end() const { return host_ptr(size()); }
 
-  [[nodiscard]] T& front() { return h_data.front(); }
-  [[nodiscard]] T const& front() const { return front(); }
+  [[nodiscard]] T& front() { return *host_ptr(); }
+  [[nodiscard]] T const& front() const { return *host_ptr(); }
 
-  [[nodiscard]] T& back() { return h_data.back(); }
-  [[nodiscard]] T const& back() const { return back(); }
+  [[nodiscard]] T& back() { return *host_ptr(size() - 1); }
+  [[nodiscard]] T const& back() const { return *host_ptr(size() - 1); }
 
   [[nodiscard]] T* device_ptr(size_t offset = 0) { return _device_ptr + offset; }
   [[nodiscard]] T const* device_ptr(size_t offset = 0) const { return _device_ptr + offset; }
@@ -126,8 +137,16 @@ class hostdevice_vector {
   }
 
  private:
+  /// Whether `LIBCUDF_POISON_UNINITIALIZED` asks for uninitialized host storage to be filled with
+  /// a recognizable pattern. For testing only.
+  static bool poison_uninitialized()
+  {
+    static bool const poison = getenv_or<int>("LIBCUDF_POISON_UNINITIALIZED", 0) != 0;
+    return poison;
+  }
+
   bool keep_single_copy;
-  cudf::detail::host_vector<T> h_data;
+  cudf::detail::host_uvector<T> h_data;
   rmm::device_uvector<T> d_data;
   T* _device_ptr{};  // Device pointer for integrated memory systems
 };
