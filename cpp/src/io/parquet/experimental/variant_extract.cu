@@ -882,7 +882,8 @@ __device__ cuda::std::pair<Rep, op_status> decode_decimal(device_span<uint8_t co
     switch (width) {
       case 4: return cudf::io::unaligned_load<int32_t>(unscaled_data);
       case 8: return cudf::io::unaligned_load<int64_t>(unscaled_data);
-      default: return cudf::io::unaligned_load<__int128_t>(unscaled_data);
+      case 16: return cudf::io::unaligned_load<__int128_t>(unscaled_data);
+      default: return 0;  // should be unreachable
     }
   }();
 

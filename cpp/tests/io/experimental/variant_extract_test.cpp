@@ -1842,7 +1842,7 @@ TEST_F(CastVariantTest, CastSourceTargetMatrix)
     auto values = values_of(src.bytes);
     auto got =
       cudf::io::parquet::experimental::cast_variant(values, decimal_type, std::nullopt, stream);
-      // Decimal target: all three encoded widths decode, since the sources share the encoded scale.
+    // Decimal target: all three encoded widths decode, since the sources share the encoded scale.
     if (src.label.starts_with("decimal")) {
       cudf::test::fixed_point_column_wrapper<int32_t> const expected{
         {1234}, numeric::scale_type{decimal_type.scale()}};
