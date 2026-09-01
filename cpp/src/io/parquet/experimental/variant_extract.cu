@@ -15,6 +15,7 @@
 #include <cudf/detail/utilities/batched_memcpy.hpp>
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/io/experimental/variant.hpp>
 #include <cudf/io/experimental/variant_spec.hpp>
 #include <cudf/lists/lists_column_device_view.cuh>
@@ -814,17 +815,24 @@ __device__ cuda::std::optional<__int128_t> multiply_pow10(__int128_t value, int 
   return value;
 }
 
-// Divide `value` by 10^exp, truncating toward zero. Iterating keeps an `exp` whose power of ten
-// would itself overflow exact, since every value truncates to zero there.
+// Divide `value` by 10^exp, truncating toward zero.
 __device__ __int128_t divide_pow10(__int128_t value, int exp)
 {
-  for (int i = 0; i < exp && value != 0; ++i) {
-    value /= 10;
+  using numeric::detail::ipow;
+
+  // Any `__int128_t` is smaller than 10^39, so a larger divisor truncates it away
+  if (exp > variant_decimal_max_scale) { return 0; }
+
+  // 128-bit division is a slow software sequence; use the 64-bit one when both operands fit.
+  constexpr __int128_t i64_max  = cuda::std::numeric_limits<int64_t>::max();
+  constexpr __int128_t i64_min  = cuda::std::numeric_limits<int64_t>::min();
+  constexpr int max_int64_pow10 = 18;
+  if (exp <= max_int64_pow10 && value <= i64_max && value >= i64_min) {
+    return static_cast<int64_t>(value) / ipow<int64_t, numeric::Radix::BASE_10>(exp);
   }
-  return value;
+  return value / ipow<__int128_t, numeric::Radix::BASE_10>(exp);
 }
 
-// Returns 0 for a `ptype` that is not a decimal.
 __device__ int variant_decimal_unscaled_width(primitive_type ptype)
 {
   switch (ptype) {
@@ -899,23 +907,25 @@ __device__ cuda::std::pair<Rep, op_status> decode_decimal(device_span<uint8_t co
 }
 
 /**
- * @brief Shared per-row preamble for the cast paths: decides whether row `row` should be decoded.
+ * @brief Decides whether a row should be decoded, shared by every cast path.
  *
- * A skipped row has its null bit cleared and its status recorded here, but its output element is
- * left to the caller, which alone knows the output type.
+ * A skipped row has its null bit cleared and its status recorded here. Zeroing its output element
+ * is left to the caller, since the element type is not known here.
  *
  * @return True when the row's value blob should be decoded
  */
 __device__ bool should_decode_row(size_type row, bitmask_type* d_null_mask, op_status* d_status)
 {
-  if (d_status == nullptr) { return cudf::bit_is_set(d_null_mask, row); }
+  auto const is_valid = cudf::bit_is_set(d_null_mask, row);
 
-  // Status column is always non-nullable; ROW_NULL replaces the null bit.
+  if (d_status == nullptr) { return is_valid; }
+
   if (d_status[row] != op_status::SUCCESS) {
-    if (cudf::bit_is_set(d_null_mask, row)) { cudf::clear_bit(d_null_mask, row); }
+    if (is_valid) { cudf::clear_bit(d_null_mask, row); }
     return false;
   }
-  if (!cudf::bit_is_set(d_null_mask, row)) {
+  // Status column is always non-nullable, so ROW_NULL is what reports the cleared null bit.
+  if (!is_valid) {
     d_status[row] = op_status::ROW_NULL;
     return false;
   }
@@ -1181,7 +1191,7 @@ struct cast_variant_fn {
                          d_out[row] = false;
                          return;
                        }
-                       // The row is known live here, so a decode failure always clears its bit.
+                       // The row's null bit is still set here, so a failure can clear it unguarded.
                        auto const fail = [&](op_status s) {
                          d_out[row] = false;
                          cudf::clear_bit(dnm, row);
