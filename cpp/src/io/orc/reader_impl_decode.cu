@@ -14,7 +14,6 @@
 #include <cudf/detail/copy.hpp>
 #include <cudf/detail/device_scalar.hpp>
 #include <cudf/detail/null_mask.hpp>
-#include <cudf/detail/structs/utilities.hpp>
 #include <cudf/detail/transform.hpp>
 #include <cudf/detail/utilities/batched_memcpy.hpp>
 #include <cudf/detail/utilities/integer_utils.hpp>
@@ -1018,9 +1017,6 @@ void reader_impl::decompress_and_decode_stripes(read_mode mode)
       return make_column(col_buffer, &_out_metadata.schema_info.back(), std::nullopt, _stream);
     });
   _chunk_read_data.decoded_table = std::make_unique<table>(std::move(out_columns));
-
-  out_columns =
-    cudf::structs::detail::enforce_null_consistency(std::move(out_columns), _stream, _mr);
 
   // Free up temp memory used for decoding.
   for (std::size_t level = 0; level < _selected_columns.num_levels(); ++level) {
