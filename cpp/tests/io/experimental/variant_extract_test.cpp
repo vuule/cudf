@@ -8,6 +8,7 @@
 #include <cudf_test/base_fixture.hpp>
 #include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
+#include <cudf_test/type_lists.hpp>
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
@@ -23,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1400,9 +1402,9 @@ TEST_F(CastVariantTest, ApachePrimitiveBooleans)
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
   }
 
-  // Sliced multi-row column exercises grid-stride paths with a non-zero slice offset.
-  // num_rows / slice range is chosen so the sliced window (slice_end - slice_beg = 512)
-  // spans more than one cast_variant_bool_kernel block (block_size = 256).
+  // A 512-row sliced window at a non-zero offset, covering the row-to-blob mapping the bool path
+  // shares with the cast kernels. The bool path itself is a thrust::for_each, so it has no
+  // grid-stride loop of its own.
   {
     constexpr int num_rows  = 516;
     constexpr int slice_beg = 3;
@@ -1481,9 +1483,15 @@ TEST_F(CastVariantTest, ApachePrimitiveDecimals)
   }
 }
 
-TEST_F(CastVariantTest, DecimalWidthsAreInterchangeable)
+template <typename T>
+struct CastVariantDecimalTest : public cudf::test::BaseFixture {};
+TYPED_TEST_SUITE(CastVariantDecimalTest, cudf::test::FixedPointTypes);
+
+// Writers pick the narrowest width per value, so one column can mix all three, and every encoded
+// width decodes into whichever decimal target was asked for.
+TYPED_TEST(CastVariantDecimalTest, WidthsAreInterchangeable)
 {
-  // Writers pick the narrowest width per value, so one column can mix all three.
+  using Rep                     = typename TypeParam::rep;
   constexpr auto expected_scale = numeric::scale_type{-2};
   auto const stream             = cudf::test::get_default_stream();
   std::vector<std::vector<uint8_t>> const val_rows{
@@ -1492,24 +1500,11 @@ TEST_F(CastVariantTest, DecimalWidthsAreInterchangeable)
     wrap_multi_row_variant(std::vector<std::vector<uint8_t>>(3, build_metadata({})), val_rows);
   auto const values = cudf::structs_column_view{col}.get_sliced_child(1, stream);
 
-  {
-    auto got = cudf::io::parquet::experimental::cast_variant(
-      values, cudf::data_type{cudf::type_id::DECIMAL32, expected_scale}, std::nullopt, stream);
-    cudf::test::fixed_point_column_wrapper<int32_t> expected{{1234, 1234, 1234}, expected_scale};
-    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
-  }
-  {
-    auto got = cudf::io::parquet::experimental::cast_variant(
-      values, cudf::data_type{cudf::type_id::DECIMAL64, expected_scale}, std::nullopt, stream);
-    cudf::test::fixed_point_column_wrapper<int64_t> expected{{1234, 1234, 1234}, expected_scale};
-    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
-  }
-  {
-    auto got = cudf::io::parquet::experimental::cast_variant(
-      values, cudf::data_type{cudf::type_id::DECIMAL128, expected_scale}, std::nullopt, stream);
-    cudf::test::fixed_point_column_wrapper<__int128_t> expected{{1234, 1234, 1234}, expected_scale};
-    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
-  }
+  auto got = cudf::io::parquet::experimental::cast_variant(
+    values, cudf::data_type{cudf::type_to_id<TypeParam>(), expected_scale}, std::nullopt, stream);
+
+  cudf::test::fixed_point_column_wrapper<Rep> expected{{1234, 1234, 1234}, expected_scale};
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
 }
 
 TEST_F(CastVariantTest, Decimal16FullRange)
@@ -1517,7 +1512,7 @@ TEST_F(CastVariantTest, Decimal16FullRange)
   // Exercises the high half of a 16-byte payload, which every other decimal case here leaves
   // zeroed.
   auto const stream = cudf::test::get_default_stream();
-  constexpr __int128_t int128_max =
+  constexpr auto int128_max =
     static_cast<__int128_t>((~static_cast<__uint128_t>(0)) >> 1);  // 2^127 - 1
   constexpr __int128_t int128_min = -int128_max - 1;
 
@@ -1577,7 +1572,7 @@ TEST_F(CastVariantTest, DecimalRescaledToRequestedScale)
 
 TEST_F(CastVariantTest, DecimalOverflowYieldsNull)
 {
-  // A value that does not fit the target representation after rescaling is dropped.
+  // A value that does not fit the target representation after rescaling becomes a null row.
   auto const stream = cudf::test::get_default_stream();
   auto const cast   = [&](std::vector<std::vector<uint8_t>> const& rows, cudf::data_type target) {
     auto col = wrap_multi_row_variant(
@@ -1588,11 +1583,13 @@ TEST_F(CastVariantTest, DecimalOverflowYieldsNull)
 
   {
     constexpr auto expected_scale = numeric::scale_type{-3};
-    auto got = cast({enc_decimal8(1234567890123, 2),  // too large for an int32 representation
-                     enc_decimal4(3000000, 0),  // fits int32 as encoded, rescaling up by 10^3 does
-                                                // not
-                     enc_decimal4(1234, 2)},    // fits, to show the overflow is per row
-                    cudf::data_type{cudf::type_id::DECIMAL32, expected_scale});
+    constexpr auto int32_max      = std::numeric_limits<int32_t>::max();
+    auto got =
+      cast({enc_decimal8(int64_t{int32_max} + 1, 2),  // past the int32 representation as encoded
+            enc_decimal4(int32_max / 1000 + 1, 0),    // fits as encoded, but not after the 10^3
+                                                      // scale-up
+            enc_decimal4(1234, 2)},                   // fits, to show the overflow is per row
+           cudf::data_type{cudf::type_id::DECIMAL32, expected_scale});
     cudf::test::fixed_point_column_wrapper<int32_t> expected{
       {0, 0, 12340}, {false, false, true}, expected_scale};
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
@@ -1600,11 +1597,13 @@ TEST_F(CastVariantTest, DecimalOverflowYieldsNull)
 
   // The int64 representation has its own bound, reachable only from a 16-byte encoded value.
   {
-    constexpr auto expected_scale       = numeric::scale_type{0};
-    constexpr __int128_t past_int64_max = static_cast<__int128_t>(10000000000000000000ULL);
-    auto got                            = cast(
-      {enc_decimal16(past_int64_max, 0), enc_decimal16(-past_int64_max, 0), enc_decimal8(1234, 2)},
-      cudf::data_type{cudf::type_id::DECIMAL64, expected_scale});
+    constexpr auto expected_scale = numeric::scale_type{0};
+    // 2^64 rather than 2^63, so that the negated row is out of range too: -2^63 is int64_min.
+    constexpr auto out_of_int64_range = static_cast<__int128_t>(1) << 64;
+    auto got                          = cast({enc_decimal16(out_of_int64_range, 0),
+                                              enc_decimal16(-out_of_int64_range, 0),
+                                              enc_decimal8(1234, 2)},
+                    cudf::data_type{cudf::type_id::DECIMAL64, expected_scale});
     cudf::test::fixed_point_column_wrapper<int64_t> expected{
       {0, 0, 12}, {false, false, true}, expected_scale};
     CUDF_TEST_EXPECT_COLUMNS_EQUAL(*got, expected);
@@ -1637,7 +1636,7 @@ TEST_F(CastVariantTest, DecimalSlicedMultiBlock)
         exp_valid[i] = true;
         break;
       default:
-        val_rows[i]  = enc_int32(i);  // not a decimal encoding, so the row drops out
+        val_rows[i]  = enc_int32(i);  // not a decimal encoding, so the row casts to null
         exp_reps[i]  = 0;
         exp_valid[i] = false;
         break;
@@ -1710,24 +1709,18 @@ TEST_F(CastVariantTest, EmptyInput)
   auto const values =
     cudf::empty_like(cudf::structs_column_view{make_xyz_three_row_variant()}.child(1));
 
-  for (auto const id : {cudf::type_id::INT32,
-                        cudf::type_id::STRING,
-                        cudf::type_id::FLOAT32,
-                        cudf::type_id::FLOAT64,
-                        cudf::type_id::BOOL8}) {
-    auto got = cudf::io::parquet::experimental::cast_variant(
-      *values, cudf::data_type{id}, std::nullopt, stream);
-    EXPECT_EQ(got->type().id(), id);
-    EXPECT_EQ(got->size(), 0);
-    EXPECT_EQ(got->null_count(), 0);
-  }
-
-  for (auto const id :
-       {cudf::type_id::DECIMAL32, cudf::type_id::DECIMAL64, cudf::type_id::DECIMAL128}) {
-    auto got = cudf::io::parquet::experimental::cast_variant(
-      *values, cudf::data_type{id, -2}, std::nullopt, stream);
-    EXPECT_EQ(got->type().id(), id);
-    EXPECT_EQ(got->type().scale(), -2);
+  for (auto const target : {cudf::data_type{cudf::type_id::INT32},
+                            cudf::data_type{cudf::type_id::STRING},
+                            cudf::data_type{cudf::type_id::FLOAT32},
+                            cudf::data_type{cudf::type_id::FLOAT64},
+                            cudf::data_type{cudf::type_id::BOOL8},
+                            cudf::data_type{cudf::type_id::DECIMAL32, -2},
+                            cudf::data_type{cudf::type_id::DECIMAL64, -2},
+                            cudf::data_type{cudf::type_id::DECIMAL128, -2}}) {
+    SCOPED_TRACE(static_cast<int32_t>(target.id()));
+    auto got = cudf::io::parquet::experimental::cast_variant(*values, target, std::nullopt, stream);
+    EXPECT_EQ(got->type().id(), target.id());
+    EXPECT_EQ(got->type().scale(), target.scale());
     EXPECT_EQ(got->size(), 0);
     EXPECT_EQ(got->null_count(), 0);
   }
@@ -1843,13 +1836,13 @@ TEST_F(CastVariantTest, CastSourceTargetMatrix)
     }
   }
 
-  // Decimal target: all three encoded widths decode, since the sources share the encoded scale.
   auto const decimal_type = cudf::data_type{cudf::type_id::DECIMAL32, -2};
   for (auto const& src : sources) {
     SCOPED_TRACE(std::string{"decimal target, source "} + src.label);
     auto values = values_of(src.bytes);
     auto got =
       cudf::io::parquet::experimental::cast_variant(values, decimal_type, std::nullopt, stream);
+      // Decimal target: all three encoded widths decode, since the sources share the encoded scale.
     if (src.label.starts_with("decimal")) {
       cudf::test::fixed_point_column_wrapper<int32_t> const expected{
         {1234}, numeric::scale_type{decimal_type.scale()}};
