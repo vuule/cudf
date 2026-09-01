@@ -2026,6 +2026,14 @@ TEST_F(ContiguousSplitTableCornerCases, EmptyOutputColumnChunked)
     {});
 }
 
+TEST_F(ContiguousSplitTableCornerCases, DictionaryUnsupported)
+{
+  cudf::test::dictionary_column_wrapper<int32_t> col{{1, 2, 3, 1, 2}};
+  cudf::table_view t{{col}};
+  EXPECT_THROW(cudf::contiguous_split(t, {2}), cudf::logic_error);
+  EXPECT_THROW(cudf::pack(t), cudf::logic_error);
+}
+
 TEST_F(ContiguousSplitTableCornerCases, MixedColumnTypes)
 {
   cudf::size_type start = 0;

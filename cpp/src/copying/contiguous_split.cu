@@ -493,6 +493,7 @@ struct buf_info_functor {
                                                  int parent_offset_index,
                                                  int offset_depth,
                                                  cuda::stream_ref)
+    requires(not std::is_same_v<T, cudf::dictionary32>)
   {
     if (col.nullable()) {
       std::tie(current, offset_stack_pos) =
