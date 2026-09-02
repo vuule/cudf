@@ -837,7 +837,7 @@ __device__ __int128_t constexpr divide_pow10(__int128_t value, int exp)
   return value / ipow<__int128_t, numeric::Radix::BASE_10>(exp);
 }
 
-__device__ int  constexpr variant_decimal_unscaled_width(primitive_type ptype)
+__device__ int constexpr variant_decimal_unscaled_width(primitive_type ptype)
 {
   switch (ptype) {
     case primitive_type::DECIMAL4: return 4;
