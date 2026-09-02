@@ -115,8 +115,8 @@ namespace io::parquet::experimental {
  * @param variant_column Struct column (VARIANT materialization)
  * @param path JSONPath-like path string (see `get_variant_field` for syntax)
  * @param desired_type Target type: `STRING`, `INT8`/`INT16`/`INT32`/`INT64`,
- *        `FLOAT32`/`FLOAT64`, `BOOL8`, or `DECIMAL32`/`DECIMAL64`/`DECIMAL128` (see `cast_variant`
- *        for decimal rescaling)
+ *        `FLOAT32`/`FLOAT64`, `BOOL8`, or `DECIMAL32`/`DECIMAL64`/`DECIMAL128`
+ *        (see `cast_variant` for decimal rescaling)
  * @param status Optional. When provided, filled with `variant_operation_status` values, one per
  *               row. Must be non-nullable, `UINT8`, and have the same row count as
  *               `variant_column`
