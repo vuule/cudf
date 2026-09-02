@@ -803,12 +803,16 @@ __device__ op_status cast_status_for_primitive(device_span<uint8_t const> val)
 // The spec allows a scale in [0, 38] for every decimal width.
 constexpr int variant_decimal_max_scale = 38;
 
+// The largest power of ten each representation holds; no value fits past it.
+constexpr int max_int128_pow10 = cuda::std::numeric_limits<__int128_t>::digits10;
+constexpr int max_int64_pow10  = cuda::std::numeric_limits<int64_t>::digits10;
+
 // Multiply `value` by 10^exp, or return nullopt if the result does not fit in `__int128_t`.
 __device__ cuda::std::optional<__int128_t> constexpr multiply_pow10(__int128_t value, int64_t exp)
 {
   // Zero is representable at every scale, while any other value overflows past 10^38.
   if (value == 0) { return 0; }
-  if (exp > variant_decimal_max_scale) { return cuda::std::nullopt; }
+  if (exp > max_int128_pow10) { return cuda::std::nullopt; }
 
   constexpr __int128_t max_over_10 = cuda::std::numeric_limits<__int128_t>::max() / 10;
   constexpr __int128_t min_over_10 = cuda::std::numeric_limits<__int128_t>::min() / 10;
@@ -825,13 +829,12 @@ __device__ __int128_t constexpr divide_pow10(__int128_t value, int64_t exp)
   using numeric::detail::ipow;
 
   // Any `__int128_t` is smaller than 10^39, so a larger divisor truncates it away
-  if (exp > variant_decimal_max_scale) { return 0; }
+  if (exp > max_int128_pow10) { return 0; }
   auto const exponent = static_cast<int32_t>(exp);
 
   // 128-bit division is a slow software sequence; use the 64-bit one when both operands fit.
-  constexpr __int128_t i64_max  = cuda::std::numeric_limits<int64_t>::max();
-  constexpr __int128_t i64_min  = cuda::std::numeric_limits<int64_t>::min();
-  constexpr int max_int64_pow10 = 18;
+  constexpr __int128_t i64_max = cuda::std::numeric_limits<int64_t>::max();
+  constexpr __int128_t i64_min = cuda::std::numeric_limits<int64_t>::min();
   if (exponent <= max_int64_pow10 && value <= i64_max && value >= i64_min) {
     return static_cast<int64_t>(value) / ipow<int64_t, numeric::Radix::BASE_10>(exponent);
   }
