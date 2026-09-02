@@ -806,9 +806,13 @@ constexpr int variant_decimal_max_scale = 38;
 // Multiply `value` by 10^exp, or return nullopt if the result does not fit in `__int128_t`.
 __device__ cuda::std::optional<__int128_t> multiply_pow10(__int128_t value, int exp)
 {
+  // Zero is representable at every scale, while any other value overflows past 10^38.
+  if (value == 0) { return 0; }
+  if (exp > variant_decimal_max_scale) { return cuda::std::nullopt; }
+
   constexpr __int128_t max_over_10 = cuda::std::numeric_limits<__int128_t>::max() / 10;
   constexpr __int128_t min_over_10 = cuda::std::numeric_limits<__int128_t>::min() / 10;
-  for (int i = 0; i < exp && value != 0; ++i) {
+  for (int i = 0; i < exp; ++i) {
     if (value > max_over_10 || value < min_over_10) { return cuda::std::nullopt; }
     value *= 10;
   }
