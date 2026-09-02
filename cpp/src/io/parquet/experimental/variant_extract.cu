@@ -816,7 +816,7 @@ __device__ cuda::std::optional<__int128_t> multiply_pow10(__int128_t value, int 
 }
 
 // Divide `value` by 10^exp, truncating toward zero.
-__device__ __int128_t divide_pow10(__int128_t value, int exp)
+__device__ __int128_t constexpr divide_pow10(__int128_t value, int exp)
 {
   using numeric::detail::ipow;
 
