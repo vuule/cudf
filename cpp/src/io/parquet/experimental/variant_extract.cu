@@ -804,7 +804,7 @@ __device__ op_status cast_status_for_primitive(device_span<uint8_t const> val)
 constexpr int variant_decimal_max_scale = 38;
 
 // Multiply `value` by 10^exp, or return nullopt if the result does not fit in `__int128_t`.
-__device__ cuda::std::optional<__int128_t> multiply_pow10(__int128_t value, int exp)
+__device__ cuda::std::optional<__int128_t> constexpr multiply_pow10(__int128_t value, int exp)
 {
   // Zero is representable at every scale, while any other value overflows past 10^38.
   if (value == 0) { return 0; }
@@ -820,7 +820,7 @@ __device__ cuda::std::optional<__int128_t> multiply_pow10(__int128_t value, int 
 }
 
 // Divide `value` by 10^exp, truncating toward zero.
-__device__ __int128_t divide_pow10(__int128_t value, int exp)
+__device__ __int128_t constexpr divide_pow10(__int128_t value, int exp)
 {
   using numeric::detail::ipow;
 
@@ -837,7 +837,7 @@ __device__ __int128_t divide_pow10(__int128_t value, int exp)
   return value / ipow<__int128_t, numeric::Radix::BASE_10>(exp);
 }
 
-__device__ int variant_decimal_unscaled_width(primitive_type ptype)
+__device__ int  constexpr variant_decimal_unscaled_width(primitive_type ptype)
 {
   switch (ptype) {
     case primitive_type::DECIMAL4: return 4;
