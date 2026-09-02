@@ -804,7 +804,7 @@ __device__ op_status cast_status_for_primitive(device_span<uint8_t const> val)
 constexpr int variant_decimal_max_scale = 38;
 
 // Multiply `value` by 10^exp, or return nullopt if the result does not fit in `__int128_t`.
-__device__ cuda::std::optional<__int128_t> multiply_pow10(__int128_t value, int exp)
+__device__ cuda::std::optional<__int128_t> constexpr multiply_pow10(__int128_t value, int exp)
 {
   constexpr __int128_t max_over_10 = cuda::std::numeric_limits<__int128_t>::max() / 10;
   constexpr __int128_t min_over_10 = cuda::std::numeric_limits<__int128_t>::min() / 10;
