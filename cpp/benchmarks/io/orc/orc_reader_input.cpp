@@ -24,7 +24,7 @@ constexpr std::size_t data_size    = 512 << 20;
 constexpr std::size_t Mbytes       = 1024 * 1024;
 
 // Data size for the single-column benchmark below. Smaller than `data_size` because it all has to
-// fit in one column, and a column this size is already past the point where the read saturates.
+// fit in one column, which makes the widest types slow and memory-hungry at the full size.
 constexpr std::size_t single_column_data_size = 64 << 20;
 
 template <bool is_chunked_read>
