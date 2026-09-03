@@ -158,11 +158,6 @@ def test_orc_reader_trailing_nulls(datadir):
     ],
 )
 def test_orc_reader_null_decode_mid_run_positions(datadir, orc_file):
-    # With a row index the reader decodes nulls one row group per block, seeking the PRESENT
-    # stream to the position the index records for that row group. cuDF's own writer restarts
-    # the byte-RLE run at every row group and so always records a zero position; these files
-    # come from other writers, whose positions point into the middle of a run. Reading with the
-    # index disabled decodes the whole stripe in one go, giving a reference for the seek.
     path = datadir / orc_file
 
     indexed = cudf.read_orc(path)

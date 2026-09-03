@@ -126,6 +126,9 @@ void BM_orc_read_data(nvbench::state& state, nvbench::type_list<nvbench::enum_ty
 // structural count such as the number of columns or stripes rather than by the number of rows: with
 // a single column those kernels get a handful of blocks no matter how tall the table is. The wide
 // benchmarks above hide that, because 64 columns supply enough blocks on their own.
+//
+// A nested column is narrow too, since these grids are sized per nesting level and one struct or
+// list column contributes only a few columns to any single level.
 template <data_type DataType>
 void BM_orc_read_narrow(nvbench::state& state, nvbench::type_list<nvbench::enum_type<DataType>>)
 {
@@ -134,9 +137,12 @@ void BM_orc_read_narrow(nvbench::state& state, nvbench::type_list<nvbench::enum_
   cuio_source_sink_pair source_sink(io_type::DEVICE_BUFFER);
 
   auto const num_rows_written = [&]() {
-    auto const tbl  = create_random_table(cycle_dtypes(d_type, 1),
-                                         row_count{narrow_num_rows},
-                                         data_profile_builder().cardinality(cardinality));
+    // Each list level multiplies the child row count, so the default depth of two turns a million
+    // rows into a gigabyte of leaf values and stops being a narrow table by any measure.
+    auto const tbl =
+      create_random_table(cycle_dtypes(d_type, 1),
+                          row_count{narrow_num_rows},
+                          data_profile_builder().cardinality(cardinality).list_depth(1));
     auto const view = tbl->view();
     cudf::io::write_orc(
       cudf::io::orc_writer_options::builder(source_sink.make_sink_info(), view).build());
@@ -218,15 +224,7 @@ NVBENCH_BENCH_TYPES(BM_orc_read_data, NVBENCH_TYPE_AXES(d_type_list))
   .add_int64_axis("stripe_size_bytes", {0})
   .add_int64_axis("stripe_size_rows", {0});
 
-// Only flat types are narrow: a nested column expands into several internal columns, which is the
-// very thing the narrow benchmark is meant to do without.
-using narrow_d_type_list = nvbench::enum_type_list<data_type::INTEGRAL_SIGNED,
-                                                   data_type::FLOAT,
-                                                   data_type::DECIMAL,
-                                                   data_type::TIMESTAMP,
-                                                   data_type::STRING>;
-
-NVBENCH_BENCH_TYPES(BM_orc_read_narrow, NVBENCH_TYPE_AXES(narrow_d_type_list))
+NVBENCH_BENCH_TYPES(BM_orc_read_narrow, NVBENCH_TYPE_AXES(d_type_list))
   .set_name("orc_read_narrow")
   .set_type_axes_names({"data_type"})
   .set_min_samples(4)
