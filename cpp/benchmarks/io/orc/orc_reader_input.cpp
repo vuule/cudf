@@ -14,7 +14,6 @@
 #include <nvbench/nvbench.cuh>
 
 #include <cstddef>
-#include <optional>
 
 namespace {
 
@@ -24,18 +23,14 @@ constexpr cudf::size_type num_cols = 64;
 constexpr std::size_t data_size    = 512 << 20;
 constexpr std::size_t Mbytes       = 1024 * 1024;
 
-// Number of rows in the narrow benchmark below. Rows rather than a byte budget: the kernels this
-// shape is meant to expose are gridded by row groups, so the row count is what has to be held fixed
-// to compare types. A hundred times the default row index stride puts every type well past the
-// point where one block per column and stripe starves, whatever a row of it happens to weigh.
-constexpr cudf::size_type narrow_num_rows = 1'000'000;
+// Data size for the single-column benchmark below. Smaller than `data_size` because it all has to
+// fit in one column, and a column this size is already past the point where the read saturates.
+constexpr std::size_t single_column_data_size = 64 << 20;
 
-// `throughput_bytes` is the uncompressed size the reported byte rate is based on; benchmarks that
-// fix the row count instead of the data size pass nullopt and get a row rate.
 template <bool is_chunked_read>
 void orc_read_common(cudf::size_type num_rows_to_read,
                      cudf::size_type num_cols_to_read,
-                     std::optional<std::size_t> throughput_bytes,
+                     std::size_t throughput_bytes,
                      cuio_source_sink_pair& source_sink,
                      nvbench::state& state)
 {
@@ -80,12 +75,8 @@ void orc_read_common(cudf::size_type num_rows_to_read,
       });
   }
 
-  if (throughput_bytes.has_value()) {
-    auto const time = state.get_summary("nv/cold/time/gpu/mean").get_float64("value");
-    state.add_element_count(static_cast<double>(*throughput_bytes) / time, "bytes_per_second");
-  } else {
-    state.add_element_count(num_rows_to_read, "rows");
-  }
+  auto const time = state.get_summary("nv/cold/time/gpu/mean").get_float64("value");
+  state.add_element_count(static_cast<double>(throughput_bytes) / time, "bytes_per_second");
   state.add_buffer_size(
     mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
   state.add_buffer_size(source_sink.size(), "encoded_file_size", "encoded_file_size");
@@ -123,25 +114,29 @@ void BM_orc_read_data(nvbench::state& state, nvbench::type_list<nvbench::enum_ty
   orc_read_common<false>(num_rows_written, num_cols, data_size, source_sink, state);
 }
 
+// Same as `BM_orc_read_data`, but reads a single column. Reading few columns leaves the decoding
+// kernels with much less to run in parallel, so the two shapes stress different limits.
 template <data_type DataType>
-void BM_orc_read_narrow(nvbench::state& state, nvbench::type_list<nvbench::enum_type<DataType>>)
+void BM_orc_read_single_column(nvbench::state& state,
+                               nvbench::type_list<nvbench::enum_type<DataType>>)
 {
   auto const d_type                 = get_type_or_group(static_cast<int32_t>(DataType));
   cudf::size_type const cardinality = state.get_int64("cardinality");
+  cudf::size_type const run_length  = state.get_int64("run_length");
   cuio_source_sink_pair source_sink(io_type::DEVICE_BUFFER);
 
   auto const num_rows_written = [&]() {
-    auto const tbl =
-      create_random_table(cycle_dtypes(d_type, 1),
-                          row_count{narrow_num_rows},
-                          data_profile_builder().cardinality(cardinality).list_depth(1));
+    auto const tbl = create_random_table(
+      cycle_dtypes(d_type, 1),
+      table_size_bytes{single_column_data_size},
+      data_profile_builder().cardinality(cardinality).avg_run_length(run_length));
     auto const view = tbl->view();
     cudf::io::write_orc(
       cudf::io::orc_writer_options::builder(source_sink.make_sink_info(), view).build());
     return view.num_rows();
   }();
 
-  orc_read_common<false>(num_rows_written, 1, std::nullopt, source_sink, state);
+  orc_read_common<false>(num_rows_written, 1, single_column_data_size, source_sink, state);
 }
 
 template <bool chunked_read>
@@ -216,11 +211,12 @@ NVBENCH_BENCH_TYPES(BM_orc_read_data, NVBENCH_TYPE_AXES(d_type_list))
   .add_int64_axis("stripe_size_bytes", {0})
   .add_int64_axis("stripe_size_rows", {0});
 
-NVBENCH_BENCH_TYPES(BM_orc_read_narrow, NVBENCH_TYPE_AXES(d_type_list))
-  .set_name("orc_read_narrow")
+NVBENCH_BENCH_TYPES(BM_orc_read_single_column, NVBENCH_TYPE_AXES(d_type_list))
+  .set_name("orc_read_single_column")
   .set_type_axes_names({"data_type"})
   .set_min_samples(4)
-  .add_int64_axis("cardinality", {0, 1000});
+  .add_int64_axis("cardinality", {0, 1000})
+  .add_int64_axis("run_length", {1, 32});
 
 NVBENCH_BENCH(BM_orc_read_io_compression)
   .set_name("orc_read_io_compression")
