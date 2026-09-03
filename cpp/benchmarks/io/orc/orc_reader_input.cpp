@@ -122,13 +122,6 @@ void BM_orc_read_data(nvbench::state& state, nvbench::type_list<nvbench::enum_ty
   orc_read_common<false>(num_rows_written, num_cols, data_size, source_sink, state);
 }
 
-// Tall, narrow tables are the shape that exposes decoding kernels whose grid is sized by a
-// structural count such as the number of columns or stripes rather than by the number of rows: with
-// a single column those kernels get a handful of blocks no matter how tall the table is. The wide
-// benchmarks above hide that, because 64 columns supply enough blocks on their own.
-//
-// A nested column is narrow too, since these grids are sized per nesting level and one struct or
-// list column contributes only a few columns to any single level.
 template <data_type DataType>
 void BM_orc_read_narrow(nvbench::state& state, nvbench::type_list<nvbench::enum_type<DataType>>)
 {
@@ -137,8 +130,6 @@ void BM_orc_read_narrow(nvbench::state& state, nvbench::type_list<nvbench::enum_
   cuio_source_sink_pair source_sink(io_type::DEVICE_BUFFER);
 
   auto const num_rows_written = [&]() {
-    // Each list level multiplies the child row count, so the default depth of two turns a million
-    // rows into a gigabyte of leaf values and stops being a narrow table by any measure.
     auto const tbl =
       create_random_table(cycle_dtypes(d_type, 1),
                           row_count{narrow_num_rows},
