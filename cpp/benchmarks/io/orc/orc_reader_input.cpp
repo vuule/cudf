@@ -24,9 +24,10 @@ constexpr cudf::size_type num_cols = 64;
 constexpr std::size_t data_size    = 512 << 20;
 constexpr std::size_t Mbytes       = 1024 * 1024;
 
-// Number of rows in the narrow benchmark below. One million rows is a single stripe at the default
-// stripe size, and comfortably more than the row index stride, so the per-stripe decoding work is
-// spread over several row groups.
+// Number of rows in the narrow benchmark below. Rows rather than a byte budget: the kernels this
+// shape is meant to expose are gridded by row groups, so the row count is what has to be held fixed
+// to compare types. A hundred times the default row index stride puts every type well past the
+// point where one block per column and stripe starves, whatever a row of it happens to weigh.
 constexpr cudf::size_type narrow_num_rows = 1'000'000;
 
 // `throughput_bytes` is the uncompressed size the reported byte rate is based on; benchmarks that
