@@ -231,7 +231,10 @@ static auto __device__ index_order_from_index_types(uint32_t index_types_bitmap)
 {
   constexpr cuda::std::array full_order = {CI_PRESENT, CI_DATA, CI_DATA2};
 
+  // `copy_if` only fills an entry per stream the column actually indexes; the rest keep this
+  // marker so the parser can tell them apart from a real stream id.
   cuda::std::array<uint32_t, full_order.size()> partial_order;
+  partial_order.fill(CI_NUM_STREAMS);
   thrust::copy_if(thrust::seq,
                   full_order.cbegin(),
                   full_order.cend(),
@@ -304,8 +307,8 @@ static uint32_t __device__ protobuf_parse_row_index_entry(rowindex_state_s* s,
         }
         break;
       case STORE_INDEX0:
-        // Start of a new entry; determine the stream index types. Entries beyond the streams this
-        // column actually indexes are skipped rather than read out of `stream_order`.
+        // Start of a new entry; determine the stream index type. Positions past the streams this
+        // column indexes read as CI_NUM_STREAMS and are skipped by the checks below.
         ci_id = (idx_id < stream_order.size()) ? stream_order[idx_id++] : CI_NUM_STREAMS;
         if (s->is_compressed) {
           if (ci_id < num_indexed_streams) s->row_index_entry[0][ci_id] = v;

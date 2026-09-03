@@ -2038,7 +2038,7 @@ TEST_F(OrcWriterTest, EmptyRowGroup)
   CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result.tbl->view());
 }
 
-TEST_F(OrcWriterTest, NullDecodeSpanningRowGroups)
+TEST_F(OrcReaderTest, NullDecodeSpanningRowGroups)
 {
   // The reader only decodes nulls one row group per block when the row index is in use, which needs
   // more rows than the 10000-row index stride. Reading the same file with the index disabled forces

@@ -14,6 +14,7 @@
 #include <cudf/detail/copy.hpp>
 #include <cudf/detail/device_scalar.hpp>
 #include <cudf/detail/null_mask.hpp>
+#include <cudf/detail/structs/utilities.hpp>
 #include <cudf/detail/transform.hpp>
 #include <cudf/detail/utilities/batched_memcpy.hpp>
 #include <cudf/detail/utilities/integer_utils.hpp>
@@ -388,6 +389,9 @@ void decode_stream_data(int64_t num_dicts,
       auto& chunk            = chunks[stripe_idx][col_idx];
       chunk.column_data_base = out_buffers[col_idx].data();
       chunk.valid_map_base   = out_buffers[col_idx].null_mask();
+      // The null decode accumulates into this when it runs one block per row group, so it has to
+      // start at zero rather than carry a value over from a previous pass.
+      chunk.null_count = 0;
     });
   });
 
@@ -401,7 +405,6 @@ void decode_stream_data(int64_t num_dicts,
                                        num_stripes,
                                        skip_rows,
                                        row_groups,
-                                       row_index_stride,
                                        level,
                                        stream);
 
@@ -1017,6 +1020,9 @@ void reader_impl::decompress_and_decode_stripes(read_mode mode)
       return make_column(col_buffer, &_out_metadata.schema_info.back(), std::nullopt, _stream);
     });
   _chunk_read_data.decoded_table = std::make_unique<table>(std::move(out_columns));
+
+  out_columns =
+    cudf::structs::detail::enforce_null_consistency(std::move(out_columns), _stream, _mr);
 
   // Free up temp memory used for decoding.
   for (std::size_t level = 0; level < _selected_columns.num_levels(); ++level) {

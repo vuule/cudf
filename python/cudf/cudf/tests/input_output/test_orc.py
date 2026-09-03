@@ -150,6 +150,29 @@ def test_orc_reader_trailing_nulls(datadir):
 
 
 @pytest.mark.parametrize(
+    "orc_file",
+    [
+        "TestOrcFile.nulls-at-end-snappy.orc",
+        "TestOrcFile.boolean_corruption_PR_6636.orc",
+        "TestOrcFile.boolean_corruption_PR_6702.orc",
+    ],
+)
+def test_orc_reader_null_decode_mid_run_positions(datadir, orc_file):
+    # With a row index the reader decodes nulls one row group per block, seeking the PRESENT
+    # stream to the position the index records for that row group. cuDF's own writer restarts
+    # the byte-RLE run at every row group and so always records a zero position; these files
+    # come from other writers, whose positions point into the middle of a run. Reading with the
+    # index disabled decodes the whole stripe in one go, giving a reference for the seek.
+    path = datadir / orc_file
+
+    indexed = cudf.read_orc(path)
+    unindexed = cudf.read_orc(path, use_index=False)
+
+    assert_eq(pd.read_orc(path), indexed)
+    assert_eq(unindexed, indexed)
+
+
+@pytest.mark.parametrize(
     "inputfile",
     ["TestOrcFile.testDate1900.orc", "TestOrcFile.testDate2038.orc"],
 )

@@ -13,6 +13,9 @@
 
 #include <nvbench/nvbench.cuh>
 
+#include <cstddef>
+#include <optional>
+
 namespace {
 
 // Size of the data in the benchmark dataframe; chosen to be low enough to allow benchmarks to
@@ -26,8 +29,12 @@ constexpr std::size_t Mbytes       = 1024 * 1024;
 // spread over several row groups.
 constexpr cudf::size_type narrow_num_rows = 1'000'000;
 
+// `throughput_bytes` is the uncompressed size the reported byte rate is based on; benchmarks that
+// fix the row count instead of the data size pass nullopt and get a row rate.
 template <bool is_chunked_read>
 void orc_read_common(cudf::size_type num_rows_to_read,
+                     cudf::size_type num_cols_to_read,
+                     std::optional<std::size_t> throughput_bytes,
                      cuio_source_sink_pair& source_sink,
                      nvbench::state& state)
 {
@@ -67,13 +74,17 @@ void orc_read_common(cudf::size_type num_rows_to_read,
         auto const result = cudf::io::read_orc(read_opts);
         timer.stop();
 
-        CUDF_EXPECTS(result.tbl->num_columns() == num_cols, "Unexpected number of columns");
+        CUDF_EXPECTS(result.tbl->num_columns() == num_cols_to_read, "Unexpected number of columns");
         CUDF_EXPECTS(result.tbl->num_rows() == num_rows_to_read, "Unexpected number of rows");
       });
   }
 
-  auto const time = state.get_summary("nv/cold/time/gpu/mean").get_float64("value");
-  state.add_element_count(static_cast<double>(data_size) / time, "bytes_per_second");
+  if (throughput_bytes.has_value()) {
+    auto const time = state.get_summary("nv/cold/time/gpu/mean").get_float64("value");
+    state.add_element_count(static_cast<double>(*throughput_bytes) / time, "bytes_per_second");
+  } else {
+    state.add_element_count(num_rows_to_read, "rows");
+  }
   state.add_buffer_size(
     mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
   state.add_buffer_size(source_sink.size(), "encoded_file_size", "encoded_file_size");
@@ -108,7 +119,7 @@ void BM_orc_read_data(nvbench::state& state, nvbench::type_list<nvbench::enum_ty
     return view.num_rows();
   }();
 
-  orc_read_common<false>(num_rows_written, source_sink, state);
+  orc_read_common<false>(num_rows_written, num_cols, data_size, source_sink, state);
 }
 
 // Tall, narrow tables are the shape that exposes decoding kernels whose grid is sized by a
@@ -132,24 +143,7 @@ void BM_orc_read_narrow(nvbench::state& state, nvbench::type_list<nvbench::enum_
     return view.num_rows();
   }();
 
-  auto const read_opts =
-    cudf::io::orc_reader_options::builder(source_sink.make_source_info()).build();
-
-  auto mem_stats_logger = cudf::memory_stats_logger();
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
-  state.exec(
-    nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch&, auto& timer) {
-      timer.start();
-      auto const result = cudf::io::read_orc(read_opts);
-      timer.stop();
-
-      CUDF_EXPECTS(result.tbl->num_rows() == num_rows_written, "Unexpected number of rows");
-    });
-
-  state.add_element_count(num_rows_written, "rows");
-  state.add_buffer_size(
-    mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
-  state.add_buffer_size(source_sink.size(), "encoded_file_size", "encoded_file_size");
+  orc_read_common<false>(num_rows_written, 1, std::nullopt, source_sink, state);
 }
 
 template <bool chunked_read>
@@ -193,7 +187,7 @@ void orc_read_io_compression(nvbench::state& state)
     return view.num_rows();
   }();
 
-  orc_read_common<chunked_read>(num_rows_written, source_sink, state);
+  orc_read_common<chunked_read>(num_rows_written, num_cols, data_size, source_sink, state);
 }
 
 void BM_orc_read_io_compression(nvbench::state& state)
