@@ -129,8 +129,7 @@ struct row_group {
   uint32_t chunk_id;  // Column chunk this entry belongs to
   // Index offset for the CI_DATA, CI_DATA2 and CI_PRESENT streams
   int64_t strm_offset[num_indexed_streams];
-  // Run position for the same streams. For CI_PRESENT, and for CI_DATA of a BOOLEAN column, this is
-  // a bit position within the run rather than a value count.
+  // Run position for the same streams; a bit position for CI_PRESENT and for BOOLEAN CI_DATA
   uint16_t run_pos[num_indexed_streams];
   uint32_t num_rows;        // number of rows in rowgroup
   int64_t start_row;        // starting row of the rowgroup

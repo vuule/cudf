@@ -29,8 +29,7 @@ constexpr int num_warps  = 32;
 constexpr int block_size = 32 * num_warps;
 // Add some margin to look ahead to future rows in case there are many zeroes
 constexpr int row_decoder_buffer_size = block_size + 128;
-// Longest byte RLE run, measured in the rows it covers in a PRESENT stream: a run holds at most 130
-// bytes and each byte carries the validity of 8 rows, so any position within a run stays below this
+// Longest byte RLE run, measured in the rows it covers in a PRESENT stream
 constexpr uint32_t max_byte_rle_run_bits = 130 * 8;
 inline __device__ uint8_t is_rlev1(uint8_t encoding_mode) { return encoding_mode < DIRECT_V2; }
 
@@ -1268,8 +1267,8 @@ static __device__ int decode_decimals(orc_bytestream_s* bs,
  * @param[in] max_num_rows Maximum number of rows to load
  * @param[in] first_row Crop all rows below first_row
  * @param[in] row_groups Row group descriptors [rowgroup][column], empty if the row index is unused
- * @param[in] nulls_by_rowgroup Whether the null decode grid is sized one block per row group rather
- * than one per (column, stripe)
+ * @param[in] decode_nulls_by_rowgroup Whether the null decode grid is sized one block per row group
+ * rather than one per (column, stripe)
  */
 // blockDim {block_size,1,1}
 template <int block_size>
@@ -1280,7 +1279,7 @@ CUDF_KERNEL void __launch_bounds__(block_size)
                                               size_type num_stripes,
                                               int64_t first_row,
                                               device_2dspan<row_group> row_groups,
-                                              bool nulls_by_rowgroup)
+                                              bool decode_nulls_by_rowgroup)
 {
   __shared__ __align__(16) orcdec_state_s state_g;
   using warp_reduce  = cub::WarpReduce<uint32_t>;
@@ -1294,10 +1293,8 @@ CUDF_KERNEL void __launch_bounds__(block_size)
   int t                    = threadIdx.x;
   auto const num_rowgroups = static_cast<size_type>(row_groups.size().first);
   bool const is_nulldec    = (blockIdx.y == 0);
-  // The null decode is spread over row groups when the host sized the grid for it, which is what
-  // lets it scale with row count instead of stripe count. The dictionary build is per
-  // (column, stripe) and so uses only the leading blocks of the grid.
-  bool const by_rowgroup = is_nulldec && nulls_by_rowgroup;
+  // The null decode is spread over row groups when the host sized the grid for it
+  bool const by_rowgroup = is_nulldec && decode_nulls_by_rowgroup;
 
   uint32_t column, stripe, chunk_id;
   size_type rowgroup_idx = 0;
@@ -2144,17 +2141,17 @@ void __host__ decode_nulls_and_string_dictionaries(column_desc* chunks,
   // is the difference between a handful of blocks and a full device on a narrow table. Nested
   // levels are excluded: they reach their row groups through a parent whose nulls shift the PRESENT
   // stream away from the recorded row index positions.
-  auto const num_rowgroups     = static_cast<int64_t>(row_groups.size().first);
-  bool const nulls_by_rowgroup = level == 0 && num_rowgroups > 0;
+  auto const num_rowgroups            = static_cast<int64_t>(row_groups.size().first);
+  bool const decode_nulls_by_rowgroup = level == 0 && num_rowgroups > 0;
 
   // The by-row-group path seeks the PRESENT stream to a row index position, which only lines up
   // with the output rows when nothing is skipped. The reader disables the index otherwise.
-  CUDF_EXPECTS(!nulls_by_rowgroup || first_row == 0,
+  CUDF_EXPECTS(!decode_nulls_by_rowgroup || first_row == 0,
                "ORC row group null decoding requires decoding from the first row");
 
   // The dictionary half of the grid stays per (column, stripe) and ignores the extra blocks.
   auto const nulldec_blocks =
-    static_cast<int64_t>(num_columns) * (nulls_by_rowgroup ? num_rowgroups : num_stripes);
+    static_cast<int64_t>(num_columns) * (decode_nulls_by_rowgroup ? num_rowgroups : num_stripes);
   CUDF_EXPECTS(nulldec_blocks <= std::numeric_limits<int32_t>::max(),
                "Too many row groups to decode in a single pass");
   dim3 dim_grid(static_cast<uint32_t>(nulldec_blocks), 2);
@@ -2166,7 +2163,7 @@ void __host__ decode_nulls_and_string_dictionaries(column_desc* chunks,
                                                 num_stripes,
                                                 first_row,
                                                 row_groups,
-                                                nulls_by_rowgroup);
+                                                decode_nulls_by_rowgroup);
   CUDF_CUDA_TRY(cudaGetLastError());
 }
 
