@@ -196,6 +196,14 @@ CUDF_KERNEL void __launch_bounds__(128, 8)
   }
 }
 
+// Positions a row index entry records for each stream, in the order they are parsed
+enum row_index_pos_e {
+  RI_BLOCK = 0,  // Offset of the compression block holding the row group, zero if uncompressed
+  RI_OFFSET,     // Offset of the row group within the decompressed stream
+  RI_RUN,        // Position within the run found at that offset
+  RI_NUM_POS
+};
+
 /**
  * @brief Shared mem state for parse_row_group_index_kernel
  */
@@ -204,7 +212,7 @@ struct rowindex_state_s {
   uint32_t rowgroup_start{};
   uint32_t rowgroup_end{};
   int is_compressed{};
-  uint32_t row_index_entry[3][num_indexed_streams]{};
+  uint32_t row_index_entry[RI_NUM_POS][num_indexed_streams]{};
   compressed_stream_info strm_info[num_indexed_streams]{};
   row_group rowgroups[128]{};
   uint32_t compressed_offset[128][num_indexed_streams]{};
@@ -311,16 +319,16 @@ static uint32_t __device__ protobuf_parse_row_index_entry(rowindex_state_s* s,
         // column indexes read as CI_NUM_STREAMS and are skipped by the checks below.
         ci_id = (idx_id < stream_order.size()) ? stream_order[idx_id++] : CI_NUM_STREAMS;
         if (s->is_compressed) {
-          if (ci_id < num_indexed_streams) s->row_index_entry[0][ci_id] = v;
+          if (ci_id < num_indexed_streams) s->row_index_entry[RI_BLOCK][ci_id] = v;
           if (cur >= start + pos_end) return length;
           state = STORE_INDEX1;
           break;
         } else {
-          if (ci_id < num_indexed_streams) s->row_index_entry[0][ci_id] = 0;
+          if (ci_id < num_indexed_streams) s->row_index_entry[RI_BLOCK][ci_id] = 0;
           // Fall through to STORE_INDEX1 for uncompressed (always block0)
         }
       case STORE_INDEX1:
-        if (ci_id < num_indexed_streams) s->row_index_entry[1][ci_id] = v;
+        if (ci_id < num_indexed_streams) s->row_index_entry[RI_OFFSET][ci_id] = v;
         if (cur >= start + pos_end) return length;
         state = (ci_id == CI_DATA && s->chunk.encoding_kind != DICTIONARY &&
                  s->chunk.encoding_kind != DICTIONARY_V2 &&
@@ -335,8 +343,8 @@ static uint32_t __device__ protobuf_parse_row_index_entry(rowindex_state_s* s,
         if (ci_id < num_indexed_streams) {
           // Bit-packed streams have an extra byte to indicate the position of the bit within the
           // byte; the PRESENT stream is always bit-packed, and so is the data of a BOOLEAN column
-          auto const is_bit_packed     = (ci_id == CI_PRESENT) || (s->chunk.type_kind == BOOLEAN);
-          s->row_index_entry[2][ci_id] = is_bit_packed ? (v << 3) + *cur : v;
+          auto const is_bit_packed = (ci_id == CI_PRESENT) || (s->chunk.type_kind == BOOLEAN);
+          s->row_index_entry[RI_RUN][ci_id] = is_bit_packed ? (v << 3) + *cur : v;
         }
         if (ci_id == CI_PRESENT || s->chunk.type_kind == BOOLEAN) cur++;
         if (cur >= start + pos_end) return length;
@@ -359,18 +367,18 @@ static __device__ void read_row_group_index_entries(rowindex_state_s* s, int num
   int index_data_len        = s->chunk.strm_len[CI_INDEX];
   for (int i = 0; i < num_rowgroups; i++) {
     for (int j = 0; j < num_indexed_streams; j++) {
-      s->row_index_entry[0][j] = 0;
-      s->row_index_entry[1][j] = 0;
-      s->row_index_entry[2][j] = 0;
+      s->row_index_entry[RI_BLOCK][j]  = 0;
+      s->row_index_entry[RI_OFFSET][j] = 0;
+      s->row_index_entry[RI_RUN][j]    = 0;
     }
     if (index_data_len > 0) {
       int len = protobuf_parse_row_index_entry(s, index_data, index_data + index_data_len);
       index_data += len;
       index_data_len = max(index_data_len - len, 0);
       for (int j = 0; j < num_indexed_streams; j++) {
-        s->rowgroups[i].strm_offset[j] = s->row_index_entry[1][j];
-        s->rowgroups[i].run_pos[j]     = s->row_index_entry[2][j];
-        s->compressed_offset[i][j]     = s->row_index_entry[0][j];
+        s->rowgroups[i].strm_offset[j] = s->row_index_entry[RI_OFFSET][j];
+        s->rowgroups[i].run_pos[j]     = s->row_index_entry[RI_RUN][j];
+        s->compressed_offset[i][j]     = s->row_index_entry[RI_BLOCK][j];
       }
     }
   }
