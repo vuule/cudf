@@ -84,7 +84,7 @@ template <data_type DataType>
 void BM_orc_read_data(nvbench::state& state, nvbench::type_list<nvbench::enum_type<DataType>>)
 {
   constexpr std::size_t single_column_data_size = 64 << 20;
-  
+
   auto const d_type                 = get_type_or_group(static_cast<int32_t>(DataType));
   cudf::size_type const cardinality = state.get_int64("cardinality");
   cudf::size_type const run_length  = state.get_int64("run_length");
@@ -183,8 +183,6 @@ NVBENCH_BENCH_TYPES(BM_orc_read_data, NVBENCH_TYPE_AXES(d_type_list))
   .set_min_samples(4)
   .add_int64_axis("cardinality", {0, 1000})
   .add_int64_axis("run_length", {1, 32})
-  // Reading few columns gives the decoding kernels much less to run in parallel, so the two
-  // column counts stress different limits.
   .add_int64_axis("num_cols", {1, num_cols})
   .add_int64_axis("stripe_size_bytes", {0})
   .add_int64_axis("stripe_size_rows", {0});
