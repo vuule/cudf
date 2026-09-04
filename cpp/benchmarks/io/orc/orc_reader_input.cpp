@@ -23,8 +23,8 @@ constexpr cudf::size_type num_cols = 64;
 constexpr std::size_t data_size    = 512 << 20;
 constexpr std::size_t Mbytes       = 1024 * 1024;
 
-// Data size for the single-column benchmark below. Smaller than `data_size` because it all has to
-// fit in one column, which makes the widest types slow and memory-hungry at the full size.
+// Data size when the benchmark below reads a single column. All of `data_size` in one column would
+// be slow and memory-hungry for the wider types, and is far more than the read needs to saturate.
 constexpr std::size_t single_column_data_size = 64 << 20;
 
 template <bool is_chunked_read>
@@ -90,6 +90,8 @@ void BM_orc_read_data(nvbench::state& state, nvbench::type_list<nvbench::enum_ty
   auto const d_type                 = get_type_or_group(static_cast<int32_t>(DataType));
   cudf::size_type const cardinality = state.get_int64("cardinality");
   cudf::size_type const run_length  = state.get_int64("run_length");
+  auto const num_cols_to_read       = static_cast<cudf::size_type>(state.get_int64("num_cols"));
+  auto const bytes                  = num_cols_to_read == 1 ? single_column_data_size : data_size;
   auto const source_type            = retrieve_io_type_enum(state.get_string("io_type"));
   auto const stripe_size_bytes      = state.get_int64("stripe_size_bytes");
   auto const stripe_size_rows       = state.get_int64("stripe_size_rows");
@@ -97,8 +99,8 @@ void BM_orc_read_data(nvbench::state& state, nvbench::type_list<nvbench::enum_ty
 
   auto const num_rows_written = [&]() {
     auto const tbl = create_random_table(
-      cycle_dtypes(d_type, num_cols),
-      table_size_bytes{data_size},
+      cycle_dtypes(d_type, num_cols_to_read),
+      table_size_bytes{bytes},
       data_profile_builder().cardinality(cardinality).avg_run_length(run_length));
     auto const view = tbl->view();
 
@@ -111,32 +113,7 @@ void BM_orc_read_data(nvbench::state& state, nvbench::type_list<nvbench::enum_ty
     return view.num_rows();
   }();
 
-  orc_read_common<false>(num_rows_written, num_cols, data_size, source_sink, state);
-}
-
-// Same as `BM_orc_read_data`, but reads a single column. Reading few columns leaves the decoding
-// kernels with much less to run in parallel, so the two shapes stress different limits.
-template <data_type DataType>
-void BM_orc_read_single_column(nvbench::state& state,
-                               nvbench::type_list<nvbench::enum_type<DataType>>)
-{
-  auto const d_type                 = get_type_or_group(static_cast<int32_t>(DataType));
-  cudf::size_type const cardinality = state.get_int64("cardinality");
-  cudf::size_type const run_length  = state.get_int64("run_length");
-  cuio_source_sink_pair source_sink(io_type::DEVICE_BUFFER);
-
-  auto const num_rows_written = [&]() {
-    auto const tbl = create_random_table(
-      cycle_dtypes(d_type, 1),
-      table_size_bytes{single_column_data_size},
-      data_profile_builder().cardinality(cardinality).avg_run_length(run_length));
-    auto const view = tbl->view();
-    cudf::io::write_orc(
-      cudf::io::orc_writer_options::builder(source_sink.make_sink_info(), view).build());
-    return view.num_rows();
-  }();
-
-  orc_read_common<false>(num_rows_written, 1, single_column_data_size, source_sink, state);
+  orc_read_common<false>(num_rows_written, num_cols_to_read, bytes, source_sink, state);
 }
 
 template <bool chunked_read>
@@ -208,15 +185,11 @@ NVBENCH_BENCH_TYPES(BM_orc_read_data, NVBENCH_TYPE_AXES(d_type_list))
   .set_min_samples(4)
   .add_int64_axis("cardinality", {0, 1000})
   .add_int64_axis("run_length", {1, 32})
+  // Reading few columns gives the decoding kernels much less to run in parallel, so the two
+  // column counts stress different limits.
+  .add_int64_axis("num_cols", {1, num_cols})
   .add_int64_axis("stripe_size_bytes", {0})
   .add_int64_axis("stripe_size_rows", {0});
-
-NVBENCH_BENCH_TYPES(BM_orc_read_single_column, NVBENCH_TYPE_AXES(d_type_list))
-  .set_name("orc_read_single_column")
-  .set_type_axes_names({"data_type"})
-  .set_min_samples(4)
-  .add_int64_axis("cardinality", {0, 1000})
-  .add_int64_axis("run_length", {1, 32});
 
 NVBENCH_BENCH(BM_orc_read_io_compression)
   .set_name("orc_read_io_compression")
