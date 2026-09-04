@@ -389,7 +389,7 @@ void decode_stream_data(int64_t num_dicts,
       auto& chunk            = chunks[stripe_idx][col_idx];
       chunk.column_data_base = out_buffers[col_idx].data();
       chunk.valid_map_base   = out_buffers[col_idx].null_mask();
-      chunk.null_count = 0;
+      chunk.null_count       = 0;
     });
   });
 
