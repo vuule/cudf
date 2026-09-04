@@ -23,10 +23,6 @@ constexpr cudf::size_type num_cols = 64;
 constexpr std::size_t data_size    = 512 << 20;
 constexpr std::size_t Mbytes       = 1024 * 1024;
 
-// Data size when the benchmark below reads a single column. All of `data_size` in one column would
-// be slow and memory-hungry for the wider types, and is far more than the read needs to saturate.
-constexpr std::size_t single_column_data_size = 64 << 20;
-
 template <bool is_chunked_read>
 void orc_read_common(cudf::size_type num_rows_to_read,
                      cudf::size_type num_cols_to_read,
@@ -87,6 +83,8 @@ void orc_read_common(cudf::size_type num_rows_to_read,
 template <data_type DataType>
 void BM_orc_read_data(nvbench::state& state, nvbench::type_list<nvbench::enum_type<DataType>>)
 {
+  constexpr std::size_t single_column_data_size = 64 << 20;
+  
   auto const d_type                 = get_type_or_group(static_cast<int32_t>(DataType));
   cudf::size_type const cardinality = state.get_int64("cardinality");
   cudf::size_type const run_length  = state.get_int64("run_length");
