@@ -144,6 +144,20 @@ remove_from_toctrees = ["cudf/api_docs/api/*"]
 
 # Preprocess doxygen xml for compatibility with latest Breathe
 def clean_definitions(root):
+    # Doxygen 1.18 associates a namespace with each group declared inside it.
+    # Breathe renders inner namespaces recursively, duplicating the namespace
+    # contents in every group.
+    for compound in root.findall("./compounddef[@kind='group']"):
+        for namespace in compound.findall("./innernamespace"):
+            compound.remove(namespace)
+
+    # Breathe checks whether an initializer starts with "=" before deciding
+    # whether to add one. Doxygen 1.18 may align that token with leading
+    # whitespace, which makes Breathe emit a duplicate "=".
+    for initializer in root.findall(".//initializer"):
+        if initializer.text and initializer.text.lstrip().startswith("="):
+            initializer.text = initializer.text.lstrip()
+
     # Breathe can't handle SFINAE properly:
     # https://github.com/breathe-doc/breathe/issues/624
     seen_ids = set()
