@@ -813,6 +813,17 @@ TEST_F(OrcChunkedWriterTest, WriterTimezone)
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(table_view({expected}), read_orc_buffer(buffer).tbl->view());
 }
 
+TEST_F(OrcChunkedWriterTest, WriterTimezoneInvalid)
+{
+  std::vector<char> buffer;
+  cudf::io::chunked_orc_writer_options opts =
+    cudf::io::chunked_orc_writer_options::builder(cudf::io::sink_info(&buffer))
+      .writer_timezone("Not/AZone");
+
+  // The chunked writer resolves the timezone when it is constructed, before any write
+  EXPECT_THROW(cudf::io::orc_chunked_writer{opts}, cudf::logic_error);
+}
+
 template <typename T>
 void test_timestamp_roundtrip(std::vector<typename T::rep> const& values,
                               std::vector<typename T::rep> const& expected_values)
