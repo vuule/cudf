@@ -53,7 +53,13 @@ public class ORCWriterOptions extends CompressionMetadataWriterOptions {
      * footers. cuDF timestamps are UTC instants, so the default of "UTC" writes them unshifted.
      * Set this to the timezone that gave the values their meaning to interoperate with writers
      * that record a local timezone, such as Hive and Spark.
+     *
+     * <p>A non-UTC file is meant for a reader whose timezone matches; it does not round-trip
+     * through {@link Table#readORC}, which has no session timezone and returns the writer's wall
+     * clock.
+     *
      * @param writerTimezone timezone name, for example "America/Los_Angeles"
+     * @throws IllegalArgumentException if {@code writerTimezone} is null or empty
      */
     public Builder withWriterTimezone(String writerTimezone) {
       if (writerTimezone == null || writerTimezone.isEmpty()) {

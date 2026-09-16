@@ -412,7 +412,8 @@ CUDF_KERNEL void __launch_bounds__(encode_threads_per_block)
             auto const [max_ms, max_ns_remainder] =
               split_nanosecond_timestamp(s->chunk.max_value.i_val);
 
-            // minimum/maximum are the same as minimumUtc/maximumUtc as we always write files in UTC
+            // Statistics stay on the input instants regardless of the writer timezone; only the
+            // data stream is re-based. Matches Apache, which writes the same value in both pairs.
             cur = pb_put_int(cur, 1, min_ms);  // minimum
             cur = pb_put_int(cur, 2, max_ms);  // maximum
             cur = pb_put_int(cur, 3, min_ms);  // minimumUtc
