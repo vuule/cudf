@@ -206,10 +206,10 @@ struct encoded_footer_statistics {
  */
 struct writer_timezone {
   // Recorded in the stripe footers as `writerTimezone`
-  std::string name;
+  std::string const name;
   // Instant that encoded timestamps are stored relative to: the ORC epoch as wall-clock time in
   // `name`. Equal to `orc_utc_epoch` when writing UTC.
-  duration_s base_epoch;
+  duration_s const base_epoch;
 
   /**
    * @brief Resolves a timezone name into the epoch that timestamps are encoded relative to.
@@ -224,7 +224,8 @@ struct writer_timezone {
    */
   explicit writer_timezone(std::string timezone);
 
-  [[nodiscard]] bool is_utc() const { return name == "UTC" or name.empty(); }
+ private:
+  [[nodiscard]] static duration_s compute_base_epoch(std::string_view timezone);
 };
 
 enum class writer_state {

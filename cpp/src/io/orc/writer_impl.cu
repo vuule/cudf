@@ -2651,12 +2651,16 @@ auto convert_table_to_orc_data(table_view const& input,
 
 // ORC timestamps are wall-clock values, stored relative to the ORC epoch as it occurs in the
 // writer's timezone.
-writer_timezone::writer_timezone(std::string timezone)
-  : name{std::move(timezone)}, base_epoch{orc_utc_epoch}
+// "UTC" and an empty name have no transitions, so the offset is zero and the epoch is unshifted.
+duration_s writer_timezone::compute_base_epoch(std::string_view timezone)
 {
-  if (not is_utc()) {
-    base_epoch -= cudf::detail::get_ut_offset(std::nullopt, name, timestamp_s{base_epoch});
-  }
+  static constexpr duration_s utc_epoch{orc_utc_epoch};
+  return utc_epoch - cudf::detail::get_ut_offset(std::nullopt, timezone, timestamp_s{utc_epoch});
+}
+
+writer_timezone::writer_timezone(std::string timezone)
+  : name{std::move(timezone)}, base_epoch{compute_base_epoch(name)}
+{
 }
 
 writer::impl::impl(std::unique_ptr<data_sink> sink,

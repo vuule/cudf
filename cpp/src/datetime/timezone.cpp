@@ -471,6 +471,8 @@ struct host_transition_table {
   [[nodiscard]] duration_s ut_offset(timestamp_s ts) const
   {
     if (empty()) { return duration_s{0}; }
+    CUDF_EXPECTS(times.size() > solar_cycle_entry_count,
+                 "Timezone transition table is missing its file entries");
 
     auto const last_less_equal = [](auto begin, auto end, auto value) {
       auto const first_larger = std::upper_bound(begin, end, value);
