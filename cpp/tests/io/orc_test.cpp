@@ -791,6 +791,8 @@ TEST_F(OrcWriterTest, WriterTimezoneInvalid)
   table_view input({timestamps});
 
   EXPECT_THROW(write_orc_with_timezone(input, "Not/AZone"), cudf::logic_error);
+  // Empty would omit writerTimezone, which other readers resolve as their own local timezone
+  EXPECT_THROW(write_orc_with_timezone(input, ""), cudf::logic_error);
 }
 
 TEST_F(OrcChunkedWriterTest, WriterTimezone)

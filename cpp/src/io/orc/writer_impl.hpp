@@ -218,9 +218,9 @@ struct writer_timezone {
    * epoch in `decode_column_data`; the Apache writer resolves it as a local time, which differs
    * only for a timezone with a transition inside that offset-wide window.
    *
-   * @param timezone Timezone name, or an empty string for UTC
+   * @param timezone Timezone name
    *
-   * @throw cudf::logic_error if `timezone` does not resolve to a TZif file
+   * @throw cudf::logic_error if `timezone` is empty or does not resolve to a TZif file
    */
   explicit writer_timezone(std::string timezone);
 
