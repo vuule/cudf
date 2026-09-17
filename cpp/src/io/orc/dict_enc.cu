@@ -13,6 +13,7 @@
 #include <cudf/hashing/detail/murmurhash3_x86_32.cuh>
 #include <cudf/io/orc_types.hpp>
 
+#include <cuda/atomic>
 #include <cuda/stream>
 
 #include <algorithm>
@@ -184,8 +185,10 @@ CUDF_KERNEL void __launch_bounds__(block_size)
       dict.char_count  = block_char_count;
     } else {
       // Shared with other blocks, so accumulate
-      atomicAdd(&dict.entry_count, block_entry_count);
-      atomicAdd(&dict.char_count, block_char_count);
+      cuda::atomic_ref<size_type, Scope> const entry_count_ref{dict.entry_count};
+      cuda::atomic_ref<size_type, Scope> const char_count_ref{dict.char_count};
+      entry_count_ref.fetch_add(block_entry_count, cuda::std::memory_order_relaxed);
+      char_count_ref.fetch_add(block_char_count, cuda::std::memory_order_relaxed);
     }
   }
 }
