@@ -2654,10 +2654,11 @@ auto convert_table_to_orc_data(table_view const& input,
 // "UTC" has no transitions, so the offset is zero and the epoch is unshifted.
 duration_s writer_timezone::compute_base_epoch(std::string_view timezone)
 {
-  static constexpr duration_s utc_epoch{orc_utc_epoch};
   // An empty name would omit `writerTimezone` from the stripe footers, which Apache readers
   // resolve as their own local timezone rather than UTC
   CUDF_EXPECTS(not timezone.empty(), "Writer timezone cannot be empty");
+
+  static constexpr duration_s utc_epoch{orc_utc_epoch};
   return utc_epoch - cudf::detail::get_ut_offset(std::nullopt, timezone, timestamp_s{utc_epoch});
 }
 
