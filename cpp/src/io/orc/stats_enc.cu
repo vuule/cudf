@@ -413,7 +413,9 @@ CUDF_KERNEL void __launch_bounds__(encode_threads_per_block)
               split_nanosecond_timestamp(s->chunk.max_value.i_val);
 
             // Statistics stay on the input instants regardless of the writer timezone; only the
-            // data stream is re-based. Matches Apache, which writes the same value in both pairs.
+            // data stream is re-based. Apache writes only the UTC pair, and its reader prefers
+            // that pair when both are present, so the legacy pair is for pre-ORC-135 readers,
+            // which resolve it against their own timezone.
             cur = pb_put_int(cur, 1, min_ms);  // minimum
             cur = pb_put_int(cur, 2, max_ms);  // maximum
             cur = pb_put_int(cur, 3, min_ms);  // minimumUtc
