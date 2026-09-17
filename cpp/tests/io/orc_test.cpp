@@ -674,6 +674,19 @@ std::vector<char> write_orc_with_timezone(cudf::table_view const& table,
   return buffer;
 }
 
+// File-level timestamp statistics of a column, identified by its position in the ORC schema.
+// Entry zero is the root struct that wraps the table, so the first column of the table is entry
+// one.
+cudf::io::timestamp_statistics timestamp_stats(std::vector<char> const& buffer,
+                                               size_t schema_index = 1)
+{
+  auto const stats =
+    cudf::io::read_parsed_orc_statistics(cudf::io::source_info{cudf::host_span<std::byte const>{
+      reinterpret_cast<std::byte const*>(buffer.data()), buffer.size()}});
+  return std::get<cudf::io::timestamp_statistics>(
+    stats.file_stats[schema_index].type_specific_stats);
+}
+
 cudf::io::table_with_metadata read_orc_buffer(std::vector<char> const& buffer,
                                               bool ignore_timezone      = false,
                                               cudf::data_type timestamp = cudf::data_type{
@@ -761,32 +774,69 @@ TEST_F(OrcWriterTest, WriterTimezoneStatistics)
   auto const timestamps = column_wrapper<cudf::timestamp_s, cudf::timestamp_s::rep>{0, 1421323200};
   table_view input({timestamps});
 
-  auto const timestamp_stats = [&](std::optional<std::string> const& timezone) {
-    auto const filepath = temp_env->get_temp_filepath("OrcWriterTimezoneStats.orc");
-    auto builder = cudf::io::orc_writer_options::builder(cudf::io::sink_info{filepath}, input);
-    if (timezone.has_value()) { builder.writer_timezone(*timezone); }
-    cudf::io::write_orc(builder.build());
-
-    auto const stats = cudf::io::read_parsed_orc_statistics(cudf::io::source_info{filepath});
-    // Entry zero is the root struct that wraps the table, so the timestamp column is entry one
-    return std::get<cudf::io::timestamp_statistics>(stats.file_stats[1].type_specific_stats);
-  };
-
-  // Statistics are the input instants regardless of the timezone; only the data stream is re-based
-  for (auto const& timezone :
-       {std::optional<std::string>{std::nullopt}, std::optional<std::string>{"Asia/Shanghai"}}) {
+  // Statistics hold the values a reader materializes, so they are shifted with the data
+  for (auto const& [timezone, shift] : std::vector<std::pair<std::optional<std::string>, int64_t>>{
+         {std::nullopt, 0}, {"UTC", 0}, {"Asia/Shanghai", shanghai_offset}}) {
     SCOPED_TRACE(timezone.value_or("default"));
 
-    auto const stats = timestamp_stats(timezone);
+    auto const stats = timestamp_stats(write_orc_with_timezone(input, timezone));
     ASSERT_TRUE(stats.minimum.has_value());
     ASSERT_TRUE(stats.maximum.has_value());
     ASSERT_TRUE(stats.minimum_utc.has_value());
     ASSERT_TRUE(stats.maximum_utc.has_value());
-    EXPECT_EQ(*stats.minimum, 0);
-    EXPECT_EQ(*stats.maximum, 1421323200000);
-    EXPECT_EQ(*stats.minimum_utc, 0);
-    EXPECT_EQ(*stats.maximum_utc, 1421323200000);
+    EXPECT_EQ(*stats.minimum, shift * 1000);
+    EXPECT_EQ(*stats.maximum, (1421323200 + shift) * 1000);
+    // Both pairs are written in the same frame, as Apache does
+    EXPECT_EQ(*stats.minimum_utc, *stats.minimum);
+    EXPECT_EQ(*stats.maximum_utc, *stats.maximum);
   }
+}
+
+TEST_F(OrcWriterTest, WriterTimezoneStatisticsSliced)
+{
+  auto const timestamps =
+    column_wrapper<cudf::timestamp_s, cudf::timestamp_s::rep>{0, 1421323200, -3000, 50};
+  auto const sliced = cudf::slice(timestamps, {1, 3}).front();
+
+  auto const stats =
+    timestamp_stats(write_orc_with_timezone(table_view({sliced}), "Asia/Shanghai"));
+
+  EXPECT_EQ(*stats.minimum, (-3000 + shanghai_offset) * 1000);
+  EXPECT_EQ(*stats.maximum, (1421323200 + shanghai_offset) * 1000);
+}
+
+TEST_F(OrcWriterTest, WriterTimezoneStatisticsNested)
+{
+  auto timestamps = column_wrapper<cudf::timestamp_s, cudf::timestamp_s::rep>{0, 1421323200, -3000};
+  auto offsets    = cudf::test::fixed_width_column_wrapper<cudf::size_type>{0, 2, 3};
+  auto const lists =
+    cudf::make_lists_column(2, offsets.release(), timestamps.release(), 0, rmm::device_buffer{});
+
+  auto const buffer = write_orc_with_timezone(table_view({lists->view()}), "Asia/Shanghai");
+
+  // Entry one is the list column, so its timestamp child is entry two
+  auto const stats = timestamp_stats(buffer, 2);
+  EXPECT_EQ(*stats.minimum, (-3000 + shanghai_offset) * 1000);
+  EXPECT_EQ(*stats.maximum, (1421323200 + shanghai_offset) * 1000);
+}
+
+TEST_F(OrcWriterTest, WriterTimezoneStatisticsAcrossDstOverlap)
+{
+  // The last instant before New York falls back to standard time, and the first one after. The
+  // offset shrinks by an hour across the transition, so shifting reverses their order and the
+  // extrema have to be picked from the shifted values, not shifted after being reduced.
+  auto const last_edt  = cudf::timestamp_s::rep{1446357599};  // 2015-11-01T05:59:59Z
+  auto const first_est = cudf::timestamp_s::rep{1446357600};  // 2015-11-01T06:00:00Z
+  auto const timestamps =
+    column_wrapper<cudf::timestamp_s, cudf::timestamp_s::rep>{last_edt, first_est};
+
+  auto const stats =
+    timestamp_stats(write_orc_with_timezone(table_view({timestamps}), "America/New_York"));
+
+  ASSERT_TRUE(stats.minimum.has_value());
+  ASSERT_TRUE(stats.maximum.has_value());
+  EXPECT_EQ(*stats.minimum, (first_est + new_york_offset) * 1000);
+  EXPECT_EQ(*stats.maximum, (last_edt + new_york_dst_offset) * 1000);
 }
 
 TEST_F(OrcWriterTest, WriterTimezoneInvalid)

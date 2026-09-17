@@ -913,6 +913,9 @@ class orc_writer_options {
    * A non-UTC file is meant for a reader whose timezone matches; it does not round-trip through
    * the libcudf reader, which has no session timezone and returns the writer's wall clock.
    *
+   * Timestamp statistics describe those wall-clock values rather than the input instants, so that
+   * predicate pushdown in other readers agrees with the data.
+   *
    * An empty name, or one that does not resolve to a timezone file, is rejected by the writer,
    * not by this setter.
    *
