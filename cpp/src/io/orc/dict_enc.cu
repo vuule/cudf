@@ -8,6 +8,7 @@
 #include <cudf/detail/offsets_iterator.cuh>
 #include <cudf/detail/row_operator/equality.cuh>
 #include <cudf/detail/utilities/cuda.hpp>
+#include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/hashing/detail/murmurhash3_x86_32.cuh>
 #include <cudf/io/orc_types.hpp>
@@ -146,8 +147,8 @@ CUDF_KERNEL void __launch_bounds__(block_size)
 
   auto const end_row = dict.start_row + dict.num_rows;
   auto const first_row =
-    dict.start_row + static_cast<thread_index_type>(blockIdx.y) * block_size + t;
-  auto const row_stride = static_cast<thread_index_type>(block_size) * gridDim.y;
+    dict.start_row + cudf::detail::grid_1d::global_thread_id(t, blockIdx.y, block_size);
+  auto const row_stride = cudf::detail::grid_1d::grid_stride(block_size, gridDim.y);
 
   size_type entry_count{0};
   size_type char_count{0};
@@ -249,8 +250,8 @@ CUDF_KERNEL void __launch_bounds__(block_size)
 
   auto const end_row = dict.start_row + dict.num_rows;
   auto const first_row =
-    dict.start_row + static_cast<thread_index_type>(blockIdx.y) * block_size + threadIdx.x;
-  auto const row_stride = static_cast<thread_index_type>(block_size) * gridDim.y;
+    dict.start_row + cudf::detail::grid_1d::global_thread_id(threadIdx.x, blockIdx.y, block_size);
+  auto const row_stride = cudf::detail::grid_1d::grid_stride(block_size, gridDim.y);
 
   for (thread_index_type cur_row = first_row; cur_row < end_row; cur_row += row_stride) {
     if (col.is_valid(cur_row)) {
