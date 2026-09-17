@@ -786,7 +786,7 @@ TEST_F(OrcWriterTest, WriterTimezoneStatistics)
     ASSERT_TRUE(stats.maximum_utc.has_value());
     EXPECT_EQ(*stats.minimum, shift * 1000);
     EXPECT_EQ(*stats.maximum, (1421323200 + shift) * 1000);
-    // Both pairs are written in the same frame, as Apache does
+    // Unlike Apache, which omits the legacy pair, both are written in the same frame
     EXPECT_EQ(*stats.minimum_utc, *stats.minimum);
     EXPECT_EQ(*stats.maximum_utc, *stats.maximum);
   }
