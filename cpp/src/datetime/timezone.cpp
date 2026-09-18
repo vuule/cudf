@@ -416,7 +416,7 @@ static int days_in_month(int month, bool is_leap_year)
  *
  * @return transition time in seconds from the beginning of the year
  */
-static int64_t get_transition_time(dst_transition_s const& trans, int year)
+static duration_s get_transition_time(dst_transition_s const& trans, int year)
 {
   auto day = trans.day;
 
@@ -450,7 +450,7 @@ static int64_t get_transition_time(dst_transition_s const& trans, int year)
     day += (day > 31 + 29 && is_leap);
   }
 
-  return trans.time + cuda::std::chrono::duration_cast<duration_s>(duration_D{day}).count();
+  return duration_s{trans.time} + cuda::std::chrono::duration_cast<duration_s>(duration_D{day});
 }
 
 /**
@@ -520,21 +520,21 @@ struct host_transition_table {
   }
 
   // Generate entries for times after the last transition
-  auto future_std_offset = offsets[tzf.timecnt()].count();
+  auto future_std_offset = offsets[tzf.timecnt()];
   auto future_dst_offset = future_std_offset;
   dst_transition_s dst_start{};
   dst_transition_s dst_end{};
   if (!tzf.posix_tz_string.empty()) {
     posix_parser<decltype(tzf.posix_tz_string)> parser(tzf.posix_tz_string);
     parser.skip_name();
-    future_std_offset = -parser.parse_offset();
+    future_std_offset = duration_s{-parser.parse_offset()};
     if (parser.remaining_char_cnt() > 1) {
       // Parse Daylight Saving Time information
       parser.skip_name();
       if (parser.remaining_char_cnt() > 0 && parser.next_character() != ',') {
-        future_dst_offset = -parser.parse_offset();
+        future_dst_offset = duration_s{-parser.parse_offset()};
       } else {
-        future_dst_offset = future_std_offset + 60 * 60;
+        future_dst_offset = future_std_offset + duration_h{1};
       }
       dst_start = parser.parse_transition();
       dst_end   = parser.parse_transition();
@@ -544,15 +544,18 @@ struct host_transition_table {
   }
 
   // Add entries to fill the transition cycle
-  int64_t year_timestamp = 0;
   for (int32_t year = 1970; year < 1970 + solar_cycle_years; ++year) {
-    auto const dst_start_time = get_transition_time(dst_start, year);
-    auto const dst_end_time   = get_transition_time(dst_end, year);
+    auto const year_start = cuda::std::chrono::duration_cast<duration_s>(
+      cuda::std::chrono::sys_days{cuda::std::chrono::year{year} / 1 / 1} -
+      cuda::std::chrono::sys_days{cuda::std::chrono::year{1970} / 1 / 1});
+    // The transitions are wall clock times, so the offset in effect makes them UT
+    auto const dst_start_ut = get_transition_time(dst_start, year) - future_std_offset;
+    auto const dst_end_ut   = get_transition_time(dst_end, year) - future_dst_offset;
 
     // Two entries per year, since there are two transitions
-    transition_times.emplace_back(duration_s{year_timestamp + dst_start_time - future_std_offset});
+    transition_times.emplace_back(year_start + dst_start_ut);
     offsets.emplace_back(future_dst_offset);
-    transition_times.emplace_back(duration_s{year_timestamp + dst_end_time - future_dst_offset});
+    transition_times.emplace_back(year_start + dst_end_ut);
     offsets.emplace_back(future_std_offset);
 
     // Swap the newly added transitions if in descending order
@@ -560,10 +563,6 @@ struct host_transition_table {
       std::swap(transition_times.rbegin()[0], transition_times.rbegin()[1]);
       std::swap(offsets.rbegin()[0], offsets.rbegin()[1]);
     }
-
-    year_timestamp += cuda::std::chrono::duration_cast<duration_s>(
-                        duration_D{365 + cuda::std::chrono::year{year}.is_leap()})
-                        .count();
   }
 
   CUDF_EXPECTS(transition_times.size() == offsets.size(),
