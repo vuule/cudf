@@ -1353,12 +1353,9 @@ template <typename Timestamp>
  * gathering read them instead of the input columns.
  */
 struct wall_clock_stats_columns {
-  using device_view_ptr =
-    std::unique_ptr<column_device_view, std::function<void(column_device_view*)>>;
-
   std::unique_ptr<cudf::table> transition_table;
   std::vector<std::unique_ptr<column>> columns;
-  std::vector<device_view_ptr> views;
+  rmm::device_uvector<column_device_view> views;
   rmm::device_uvector<column_device_view const*> leaf_pointers;
 };
 
@@ -1375,8 +1372,10 @@ struct wall_clock_stats_columns {
 {
   auto const mr       = cudf::get_current_device_resource_ref();
   auto const no_shift = [&]() {
-    return wall_clock_stats_columns{
-      nullptr, {}, {}, rmm::device_uvector<column_device_view const*>{0, stream}};
+    return wall_clock_stats_columns{nullptr,
+                                    {},
+                                    rmm::device_uvector<column_device_view>{0, stream},
+                                    rmm::device_uvector<column_device_view const*>{0, stream}};
   };
   auto const is_timestamp_column = [](auto const& column) {
     return column.orc_kind() == TypeKind::TIMESTAMP;
@@ -1392,14 +1391,23 @@ struct wall_clock_stats_columns {
   auto const d_transition_table = table_device_view::create(transition_table->view(), stream);
 
   std::vector<std::unique_ptr<column>> columns;
-  std::vector<wall_clock_stats_columns::device_view_ptr> views;
-  std::vector<column_device_view const*> leaf_pointers(orc_table.num_columns(), nullptr);
+  std::vector<column_device_view> host_views;
+  std::vector<size_type> shifted_indexes;
 
   for (auto const& column : orc_table.columns) {
     if (not is_timestamp_column(column)) { continue; }
     columns.emplace_back(shift_to_wall_clock(column.view(), *d_transition_table, stream));
-    views.emplace_back(column_device_view::create(columns.back()->view(), stream));
-    leaf_pointers[column.index()] = views.back().get();
+    // The shifted copies are flat, so their device views own no child allocation and can be
+    // copied to the device as plain values
+    host_views.emplace_back(*column_device_view::create(columns.back()->view(), stream));
+    shifted_indexes.emplace_back(column.index());
+  }
+
+  auto views = cudf::detail::make_device_uvector_async(host_views, stream, mr);
+
+  std::vector<column_device_view const*> leaf_pointers(orc_table.num_columns(), nullptr);
+  for (size_t i = 0; i < shifted_indexes.size(); ++i) {
+    leaf_pointers[shifted_indexes[i]] = views.data() + i;
   }
 
   return {std::move(transition_table),
