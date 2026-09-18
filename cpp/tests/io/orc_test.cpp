@@ -864,6 +864,7 @@ TEST_F(OrcChunkedWriterTest, WriterTimezone)
 
   auto const expected = column_wrapper<cudf::timestamp_s, cudf::timestamp_s::rep>{
     shanghai_offset, 1421323200 + shanghai_offset, -3000 + shanghai_offset, 1 + shanghai_offset};
+  // Equivalent rather than equal because the chunked writer makes the column nullable
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(table_view({expected}), read_orc_buffer(buffer).tbl->view());
 }
 
