@@ -663,6 +663,8 @@ namespace {
 constexpr int64_t shanghai_offset     = cudf::duration_s{cudf::duration_h{8}}.count();
 constexpr int64_t new_york_offset     = cudf::duration_s{cudf::duration_h{-5}}.count();
 constexpr int64_t new_york_dst_offset = cudf::duration_s{cudf::duration_h{-4}}.count();
+constexpr int64_t kolkata_offset      = cudf::duration_s{cudf::duration_m{5 * 60 + 30}}.count();
+constexpr int64_t kathmandu_offset    = cudf::duration_s{cudf::duration_m{5 * 60 + 45}}.count();
 
 std::vector<char> write_orc_with_timezone(cudf::table_view const& table,
                                           std::optional<std::string> const& timezone)
@@ -727,6 +729,30 @@ TEST_F(OrcWriterTest, WriterTimezoneNonUtc)
   CUDF_TEST_EXPECT_TABLES_EQUAL(table_view({expected}), read_orc_buffer(buffer).tbl->view());
   CUDF_TEST_EXPECT_TABLES_EQUAL(table_view({expected}),
                                 read_orc_buffer(buffer, /*ignore_timezone=*/true).tbl->view());
+}
+
+TEST_F(OrcWriterTest, WriterTimezoneFractionalOffset)
+{
+  // Neither zone observes daylight saving time, so every value shifts by the same amount
+  auto const round_trip_shifts_by = [](std::string const& timezone,
+                                       std::vector<cudf::timestamp_s::rep> const& values,
+                                       int64_t offset) {
+    auto const timestamps =
+      column_wrapper<cudf::timestamp_s, cudf::timestamp_s::rep>(values.begin(), values.end());
+    auto const buffer = write_orc_with_timezone(table_view({timestamps}), timezone);
+
+    auto shifted = values;
+    std::transform(
+      shifted.begin(), shifted.end(), shifted.begin(), [offset](auto v) { return v + offset; });
+    auto const expected =
+      column_wrapper<cudf::timestamp_s, cudf::timestamp_s::rep>(shifted.begin(), shifted.end());
+
+    CUDF_TEST_EXPECT_TABLES_EQUAL(table_view({expected}), read_orc_buffer(buffer).tbl->view());
+  };
+
+  round_trip_shifts_by("Asia/Kolkata", {-3000, 0, 1421323200}, kolkata_offset);
+  // Kathmandu moved from +05:30 to +05:45 in 1986, so keep the values on one side of that
+  round_trip_shifts_by("Asia/Kathmandu", {631152000, 1421323200}, kathmandu_offset);
 }
 
 TEST_F(OrcWriterTest, WriterTimezoneUsesFixedEpochOffsetAcrossDst)
