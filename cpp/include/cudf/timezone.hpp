@@ -11,7 +11,6 @@
 #include <cudf/wrappers/durations.hpp>
 
 #include <cuda/std/chrono>
-
 #include <cuda/stream>
 
 #include <memory>
