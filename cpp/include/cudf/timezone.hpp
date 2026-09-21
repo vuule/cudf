@@ -26,6 +26,20 @@ static constexpr int32_t solar_cycle_years = 400;
 // Two entries per year, over the length of the Gregorian calendar's solar cycle
 static constexpr uint32_t solar_cycle_entry_count = 2 * solar_cycle_years;
 /**
+ * @brief Returns the time from the epoch to the start of a year.
+ *
+ * @param year Year to return the start of
+ *
+ * @return Time from the epoch to January 1st of the year, in seconds
+ */
+CUDF_HOST_DEVICE constexpr duration_s year_start_since_epoch(int32_t year)
+{
+  return cuda::std::chrono::duration_cast<duration_s>(
+    cuda::std::chrono::sys_days{cuda::std::chrono::year{year} / 1 / 1} -
+    cuda::std::chrono::sys_days{cuda::std::chrono::year{1970} / 1 / 1});
+}
+
+/**
  * @brief Returns the length of the Gregorian calendar's solar cycle.
  *
  * A function rather than a variable because device code cannot use a namespace-scope `constexpr`
@@ -35,9 +49,7 @@ static constexpr uint32_t solar_cycle_entry_count = 2 * solar_cycle_years;
  */
 CUDF_HOST_DEVICE constexpr duration_s solar_cycle_duration()
 {
-  return cuda::std::chrono::duration_cast<duration_s>(
-    cuda::std::chrono::sys_days{cuda::std::chrono::year{1970 + solar_cycle_years} / 1 / 1} -
-    cuda::std::chrono::sys_days{cuda::std::chrono::year{1970} / 1 / 1});
+  return year_start_since_epoch(1970 + solar_cycle_years);
 }
 
 /**

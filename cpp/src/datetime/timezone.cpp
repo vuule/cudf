@@ -545,9 +545,7 @@ struct host_transition_table {
 
   // Add entries to fill the transition cycle
   for (int32_t year = 1970; year < 1970 + solar_cycle_years; ++year) {
-    auto const year_start = cuda::std::chrono::duration_cast<duration_s>(
-      cuda::std::chrono::sys_days{cuda::std::chrono::year{year} / 1 / 1} -
-      cuda::std::chrono::sys_days{cuda::std::chrono::year{1970} / 1 / 1});
+    auto const year_start = year_start_since_epoch(year);
     // The transitions are wall clock times, so the offset in effect makes them UT
     auto const dst_start_ut = get_transition_time(dst_start, year) - future_std_offset;
     auto const dst_end_ut   = get_transition_time(dst_end, year) - future_dst_offset;
