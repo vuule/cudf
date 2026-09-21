@@ -848,9 +848,8 @@ TEST_F(OrcWriterTest, WriterTimezoneStatisticsNested)
 
 TEST_F(OrcWriterTest, WriterTimezoneStatisticsAcrossDstOverlap)
 {
-  // The last instant before New York falls back to standard time, and the first one after. The
-  // offset shrinks by an hour across the transition, so the wall clock values the stream holds are
-  // in the opposite order; the statistics describe the instants, and keep the input order.
+  // Two instants a second apart, on either side of New York's fall-back, so the writer shifts them
+  // by different offsets. Statistics hold the input instants, not the shifted stream values.
   auto const last_edt  = cudf::timestamp_s::rep{1446357599};  // 2015-11-01T05:59:59Z
   auto const first_est = cudf::timestamp_s::rep{1446357600};  // 2015-11-01T06:00:00Z
   auto const timestamps =
