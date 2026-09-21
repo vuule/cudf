@@ -25,6 +25,7 @@ static constexpr int32_t solar_cycle_years = 400;
 // Number of future entries in the timezone transition table:
 // Two entries per year, over the length of the Gregorian calendar's solar cycle
 static constexpr uint32_t solar_cycle_entry_count = 2 * solar_cycle_years;
+
 /**
  * @brief Returns the time from the epoch to the start of a year.
  *
