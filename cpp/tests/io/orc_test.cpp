@@ -800,9 +800,9 @@ TEST_F(OrcWriterTest, WriterTimezoneStatistics)
   auto const timestamps = column_wrapper<cudf::timestamp_s, cudf::timestamp_s::rep>{0, 1421323200};
   table_view input({timestamps});
 
-  // Statistics hold the values a reader materializes, so they are shifted with the data
-  for (auto const& [timezone, shift] : std::vector<std::pair<std::optional<std::string>, int64_t>>{
-         {std::nullopt, 0}, {"UTC", 0}, {"Asia/Shanghai", shanghai_offset}}) {
+  // Statistics stay on the input instants regardless of the timezone; only the stream is re-based
+  for (auto const& timezone :
+       std::vector<std::optional<std::string>>{std::nullopt, "UTC", "Asia/Shanghai"}) {
     SCOPED_TRACE(timezone.value_or("default"));
 
     auto const stats = timestamp_stats(write_orc_with_timezone(input, timezone));
@@ -810,8 +810,8 @@ TEST_F(OrcWriterTest, WriterTimezoneStatistics)
     ASSERT_TRUE(stats.maximum.has_value());
     ASSERT_TRUE(stats.minimum_utc.has_value());
     ASSERT_TRUE(stats.maximum_utc.has_value());
-    EXPECT_EQ(*stats.minimum, shift * 1000);
-    EXPECT_EQ(*stats.maximum, (1421323200 + shift) * 1000);
+    EXPECT_EQ(*stats.minimum, 0);
+    EXPECT_EQ(*stats.maximum, 1421323200L * 1000);
     // Unlike Apache, which omits the legacy pair, both are written in the same frame
     EXPECT_EQ(*stats.minimum_utc, *stats.minimum);
     EXPECT_EQ(*stats.maximum_utc, *stats.maximum);
@@ -827,8 +827,8 @@ TEST_F(OrcWriterTest, WriterTimezoneStatisticsSliced)
   auto const stats =
     timestamp_stats(write_orc_with_timezone(table_view({sliced}), "Asia/Shanghai"));
 
-  EXPECT_EQ(*stats.minimum, (-3000 + shanghai_offset) * 1000);
-  EXPECT_EQ(*stats.maximum, (1421323200 + shanghai_offset) * 1000);
+  EXPECT_EQ(*stats.minimum, -3000L * 1000);
+  EXPECT_EQ(*stats.maximum, 1421323200L * 1000);
 }
 
 TEST_F(OrcWriterTest, WriterTimezoneStatisticsNested)
@@ -842,15 +842,15 @@ TEST_F(OrcWriterTest, WriterTimezoneStatisticsNested)
 
   // Entry one is the list column, so its timestamp child is entry two
   auto const stats = timestamp_stats(buffer, 2);
-  EXPECT_EQ(*stats.minimum, (-3000 + shanghai_offset) * 1000);
-  EXPECT_EQ(*stats.maximum, (1421323200 + shanghai_offset) * 1000);
+  EXPECT_EQ(*stats.minimum, -3000L * 1000);
+  EXPECT_EQ(*stats.maximum, 1421323200L * 1000);
 }
 
 TEST_F(OrcWriterTest, WriterTimezoneStatisticsAcrossDstOverlap)
 {
   // The last instant before New York falls back to standard time, and the first one after. The
-  // offset shrinks by an hour across the transition, so shifting reverses their order and the
-  // extrema have to be picked from the shifted values, not shifted after being reduced.
+  // offset shrinks by an hour across the transition, so the wall clock values the stream holds are
+  // in the opposite order; the statistics describe the instants, and keep the input order.
   auto const last_edt  = cudf::timestamp_s::rep{1446357599};  // 2015-11-01T05:59:59Z
   auto const first_est = cudf::timestamp_s::rep{1446357600};  // 2015-11-01T06:00:00Z
   auto const timestamps =
@@ -861,8 +861,8 @@ TEST_F(OrcWriterTest, WriterTimezoneStatisticsAcrossDstOverlap)
 
   ASSERT_TRUE(stats.minimum.has_value());
   ASSERT_TRUE(stats.maximum.has_value());
-  EXPECT_EQ(*stats.minimum, (first_est + new_york_offset) * 1000);
-  EXPECT_EQ(*stats.maximum, (last_edt + new_york_dst_offset) * 1000);
+  EXPECT_EQ(*stats.minimum, static_cast<int64_t>(last_edt) * 1000);
+  EXPECT_EQ(*stats.maximum, static_cast<int64_t>(first_est) * 1000);
 }
 
 TEST_F(OrcWriterTest, WriterTimezoneInvalid)
