@@ -31,9 +31,7 @@ implementation_config get_implementation(std::string const& name)
   using compression = cudf::experimental::pack_compression;
   using output_mode = cudf::experimental::compressed_output_mode;
   if (name == "legacy") { return {true, compression::none, output_mode::compact}; }
-  if (name == "prepared-uncompressed") {
-    return {false, compression::none, output_mode::compact};
-  }
+  if (name == "prepared-uncompressed") { return {false, compression::none, output_mode::compact}; }
   if (name == "cascaded-compact") { return {false, compression::cascaded, output_mode::compact}; }
   if (name == "cascaded-reserved") { return {false, compression::cascaded, output_mode::reserved}; }
   if (name == "zstd-compact") { return {false, compression::zstd, output_mode::compact}; }
@@ -135,13 +133,42 @@ void bench_pack_to_device(nvbench::state& state)
     auto plan           = cudf::experimental::prepare_pack(input->view(), options, stream);
     rmm::device_buffer output(plan.sizes().payload_bytes, stream);
     state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-      retained_bytes = cudf::experimental::pack_into(
-                         plan,
-                         cudf::device_span<uint8_t>{static_cast<uint8_t*>(output.data()),
-                                                    output.size()})
-                         .payload_bytes;
+      retained_bytes =
+        cudf::experimental::pack_into(
+          plan, cudf::device_span<uint8_t>{static_cast<uint8_t*>(output.data()), output.size()})
+          .payload_bytes;
     });
   }
+
+  add_output_metrics(state, uncompressed_bytes, retained_bytes);
+  state.add_buffer_size(
+    mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
+}
+
+void bench_encode_existing_pack_to_device(nvbench::state& state)
+{
+  auto const stream             = cudf::get_default_stream();
+  auto const config             = get_implementation(state.get_string("implementation"));
+  auto input                    = make_input(state);
+  auto packed                   = cudf::pack(input->view(), stream);
+  auto const uncompressed_bytes = packed.gpu_data->size();
+
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
+  state.add_global_memory_reads<int8_t>(uncompressed_bytes);
+
+  auto const mem_stats_logger = cudf::memory_stats_logger();
+  auto options                = cudf::experimental::pack_options{};
+  options.compression         = config.compression;
+  options.output_mode         = config.output_mode;
+  auto plan                   = cudf::experimental::prepare_pack(packed, options, stream);
+  rmm::device_buffer output(plan.sizes().payload_bytes, stream);
+  std::size_t retained_bytes = uncompressed_bytes;
+  state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
+    retained_bytes =
+      cudf::experimental::pack_into(
+        plan, cudf::device_span<uint8_t>{static_cast<uint8_t*>(output.data()), output.size()})
+        .payload_bytes;
+  });
 
   add_output_metrics(state, uncompressed_bytes, retained_bytes);
   state.add_buffer_size(
@@ -238,8 +265,7 @@ void bench_restore_from_device(nvbench::state& state)
     auto plan           = cudf::experimental::prepare_pack(input->view(), options, stream);
     rmm::device_buffer payload(plan.sizes().payload_bytes, stream);
     auto result = cudf::experimental::pack_into(
-      plan,
-      cudf::device_span<uint8_t>{static_cast<uint8_t*>(payload.data()), payload.size()});
+      plan, cudf::device_span<uint8_t>{static_cast<uint8_t*>(payload.data()), payload.size()});
     stream.sync();
     retained_bytes    = result.payload_bytes;
     auto packed_input = cudf::experimental::packed_data_view{
@@ -268,7 +294,7 @@ void bench_device_unpack_view(nvbench::state& state)
 
   // Both APIs only reconstruct host-side metadata and return a borrowing table_view. CPU time is
   // therefore the meaningful NVBench measurement; the synchronized executor also records it.
-  volatile cudf::size_type observed_columns = 0;
+  cudf::size_type volatile observed_columns = 0;
   if (state.get_string("implementation") == "legacy") {
     auto packed = cudf::pack(input->view(), stream);
     stream.sync();
@@ -289,7 +315,7 @@ void bench_device_unpack_view(nvbench::state& state)
                                        result.payload_bytes},
       result.compression};
     state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
-      auto unpacked     = cudf::experimental::unpack_view(packed);
+      auto unpacked    = cudf::experimental::unpack_view(packed);
       observed_columns = unpacked.num_columns();
     });
   }
@@ -307,11 +333,8 @@ auto const implementations = std::vector<std::string>{"legacy",
                                                       "snappy-compact",
                                                       "snappy-reserved"};
 
-auto const compact_implementations = std::vector<std::string>{"legacy",
-                                                              "prepared-uncompressed",
-                                                              "cascaded-compact",
-                                                              "zstd-compact",
-                                                              "snappy-compact"};
+auto const compact_implementations = std::vector<std::string>{
+  "legacy", "prepared-uncompressed", "cascaded-compact", "zstd-compact", "snappy-compact"};
 
 NVBENCH_BENCH(bench_pack_to_pinned_host)
   .set_name("pack_to_pinned_host")
@@ -322,6 +345,12 @@ NVBENCH_BENCH(bench_pack_to_pinned_host)
 NVBENCH_BENCH(bench_pack_to_device)
   .set_name("pack_to_device")
   .add_string_axis("implementation", compact_implementations)
+  .add_int64_axis("size_mib", {64})
+  .add_int64_axis("cardinality", {16, 0});
+
+NVBENCH_BENCH(bench_encode_existing_pack_to_device)
+  .set_name("encode_existing_pack_to_device")
+  .add_string_axis("implementation", {"cascaded-compact", "zstd-compact", "snappy-compact"})
   .add_int64_axis("size_mib", {64})
   .add_int64_axis("cardinality", {16, 0});
 
