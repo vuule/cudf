@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "datetime/timezone_utils.hpp"
 #include "io/comp/common.hpp"
 #include "io/orc/reader_impl.hpp"
 #include "io/orc/reader_impl_chunking.hpp"
@@ -242,22 +243,42 @@ void reader_impl::preprocess_file(read_mode mode)
   auto const num_total_stripes = selected_stripes.size();
   auto const num_levels        = _selected_columns.num_levels();
 
-  // Set up table for converting timestamp columns from local to UTC time
-  _file_itm_data.tz_table = [&] {
-    auto const has_timestamp_column = std::any_of(
-      _selected_columns.levels.cbegin(), _selected_columns.levels.cend(), [&](auto const& col_lvl) {
-        return std::any_of(col_lvl.cbegin(), col_lvl.cend(), [&](auto const& col_meta) {
-          return _metadata.get_col_type(col_meta.id).kind == TypeKind::TIMESTAMP;
-        });
+  auto const has_timestamp_column = std::any_of(
+    _selected_columns.levels.cbegin(), _selected_columns.levels.cend(), [&](auto const& col_lvl) {
+      return std::any_of(col_lvl.cbegin(), col_lvl.cend(), [&](auto const& col_meta) {
+        return _metadata.get_col_type(col_meta.id).kind == TypeKind::TIMESTAMP;
       });
+    });
+  auto const& writer_timezone =
+    has_timestamp_column ? selected_stripes[0].stripe_footer->writerTimezone : std::string{};
 
-    return (has_timestamp_column && !_options.ignore_timezone_in_stripe_footer)
-             ? cudf::detail::make_timezone_transition_table(
-                 {},
-                 selected_stripes[0].stripe_footer->writerTimezone,
-                 _stream,
-                 cudf::get_current_device_resource_ref())
-             : std::make_unique<cudf::table>();
+  // Set up table for converting timestamp columns from local to UTC time
+  _file_itm_data.tz_table =
+    (has_timestamp_column && !_options.ignore_timezone_in_stripe_footer)
+      ? cudf::detail::make_timezone_transition_table(
+          {}, writer_timezone, _stream, cudf::get_current_device_resource_ref())
+      : std::make_unique<cudf::table>();
+
+  // The ORC epoch as it occurs in the writer's timezone. The data stream is stored relative to it,
+  // so the negative timestamp borrow has to be decided in that frame even when the timezone is
+  // ignored; the writer's base offset can move a value across the epoch.
+  _file_itm_data.orc_base_epoch = [&]() -> duration_s {
+    static constexpr duration_s utc_epoch{orc_utc_epoch};
+    if (writer_timezone.empty() || writer_timezone == "UTC") { return utc_epoch; }
+
+    auto const base_epoch = [&] {
+      return utc_epoch -
+             cudf::detail::get_ut_offset(std::nullopt, writer_timezone, timestamp_s{utc_epoch});
+    };
+    if (!_options.ignore_timezone_in_stripe_footer) { return base_epoch(); }
+
+    // Ignoring the timezone does not otherwise consult the timezone database, so an unresolvable
+    // name must keep reading as it does today rather than start throwing
+    try {
+      return base_epoch();
+    } catch (cudf::logic_error const&) {
+      return utc_epoch;
+    }
   }();
 
   //

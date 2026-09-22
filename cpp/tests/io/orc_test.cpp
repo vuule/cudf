@@ -663,6 +663,7 @@ namespace {
 constexpr int64_t shanghai_offset     = cudf::duration_s{cudf::duration_h{8}}.count();
 constexpr int64_t new_york_offset     = cudf::duration_s{cudf::duration_h{-5}}.count();
 constexpr int64_t new_york_dst_offset = cudf::duration_s{cudf::duration_h{-4}}.count();
+constexpr int64_t est_offset          = cudf::duration_s{cudf::duration_h{-5}}.count();
 constexpr int64_t kolkata_offset      = cudf::duration_s{cudf::duration_m{5 * 60 + 30}}.count();
 constexpr int64_t kathmandu_offset    = cudf::duration_s{cudf::duration_m{5 * 60 + 45}}.count();
 
@@ -726,6 +727,44 @@ TEST_F(OrcWriterTest, WriterTimezoneNonUtc)
   CUDF_TEST_EXPECT_TABLES_EQUAL(table_view({expected}), read_orc_buffer(buffer).tbl->view());
   CUDF_TEST_EXPECT_TABLES_EQUAL(table_view({expected}),
                                 read_orc_buffer(buffer, /*ignore_timezone=*/true).tbl->view());
+}
+
+// The negative timestamp borrow is an encoding artifact, so it has to be decided in the writer's
+// timezone. Ignoring the timezone must not change which values borrow, only the frame they are
+// returned in, so both read modes agree for a zone with no daylight saving time.
+TEST_F(OrcWriterTest, WriterTimezoneNearEpochBorrow)
+{
+  // Wall clocks within the writer's offset of the Unix epoch, where the sign of the value differs
+  // between the UTC frame and the writer's. The last 999 ms before the epoch are left out, as
+  // `NegativeTimestampsNearEpoch` covers the range ORC cannot represent.
+  auto const near_epoch_ms = [](int64_t offset_s) {
+    auto const offset_ms = offset_s * 1000;
+    return std::vector<cudf::timestamp_ms::rep>{
+      -7'712'117, offset_ms - 1, offset_ms + 1, offset_ms / 2, 1};
+  };
+
+  auto const agrees_across_read_modes = [&](std::string const& timezone, int64_t offset_s) {
+    auto const inputs = near_epoch_ms(offset_s);
+    auto const timestamps =
+      column_wrapper<cudf::timestamp_ms, cudf::timestamp_ms::rep>(inputs.begin(), inputs.end());
+    auto const buffer = write_orc_with_timezone(table_view({timestamps}), timezone);
+
+    auto shifted = inputs;
+    std::transform(shifted.begin(), shifted.end(), shifted.begin(), [offset_s](auto v) {
+      return v + offset_s * 1000;
+    });
+    auto const expected =
+      column_wrapper<cudf::timestamp_ms, cudf::timestamp_ms::rep>(shifted.begin(), shifted.end());
+
+    auto const ms = cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS};
+    CUDF_TEST_EXPECT_TABLES_EQUAL(
+      table_view({expected}), read_orc_buffer(buffer, /*ignore_timezone=*/false, ms).tbl->view());
+    CUDF_TEST_EXPECT_TABLES_EQUAL(
+      table_view({expected}), read_orc_buffer(buffer, /*ignore_timezone=*/true, ms).tbl->view());
+  };
+
+  agrees_across_read_modes("Asia/Shanghai", shanghai_offset);
+  agrees_across_read_modes("EST", est_offset);
 }
 
 TEST_F(OrcWriterTest, WriterTimezoneFractionalOffset)
