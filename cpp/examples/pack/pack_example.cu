@@ -120,6 +120,33 @@ void compact_shuffle_block(cudf::table_view input, cuda::stream_ref stream)
     plan, cudf::device_span<uint8_t>{retry_payload.data(), retry_payload.size()});
 }
 
+void compress_existing_shuffle_block(cudf::table_view input, cuda::stream_ref stream)
+{
+  // Some exchange pipelines receive ordinary packed columns before deciding whether compression
+  // is worthwhile. The packed allocation remains the compression source and is not repacked.
+  auto ordinary_pack = cudf::pack(input, stream);
+
+  auto options        = cudf::experimental::pack_options{};
+  options.compression = cudf::experimental::pack_compression::cascaded;
+  options.output_mode = cudf::experimental::compressed_output_mode::compact;
+  auto plan           = cudf::experimental::prepare_pack(ordinary_pack, options, stream);
+
+  rmm::device_buffer encoded_payload(plan.sizes().payload_bytes, stream);
+  auto result = cudf::experimental::pack_into(
+    plan,
+    cudf::device_span<uint8_t>{static_cast<uint8_t*>(encoded_payload.data()),
+                               encoded_payload.size()});
+  auto restored = cudf::experimental::materialize(
+    cudf::experimental::packed_data_view{
+      result.metadata,
+      cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(encoded_payload.data()),
+                                       result.payload_bytes},
+      result.compression},
+    stream);
+  std::cout << "late-compressed shuffle block: " << result.payload_bytes << " bytes, "
+            << restored->num_rows() << " rows restored\n";
+}
+
 void device_resident_zero_copy(cudf::table_view input, cuda::stream_ref stream)
 {
   auto plan = cudf::experimental::prepare_pack(input, stream);
@@ -146,5 +173,6 @@ int main()
   direct_uncompressed_spill(input->view(), stream);
   asynchronous_reserved_spill(input->view(), stream);
   compact_shuffle_block(input->view(), stream);
+  compress_existing_shuffle_block(input->view(), stream);
   device_resident_zero_copy(input->view(), stream);
 }

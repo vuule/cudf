@@ -20,7 +20,7 @@
 | Stage | API or type | Purpose | Important behavior |
 | --- | --- | --- | --- |
 | Select behavior | `pack_options` | Choose compression, codec options, and compressed-output policy | Supports `none`, `cascaded`, `zstd`, and `snappy`; compressed output can be `compact` or `reserved` |
-| Prepare | `prepare_pack(input, options, stream, temp_mr)` | Discover buffers, compute layout, and retain reusable state | Bound to the input table and stream |
+| Prepare | `prepare_pack(input, options, stream, temp_mr)` | Discover buffers, compute layout, and retain reusable state | Accepts a `table_view` for fused pack-plus-compress or ordinary uncompressed `packed_columns` for late compression; bound to the input and stream |
 | Inspect capacity | `pack_plan::sizes()` | Report metadata size, destination capacity, alignment, and uncompressed size | Capacity is exact when uncompressed and the sum of aligned per-region nvCOMP upper bounds when compressed |
 | Allocate | Caller-owned storage | Let shuffle or spill code choose the destination | Must be device-accessible and satisfy the reported capacity and alignment |
 | Execute | `pack_into(plan, destination)` | Pack into caller-owned memory | Returns metadata, representation, output policy, and bytes to retain |
@@ -39,6 +39,7 @@ These examples are limited to the shuffle and transient-spill cases raised in th
 | Receive a shuffle block or restore a spill into an owning GPU table | `materialize()` | Decompresses every region and returns a table independent of the transport buffers |
 | Keep an uncompressed shuffle block device-resident and reconstruct without copying | `unpack_view()` | Returns a borrowing view over the packed destination |
 | Emit the same prepared batch into another caller-owned destination | Reuse the same `pack_plan` | Reuses table discovery, region classification, layout, metadata, and codec setup while the input is unchanged |
+| Decide to compress after ordinary packing has completed | `prepare_pack(packed_columns, options)` | Borrows the existing packed allocation as the codec input and avoids another packing copy |
 
 ### Example-to-request traceability
 
@@ -52,6 +53,7 @@ The buildable examples are in `cpp/examples/pack/pack_example.cu`. The table dis
 | `compact_shuffle_block()` | Compress a complete transient shuffle/exchange payload and transfer only the actual retained bytes | Directly demonstrates the requested compressed spill/exchange use; `compact` is the prototype policy chosen when transport framing needs the actual byte count | [source Cascade-Next thread](https://nvidia.slack.com/archives/C045NBR9YKT/p1789574099680079), [compressed spill/exchange use](https://nvidia.slack.com/archives/C045NBR9YKT/p1789574277074999?thread_ts=1789574099.680079&cid=C045NBR9YKT), [codec-sensitive typed regions](https://nvidia.slack.com/archives/C045NBR9YKT/p1789654697615489?thread_ts=1789574099.680079&cid=C045NBR9YKT) |
 | Retry in `compact_shuffle_block()` | Reuse prepared buffer discovery instead of traversing the same table hierarchy again | Direct implementation of RP-7; the retry is illustrative, while repeated execution into caller-owned destinations is the underlying capability | [prepared-state discussion](https://nvidia.slack.com/archives/C01CW5L51QC/p1776277366225799), [cuDF #21321](https://github.com/NVIDIA/cudf/issues/21321) |
 | `device_resident_zero_copy()` | Preserve the current metadata-only, non-owning unpack behavior when an uncompressed payload remains device-resident | Direct implementation of RP-13 through RP-16 | [current unpack behavior](https://nvidia.slack.com/archives/CDTANRCTT/p1770066613741579?thread_ts=1770066280.180409&cid=CDTANRCTT), [lifetime requirement](https://nvidia.slack.com/archives/CDTANRCTT/p1770066793417679?thread_ts=1770066280.180409&cid=CDTANRCTT), [stream-ordering requirement](https://nvidia.slack.com/archives/CDTANRCTT/p1770068345445029?thread_ts=1770066280.180409&cid=CDTANRCTT) |
+| `compress_existing_shuffle_block()` | Make a late compression decision after exchange has already received ordinary `cudf::packed_columns` | Direct implementation of the Velox exchange requirement | [exact Slack request](https://nvidia.slack.com/archives/C0773FR630B/p1790105847001459?thread_ts=1790102556.016479&cid=C0773FR630B) |
 
 The examples intentionally do not claim to demonstrate bounded chunked Spark spilling. That request is covered by SP-1 through SP-11 in the requirements document and remains a separate API track, beginning with the [strict memory-bound request](https://nvidia.slack.com/archives/C045NBR9YKT/p1789660770301469?thread_ts=1789574099.680079&cid=C045NBR9YKT) and [cuDF #21874](https://github.com/NVIDIA/cudf/issues/21874).
 
@@ -191,6 +193,7 @@ Both executions use the stream captured by `plan`. The source table must remain 
 | API | Use one execution shape for compressed and uncompressed packing | Met | All modes use `prepare_pack()` and `pack_into()` |
 | Planning | Avoid repeating table discovery and layout traversal | Met | `pack_plan` retains contiguous-layout state and metadata |
 | Planning | Reuse a plan with multiple destinations | Met | Dedicated reuse tests pass for uncompressed, Cascaded, Zstd, and Snappy |
+| Input form | Compress an existing uncompressed `cudf::packed_columns` after a caller makes a late compression decision | Met | The overload borrows the existing device allocation as the regional compression source; compact and reserved round trips cover Cascaded, Zstd, and Snappy ([Slack request](https://nvidia.slack.com/archives/C0773FR630B/p1790105847001459?thread_ts=1790102556.016479&cid=C0773FR630B)) |
 | Destination | Write into caller-owned device memory | Met | Tested for uncompressed, Cascaded, Zstd, and Snappy |
 | Destination | Write directly into mapped pinned-host memory | Met | Round trips pass for uncompressed, Cascaded, Zstd, and Snappy |
 | Sizing | Report exact uncompressed size before allocation | Met | `payload_bytes` is exact for `none` |
@@ -212,6 +215,24 @@ Both executions use the stream captured by `plan`. The source table must remain 
 | Performance | Meet or improve current pack/copy performance and peak memory | Unmet | Cascaded reduces the measured 64 MiB payload about 4x and restores faster than legacy, but its combined pack-and-restore time remains about 46-55% slower; Zstd and Snappy are slower still |
 | Other use | Provide a CPU/Kudo-compatible representation | Separate API | Different ownership and reconstruction requirements |
 | Other use | Enumerate and reconstruct native table buffers directly | Separate API | Not the contiguous regular-pack representation |
+
+### Late compression of an existing packed representation
+
+Velox exchange currently decides whether to compress only after it has received an existing uncompressed `cudf::packed_columns`. The API therefore supports both fused `table_view` pack-plus-compress and late compression of an ordinary packed allocation. ([exact Slack request](https://nvidia.slack.com/archives/C0773FR630B/p1790105847001459?thread_ts=1790102556.016479&cid=C0773FR630B))
+
+An additive overload is the smallest extension:
+
+```cpp
+pack_plan prepare_pack(
+    cudf::packed_columns const& input,
+    pack_options const& options,
+    rmm::cuda_stream_view stream,
+    rmm::device_async_resource_ref temp_mr);
+```
+
+For this overload, planning creates a metadata-only `table_view` over the ordinary packed allocation to identify typed physical regions. It does not copy or repack the payload. `pack_into()` applies the selected encoding directly from the existing packed device allocation into the caller-owned destination. The input metadata and device allocation must remain alive until submitted work completes. The overload rejects `pack_compression::none`; it is specifically a late-compression entry point, not a general re-encoding API.
+
+This overlaps with the fused path after region discovery: both should use the same codec adapters, output layouts, result metadata, and restore APIs. The only difference is whether physical regions originate from a `table_view` or from an existing packed allocation.
 
 ## Runtime contract
 

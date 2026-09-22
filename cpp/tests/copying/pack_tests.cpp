@@ -258,6 +258,52 @@ TEST_F(PackUnpackTest, ExperimentalCascadedPackMaterialize)
   CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
 }
 
+TEST_F(PackUnpackTest, ExperimentalCompressExistingPackedColumns)
+{
+  auto const stream = cudf::get_default_stream();
+  cudf::test::fixed_width_column_wrapper<int32_t> numbers({31, 31, 31, 31, 31},
+                                                          {true, false, true, true, true});
+  cudf::test::strings_column_wrapper strings({"late", "compression", "after", "ordinary", "pack"});
+  auto const input = cudf::table_view{{numbers, strings}};
+  auto packed      = cudf::pack(input, stream);
+
+  for (auto const compression : {cudf::experimental::pack_compression::cascaded,
+                                 cudf::experimental::pack_compression::zstd,
+                                 cudf::experimental::pack_compression::snappy}) {
+    for (auto const output_mode : {cudf::experimental::compressed_output_mode::compact,
+                                   cudf::experimental::compressed_output_mode::reserved}) {
+      SCOPED_TRACE(static_cast<int>(compression));
+      SCOPED_TRACE(static_cast<int>(output_mode));
+      auto options        = cudf::experimental::pack_options{};
+      options.compression = compression;
+      options.output_mode = output_mode;
+      auto plan           = cudf::experimental::prepare_pack(packed, options, stream);
+
+      EXPECT_EQ(plan.sizes().uncompressed_payload_bytes, packed.gpu_data->size());
+      rmm::device_buffer destination(plan.sizes().payload_bytes, stream);
+      auto result = cudf::experimental::pack_into(
+        plan,
+        cudf::device_span<uint8_t>{static_cast<uint8_t*>(destination.data()), destination.size()});
+      auto const packed_view = cudf::experimental::packed_data_view{
+        result.metadata,
+        cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(destination.data()),
+                                         result.payload_bytes},
+        result.compression};
+      auto materialized = cudf::experimental::materialize(packed_view, stream);
+      CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
+    }
+  }
+}
+
+TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireCompression)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4});
+  auto packed = cudf::pack(cudf::table_view{{numbers}});
+  EXPECT_THROW(cudf::experimental::prepare_pack(
+                 packed, cudf::experimental::pack_options{}, cudf::get_default_stream()),
+               cudf::logic_error);
+}
+
 TEST_F(PackUnpackTest, ExperimentalCascadedUsesNativeTypedRegions)
 {
   auto const stream = cudf::get_default_stream();

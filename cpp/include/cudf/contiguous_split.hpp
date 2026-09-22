@@ -317,9 +317,9 @@ struct pack_result;
 /**
  * @brief Prepared state for repeatedly packing one table into caller-owned memory.
  *
- * Construction performs table discovery and layout planning once. The input table and all of its
- * buffers must remain alive and unchanged until every operation using the plan has completed.
- * A plan is bound to the stream passed to `prepare_pack()`.
+ * Construction performs layout planning once. The input table or packed columns, their metadata,
+ * and all referenced buffers must remain alive and unchanged until every operation using the plan
+ * has completed. A plan is bound to the stream passed to `prepare_pack()`.
  *
  * This is an experimental prototype. The API and representation may change without notice.
  */
@@ -346,6 +346,10 @@ class pack_plan {
                                 cuda::stream_ref,
                                 rmm::device_async_resource_ref);
   friend pack_plan prepare_pack(cudf::table_view const&,
+                                pack_options const&,
+                                cuda::stream_ref,
+                                rmm::device_async_resource_ref);
+  friend pack_plan prepare_pack(cudf::packed_columns const&,
                                 pack_options const&,
                                 cuda::stream_ref,
                                 rmm::device_async_resource_ref);
@@ -382,6 +386,30 @@ pack_plan prepare_pack(
  */
 pack_plan prepare_pack(
   cudf::table_view const& input,
+  pack_options const& options,
+  cuda::stream_ref stream                = cudf::get_default_stream(),
+  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Prepare compression of an existing uncompressed `cudf::packed_columns` allocation.
+ *
+ * This overload supports callers that decide whether to compress only after ordinary packing has
+ * completed. It borrows `input.gpu_data` as the compression source and therefore avoids copying or
+ * repacking the column data. The ordinary pack metadata is retained inside the compressed
+ * representation for reconstruction by `materialize()`.
+ *
+ * `options.compression` must select a compressed representation. The input metadata and device
+ * allocation must remain alive and unchanged until every execution using the returned plan has
+ * completed.
+ *
+ * @param input Existing ordinary, uncompressed packed columns
+ * @param options Compression and output-layout options
+ * @param stream Stream used for planning and subsequent `pack_into()` operations
+ * @param temp_mr Memory resource used for codec workspace allocations
+ * @return A move-only plan that borrows `input` and is bound to `stream`
+ */
+pack_plan prepare_pack(
+  cudf::packed_columns const& input,
   pack_options const& options,
   cuda::stream_ref stream                = cudf::get_default_stream(),
   rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());

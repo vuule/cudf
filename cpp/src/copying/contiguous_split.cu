@@ -2596,24 +2596,9 @@ std::unique_ptr<column> allocate_materialized_column(
 
 }  // namespace
 
-struct pack_plan::impl {
-  impl(std::unique_ptr<detail::contiguous_split_state>&& prepared_state,
-       std::vector<uint8_t>&& prepared_metadata,
-       pack_sizes prepared_sizes,
-       pack_compression prepared_compression,
-       compressed_output_mode prepared_output_mode,
-       std::vector<prepared_compression_region>&& prepared_regions,
-       std::unique_ptr<rmm::device_buffer>&& prepared_staging_buffer)
-    : state(std::move(prepared_state)),
-      metadata(std::move(prepared_metadata)),
-      storage_sizes(prepared_sizes),
-      compression(prepared_compression),
-      output_mode(prepared_output_mode),
-      regions(std::move(prepared_regions)),
-      staging_buffer(std::move(prepared_staging_buffer))
-  {
-  }
+namespace {
 
+struct prepared_pack_components {
   std::unique_ptr<detail::contiguous_split_state> state;
   std::vector<uint8_t> metadata;
   pack_sizes storage_sizes;
@@ -2623,39 +2608,14 @@ struct pack_plan::impl {
   std::unique_ptr<rmm::device_buffer> staging_buffer;
 };
 
-pack_plan::pack_plan(std::unique_ptr<impl>&& implementation) : _impl(std::move(implementation)) {}
-
-pack_plan::pack_plan(pack_plan&&) noexcept = default;
-
-pack_plan& pack_plan::operator=(pack_plan&&) noexcept = default;
-
-pack_plan::~pack_plan() = default;
-
-pack_sizes pack_plan::sizes() const
+prepared_pack_components make_prepared_pack_components(
+  std::unique_ptr<detail::contiguous_split_state>&& state,
+  std::vector<uint8_t>&& metadata,
+  pack_options const& options,
+  bool allocate_uncompressed_staging,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref temp_mr)
 {
-  CUDF_EXPECTS(_impl != nullptr, "Cannot inspect a moved-from pack plan");
-  return _impl->storage_sizes;
-}
-
-pack_plan prepare_pack(cudf::table_view const& input,
-                       cuda::stream_ref stream,
-                       rmm::device_async_resource_ref temp_mr)
-{
-  return prepare_pack(input, pack_options{}, stream, temp_mr);
-}
-
-pack_plan prepare_pack(cudf::table_view const& input,
-                       pack_options const& options,
-                       cuda::stream_ref stream,
-                       rmm::device_async_resource_ref temp_mr)
-{
-  // A zero user-buffer size selects the existing whole-table layout. std::nullopt suppresses the
-  // output allocation while preserving the already-computed source buffers, destination offsets,
-  // batching, and metadata state for pack_into().
-  auto state =
-    std::make_unique<detail::contiguous_split_state>(input, 0, stream, std::nullopt, temp_mr);
-  auto metadata_ptr = state->build_packed_column_metadata();
-  auto metadata     = metadata_ptr == nullptr ? std::vector<uint8_t>{} : std::move(*metadata_ptr);
   auto const uncompressed_bytes = state->get_total_contiguous_size();
   auto destination_bytes        = uncompressed_bytes;
 
@@ -2699,7 +2659,10 @@ pack_plan prepare_pack(cudf::table_view const& input,
         }
         CUDF_EXPECTS(uncompressed_end == uncompressed_bytes,
                      "Prepared compression regions do not cover the complete payload");
-        staging_buffer = std::make_unique<rmm::device_buffer>(uncompressed_bytes, stream, temp_mr);
+        if (allocate_uncompressed_staging) {
+          staging_buffer =
+            std::make_unique<rmm::device_buffer>(uncompressed_bytes, stream, temp_mr);
+        }
         break;
       }
     }
@@ -2710,13 +2673,103 @@ pack_plan prepare_pack(cudf::table_view const& input,
       ? metadata.size()
       : compressed_metadata_size(metadata.size(), regions.size());
   auto const sizes = pack_sizes{metadata_bytes, destination_bytes, split_align, uncompressed_bytes};
-  return pack_plan{std::make_unique<pack_plan::impl>(std::move(state),
-                                                     std::move(metadata),
-                                                     sizes,
-                                                     options.compression,
-                                                     options.output_mode,
-                                                     std::move(regions),
-                                                     std::move(staging_buffer))};
+  return prepared_pack_components{std::move(state),
+                                  std::move(metadata),
+                                  sizes,
+                                  options.compression,
+                                  options.output_mode,
+                                  std::move(regions),
+                                  std::move(staging_buffer)};
+}
+
+}  // namespace
+
+struct pack_plan::impl {
+  impl(prepared_pack_components&& components,
+       cudf::device_span<uint8_t const> prepared_packed_source)
+    : state(std::move(components.state)),
+      metadata(std::move(components.metadata)),
+      storage_sizes(components.storage_sizes),
+      compression(components.compression),
+      output_mode(components.output_mode),
+      regions(std::move(components.regions)),
+      staging_buffer(std::move(components.staging_buffer)),
+      packed_source(prepared_packed_source)
+  {
+  }
+
+  std::unique_ptr<detail::contiguous_split_state> state;
+  std::vector<uint8_t> metadata;
+  pack_sizes storage_sizes;
+  pack_compression compression;
+  compressed_output_mode output_mode;
+  std::vector<prepared_compression_region> regions;
+  std::unique_ptr<rmm::device_buffer> staging_buffer;
+  cudf::device_span<uint8_t const> packed_source;
+};
+
+pack_plan::pack_plan(std::unique_ptr<impl>&& implementation) : _impl(std::move(implementation)) {}
+
+pack_plan::pack_plan(pack_plan&&) noexcept = default;
+
+pack_plan& pack_plan::operator=(pack_plan&&) noexcept = default;
+
+pack_plan::~pack_plan() = default;
+
+pack_sizes pack_plan::sizes() const
+{
+  CUDF_EXPECTS(_impl != nullptr, "Cannot inspect a moved-from pack plan");
+  return _impl->storage_sizes;
+}
+
+pack_plan prepare_pack(cudf::table_view const& input,
+                       cuda::stream_ref stream,
+                       rmm::device_async_resource_ref temp_mr)
+{
+  return prepare_pack(input, pack_options{}, stream, temp_mr);
+}
+
+pack_plan prepare_pack(cudf::table_view const& input,
+                       pack_options const& options,
+                       cuda::stream_ref stream,
+                       rmm::device_async_resource_ref temp_mr)
+{
+  // A zero user-buffer size selects the existing whole-table layout. std::nullopt suppresses the
+  // output allocation while preserving the already-computed source buffers, destination offsets,
+  // batching, and metadata state for pack_into().
+  auto state =
+    std::make_unique<detail::contiguous_split_state>(input, 0, stream, std::nullopt, temp_mr);
+  auto metadata_ptr = state->build_packed_column_metadata();
+  auto metadata     = metadata_ptr == nullptr ? std::vector<uint8_t>{} : std::move(*metadata_ptr);
+  auto components = make_prepared_pack_components(
+    std::move(state), std::move(metadata), options, true, stream, temp_mr);
+  return pack_plan{std::make_unique<pack_plan::impl>(
+    std::move(components), cudf::device_span<uint8_t const>{})};
+}
+
+pack_plan prepare_pack(cudf::packed_columns const& input,
+                       pack_options const& options,
+                       cuda::stream_ref stream,
+                       rmm::device_async_resource_ref temp_mr)
+{
+  CUDF_EXPECTS(options.compression != pack_compression::none,
+               "The packed_columns overload requires a compressed output representation");
+  CUDF_EXPECTS(input.metadata != nullptr && input.gpu_data != nullptr,
+               "Packed input must contain metadata and a device allocation");
+
+  auto const unpacked = cudf::unpack(input);
+  auto state =
+    std::make_unique<detail::contiguous_split_state>(unpacked, 0, stream, std::nullopt, temp_mr);
+  CUDF_EXPECTS(state->get_total_contiguous_size() == input.gpu_data->size(),
+               "Packed metadata does not describe the complete device allocation");
+
+  auto metadata = *input.metadata;
+  auto source   = cudf::device_span<uint8_t const>{
+    static_cast<uint8_t const*>(input.gpu_data->data()), input.gpu_data->size()};
+  auto components = make_prepared_pack_components(
+    std::move(state), std::move(metadata), options, false, stream, temp_mr);
+  return pack_plan{
+    std::make_unique<pack_plan::impl>(std::move(components), std::move(source))};
 }
 
 pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destination)
@@ -2737,12 +2790,18 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
                        plan._impl->output_mode};
   }
 
-  CUDF_EXPECTS(!plan._impl->regions.empty() && plan._impl->staging_buffer != nullptr,
+  CUDF_EXPECTS(!plan._impl->regions.empty() &&
+                 (plan._impl->staging_buffer != nullptr || !plan._impl->packed_source.empty()),
                "Compressed pack plan is missing its prepared compression state");
-  auto uncompressed =
-    cudf::device_span<uint8_t>{static_cast<uint8_t*>(plan._impl->staging_buffer->data()),
-                               plan._impl->storage_sizes.uncompressed_payload_bytes};
-  plan._impl->state->pack_into(uncompressed);
+  auto const uncompressed = plan._impl->staging_buffer != nullptr
+                              ? cudf::device_span<uint8_t const>{
+                                  static_cast<uint8_t const*>(plan._impl->staging_buffer->data()),
+                                  plan._impl->storage_sizes.uncompressed_payload_bytes}
+                              : plan._impl->packed_source;
+  if (plan._impl->staging_buffer != nullptr) {
+    plan._impl->state->pack_into(cudf::device_span<uint8_t>{
+      static_cast<uint8_t*>(plan._impl->staging_buffer->data()), uncompressed.size()});
+  }
 
   std::vector<compressed_metadata_entry> entries;
   entries.reserve(plan._impl->regions.size());
