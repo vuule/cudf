@@ -268,6 +268,184 @@ std::size_t packed_size(
   cuda::stream_ref stream                = cudf::get_default_stream(),
   rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
 
+namespace experimental {
+
+/**
+ * @brief Compression algorithms supported by the prepared pack prototype.
+ */
+enum class pack_compression {
+  none,      ///< Preserve the current uncompressed packed representation
+  cascaded,  ///< nvCOMP Cascaded with an NVCOMP_NATIVE self-describing bitstream
+  zstd,      ///< nvCOMP Zstd with an NVCOMP_NATIVE self-describing bitstream
+  snappy,    ///< nvCOMP Snappy with an NVCOMP_NATIVE self-describing bitstream
+};
+
+/**
+ * @brief Controls whether compressed execution reports the compact size immediately.
+ */
+enum class compressed_output_mode {
+  compact,   ///< Synchronize and report the actual compressed prefix size
+  reserved,  ///< Remain asynchronous and retain the complete planned destination capacity
+};
+
+/**
+ * @brief Options controlling a prepared pack operation.
+ */
+struct pack_options {
+  pack_compression compression{pack_compression::none};
+  compressed_output_mode output_mode{compressed_output_mode::compact};
+  std::size_t compression_chunk_bytes{64 * 1024};
+  int cascaded_num_RLEs{2};
+  int cascaded_num_deltas{1};
+  bool cascaded_use_bitpacking{true};
+};
+
+/**
+ * @brief Storage requirements for a prepared pack operation.
+ *
+ * This is an experimental prototype. The API and representation may change without notice.
+ */
+struct pack_sizes {
+  std::size_t metadata_bytes;     ///< Exact host metadata size
+  std::size_t payload_bytes;      ///< Required destination capacity (an upper bound if compressed)
+  std::size_t payload_alignment;  ///< Required alignment for the payload base address
+  std::size_t uncompressed_payload_bytes;  ///< Exact contiguous size before compression
+};
+
+struct pack_result;
+
+/**
+ * @brief Prepared state for repeatedly packing one table into caller-owned memory.
+ *
+ * Construction performs table discovery and layout planning once. The input table and all of its
+ * buffers must remain alive and unchanged until every operation using the plan has completed.
+ * A plan is bound to the stream passed to `prepare_pack()`.
+ *
+ * This is an experimental prototype. The API and representation may change without notice.
+ */
+class pack_plan {
+ public:
+  pack_plan(pack_plan const&)            = delete;
+  pack_plan& operator=(pack_plan const&) = delete;
+  pack_plan(pack_plan&&) noexcept;
+  pack_plan& operator=(pack_plan&&) noexcept;
+  ~pack_plan();
+
+  /**
+   * @brief Return the exact storage requirements for this plan.
+   */
+  [[nodiscard]] pack_sizes sizes() const;
+
+ private:
+  struct impl;
+  std::unique_ptr<impl> _impl;
+
+  explicit pack_plan(std::unique_ptr<impl>&& implementation);
+
+  friend pack_plan prepare_pack(cudf::table_view const&,
+                                cuda::stream_ref,
+                                rmm::device_async_resource_ref);
+  friend pack_plan prepare_pack(cudf::table_view const&,
+                                pack_options const&,
+                                cuda::stream_ref,
+                                rmm::device_async_resource_ref);
+  friend pack_result pack_into(pack_plan const&, cudf::device_span<uint8_t>);
+};
+
+/**
+ * @brief Prepare an exact, reusable uncompressed pack plan for `input`.
+ *
+ * @param input View of the table to pack
+ * @param stream Stream used for planning and subsequent `pack_into()` operations
+ * @param temp_mr Memory resource used for planning scratch allocations
+ * @return A move-only plan bound to `input` and `stream`
+ */
+pack_plan prepare_pack(
+  cudf::table_view const& input,
+  cuda::stream_ref stream                = cudf::get_default_stream(),
+  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Prepare a reusable pack plan with explicit compression options.
+ *
+ * Compression first creates the normalized contiguous representation, then independently
+ * compresses each physical column buffer (data, offsets, characters, or validity) as an nvCOMP
+ * native bitstream. Cascaded is configured with the native width and signedness of each region
+ * when nvCOMP supports it. `sizes().payload_bytes` is the combined upper-bound capacity;
+ * `pack_into()` reports either the compact prefix or reserved capacity selected by `options`.
+ *
+ * @param input View of the table to pack
+ * @param options Compression and codec options
+ * @param stream Stream used for planning and subsequent `pack_into()` operations
+ * @param temp_mr Memory resource used for planning and compression staging allocations
+ * @return A move-only plan bound to `input` and `stream`
+ */
+pack_plan prepare_pack(
+  cudf::table_view const& input,
+  pack_options const& options,
+  cuda::stream_ref stream                = cudf::get_default_stream(),
+  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Host metadata and payload size produced by `pack_into()`.
+ */
+struct pack_result {
+  std::vector<uint8_t> metadata;       ///< Metadata describing the packed payload
+  std::size_t payload_bytes;           ///< Bytes to retain: actual prefix or reserved capacity
+  pack_compression compression;        ///< Representation used by the payload
+  compressed_output_mode output_mode;  ///< Size-reporting policy used for this result
+};
+
+/**
+ * @brief Execute a prepared pack directly into caller-owned device-accessible memory.
+ *
+ * `destination` may be device memory or mapped pinned-host memory. It must contain at least
+ * `plan.sizes().payload_bytes` bytes. Work is submitted to the stream captured by the plan.
+ * The caller must preserve the input and destination until that stream reaches the operation.
+ *
+ * The same plan may be executed repeatedly while its input remains valid and unchanged.
+ *
+ * @param plan Prepared pack plan
+ * @param destination Caller-owned output span
+ * @return Host metadata and the number of payload bytes written
+ */
+pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destination);
+
+/**
+ * @brief Non-owning view of packed host metadata and device-accessible payload bytes.
+ */
+struct packed_data_view {
+  std::span<uint8_t const> metadata;
+  cudf::device_span<uint8_t const> payload;
+  pack_compression compression{pack_compression::none};
+};
+
+/**
+ * @brief Construct a zero-copy table view over an uncompressed packed payload.
+ *
+ * The returned view must not outlive either buffer in `input`.
+ * Compressed inputs must be passed to `materialize()` instead.
+ *
+ * @param input Packed metadata and payload
+ * @return A non-owning table view into `input.payload`
+ */
+table_view unpack_view(packed_data_view input);
+
+/**
+ * @brief Materialize an owning table from any supported packed representation.
+ *
+ * @param input Packed metadata and payload
+ * @param stream Stream used for the deep copy
+ * @param mr Memory resource for the returned table
+ * @return An owning table independent of the packed buffers
+ */
+std::unique_ptr<table> materialize(
+  packed_data_view input,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+}  // namespace experimental
+
 /**
  * @brief Produce the metadata used for packing a table stored in a contiguous buffer.
  *
@@ -373,6 +551,18 @@ class packed_metadata_view {
     [[nodiscard]] size_type null_count() const;
 
     /**
+     * @brief @return Byte offset of this column's data in the uncompressed packed payload, or -1
+     * if the column has no data buffer.
+     */
+    [[nodiscard]] int64_t data_offset() const;
+
+    /**
+     * @brief @return Byte offset of this column's validity mask in the uncompressed packed
+     * payload, or -1 if the column is not nullable.
+     */
+    [[nodiscard]] int64_t null_mask_offset() const;
+
+    /**
      * @brief @return The number of children of this column.
      */
     [[nodiscard]] size_type num_children() const;
@@ -391,6 +581,8 @@ class packed_metadata_view {
     data_type _type{type_id::EMPTY};
     size_type _size{};
     size_type _null_count{};
+    int64_t _data_offset{-1};
+    int64_t _null_mask_offset{-1};
     size_type _num_children{};
     // Span from this entry to the end of the metadata buffer (needed for child traversal).
     std::span<std::uint8_t const> _buffer;
