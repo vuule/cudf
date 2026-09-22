@@ -145,6 +145,7 @@ struct compression_region_layout {
   std::size_t uncompressed_bytes;
   cudf::type_id type;
   bool is_validity;
+  uint8_t const* direct_source;
 };
 
 /**
@@ -1927,8 +1928,24 @@ struct contiguous_split_state {
     for (auto const& destination_info : partition_buf_size_and_dst_buf_info->h_dst_buf_info) {
       if (destination_info.buf_size == 0) { continue; }
       auto const& source = source_info[destination_info.src_buf_index];
-      regions.push_back(compression_region_layout{
-        destination_info.dst_offset, destination_info.buf_size, source.type, source.is_validity});
+      auto const source_bytes =
+        destination_info.num_elements * static_cast<std::size_t>(destination_info.element_size);
+      // Compression can borrow a source buffer only when contiguous_split would copy its bytes
+      // verbatim. Sliced validity and offset buffers still require the normalization kernel.
+      auto const can_use_source_directly =
+        destination_info.src_element_index >= 0 && destination_info.value_shift == 0 &&
+        destination_info.bit_shift == 0 && source_bytes == destination_info.buf_size &&
+        src_and_dst_pointers->h_src_bufs[destination_info.src_buf_index] != nullptr;
+      auto const direct_source =
+        can_use_source_directly
+          ? src_and_dst_pointers->h_src_bufs[destination_info.src_buf_index] +
+              destination_info.src_element_index * destination_info.element_size
+          : nullptr;
+      regions.push_back(compression_region_layout{destination_info.dst_offset,
+                                                  destination_info.buf_size,
+                                                  source.type,
+                                                  source.is_validity,
+                                                  direct_source});
     }
     std::sort(regions.begin(), regions.end(), [](auto const& lhs, auto const& rhs) {
       return lhs.uncompressed_offset < rhs.uncompressed_offset;
@@ -2659,7 +2676,11 @@ prepared_pack_components make_prepared_pack_components(
         }
         CUDF_EXPECTS(uncompressed_end == uncompressed_bytes,
                      "Prepared compression regions do not cover the complete payload");
-        if (allocate_uncompressed_staging) {
+        auto const all_regions_are_direct =
+          std::all_of(layouts.begin(), layouts.end(), [](auto const& layout) {
+            return layout.direct_source != nullptr;
+          });
+        if (allocate_uncompressed_staging && !all_regions_are_direct) {
           staging_buffer =
             std::make_unique<rmm::device_buffer>(uncompressed_bytes, stream, temp_mr);
         }
@@ -2790,24 +2811,37 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
                        plan._impl->output_mode};
   }
 
-  CUDF_EXPECTS(!plan._impl->regions.empty() &&
-                 (plan._impl->staging_buffer != nullptr || !plan._impl->packed_source.empty()),
-               "Compressed pack plan is missing its prepared compression state");
-  auto const uncompressed = plan._impl->staging_buffer != nullptr
-                              ? cudf::device_span<uint8_t const>{
-                                  static_cast<uint8_t const*>(plan._impl->staging_buffer->data()),
-                                  plan._impl->storage_sizes.uncompressed_payload_bytes}
-                              : plan._impl->packed_source;
+  CUDF_EXPECTS(
+    !plan._impl->regions.empty() &&
+      (plan._impl->staging_buffer != nullptr || !plan._impl->packed_source.empty() ||
+       std::all_of(plan._impl->regions.begin(),
+                   plan._impl->regions.end(),
+                   [](auto const& region) { return region.layout.direct_source != nullptr; })),
+    "Compressed pack plan is missing its prepared compression state");
   if (plan._impl->staging_buffer != nullptr) {
-    plan._impl->state->pack_into(cudf::device_span<uint8_t>{
-      static_cast<uint8_t*>(plan._impl->staging_buffer->data()), uncompressed.size()});
+    plan._impl->state->pack_into(
+      cudf::device_span<uint8_t>{static_cast<uint8_t*>(plan._impl->staging_buffer->data()),
+                                 plan._impl->storage_sizes.uncompressed_payload_bytes});
   }
+
+  auto compression_source = [&](prepared_compression_region const& region) {
+    if (plan._impl->staging_buffer != nullptr) {
+      return static_cast<uint8_t const*>(plan._impl->staging_buffer->data()) +
+             region.layout.uncompressed_offset;
+    }
+    if (!plan._impl->packed_source.empty()) {
+      return plan._impl->packed_source.data() + region.layout.uncompressed_offset;
+    }
+    CUDF_EXPECTS(region.layout.direct_source != nullptr,
+                 "Compressed region has no prepared input source");
+    return region.layout.direct_source;
+  };
 
   std::vector<compressed_metadata_entry> entries;
   entries.reserve(plan._impl->regions.size());
   if (plan._impl->output_mode == compressed_output_mode::reserved) {
     for (auto const& region : plan._impl->regions) {
-      region.compressor->compress(uncompressed.data() + region.layout.uncompressed_offset,
+      region.compressor->compress(compression_source(region),
                                   destination.data() + region.reserved_offset,
                                   *region.compression_config);
       entries.push_back(compressed_metadata_entry{region.layout.uncompressed_offset,
@@ -2832,9 +2866,8 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
                    region.reserved_bytes <= destination.size() - next_payload_offset,
                  "Insufficient destination capacity for compressed region");
     auto* const compressed_region = destination.data() + next_payload_offset;
-    region.compressor->compress(uncompressed.data() + region.layout.uncompressed_offset,
-                                compressed_region,
-                                *region.compression_config);
+    region.compressor->compress(
+      compression_source(region), compressed_region, *region.compression_config);
     auto const compressed_bytes = region.compressor->get_compressed_output_size(compressed_region);
     CUDF_EXPECTS(*region.compression_config->get_status() == nvcompSuccess,
                  "nvCOMP compression failed");

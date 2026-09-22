@@ -178,12 +178,12 @@ Both executions use the stream captured by `plan`. The source table must remain 
 | Representation | `sizes().payload_bytes` | `pack_result::payload_bytes` | Synchronization at end of `pack_into()` | Intermediate storage | Zero-copy view |
 | --- | --- | --- | --- | --- | --- |
 | Uncompressed | Exact destination size | Exact bytes written | None added by size reporting | None beyond planning scratch | Yes |
-| Cascaded, compact | Combined regional nvCOMP upper bound | Compact sequence of typed-region frames | Yes, once per region to obtain each frame size | Full uncompressed device staging buffer | No |
-| Cascaded, reserved | Required nvCOMP upper bound | Full reserved capacity | No | Full uncompressed device staging buffer | No |
-| Zstd, compact | Combined regional nvCOMP upper bound | Compact sequence of region frames | Yes, once per region to obtain each frame size | Full uncompressed device staging buffer | No |
-| Zstd, reserved | Required nvCOMP upper bound | Full reserved capacity | No | Full uncompressed device staging buffer | No |
-| Snappy, compact | Combined regional nvCOMP upper bound | Compact sequence of region frames | Yes, once per region to obtain each frame size | Full uncompressed device staging buffer | No |
-| Snappy, reserved | Required nvCOMP upper bound | Full reserved capacity | No | Full uncompressed device staging buffer | No |
+| Cascaded, compact | Combined regional nvCOMP upper bound | Compact sequence of typed-region frames | Yes, once per region to obtain each frame size | Direct source regions when already canonical; full staging fallback for transformed regions | No |
+| Cascaded, reserved | Required nvCOMP upper bound | Full reserved capacity | No | Direct source regions when already canonical; full staging fallback for transformed regions | No |
+| Zstd, compact | Combined regional nvCOMP upper bound | Compact sequence of region frames | Yes, once per region to obtain each frame size | Direct source regions when already canonical; full staging fallback for transformed regions | No |
+| Zstd, reserved | Required nvCOMP upper bound | Full reserved capacity | No | Direct source regions when already canonical; full staging fallback for transformed regions | No |
+| Snappy, compact | Combined regional nvCOMP upper bound | Compact sequence of region frames | Yes, once per region to obtain each frame size | Direct source regions when already canonical; full staging fallback for transformed regions | No |
+| Snappy, reserved | Required nvCOMP upper bound | Full reserved capacity | No | Direct source regions when already canonical; full staging fallback for transformed regions | No |
 
 ## Non-chunked requirements tracker
 
@@ -207,7 +207,7 @@ Both executions use the stream captured by `plan`. The source table must remain 
 | Compression | Support Zstd and Snappy | Met | Device and mapped pinned-host round trips pass for both codecs |
 | Compression | Support Cascade-Next | Unmet | Installed nvCOMP 5.3 exposes Cascaded but no distinct Cascade-Next API |
 | Compression | Compress per column or native-typed region | Met | Each physical column buffer is an independent frame; Cascaded uses signed/unsigned native widths for supported types, with byte fallback for unsupported 128-bit or structural regions |
-| Pack memory | Avoid a full uncompressed device staging buffer while compressing | Unmet | Every compressed plan retains a full-size staging buffer |
+| Pack memory | Avoid a full uncompressed device staging buffer while compressing | Partial | Canonical source regions are compressed directly, eliminating staging for the measured unsliced fixed-width workload. A full staging fallback remains when any region requires offset rebasing, validity-bit shifting, or padding normalization. |
 | Restore memory | Avoid a full uncompressed device staging buffer while decompressing | Met | `materialize()` allocates the final column hierarchy and decompresses each region directly into its owning data or validity buffer |
 | Types | Cover nested, sliced, dictionary, empty, and zero-column tables | Met | Every existing table-shape case now round trips through Cascaded, Zstd, and Snappy as well as uncompressed packing |
 | Validation | Fail safely on invalid runtime input | Met for agreed scope | Size, alignment, metadata, codec/header mismatch, truncated payload, and nvCOMP failures are checked; persistence-grade integrity is out of scope |
@@ -244,7 +244,7 @@ This overlaps with the fused path after region discovery: both should use the sa
 | Reuse | Calls using one plan are ordered on its captured stream |
 | `unpack_view()` | Returned view must not outlive its metadata or payload |
 | `materialize()` | Returned table owns its data independently of packed buffers |
-| Compressed planning | Retains a full uncompressed staging buffer in the current implementation |
+| Compressed planning | Borrows canonical physical source regions directly. If any region requires normalization, the current implementation falls back to one full uncompressed staging buffer. |
 | Compressed execution | `compact` queries each frame's actual size to place the next frame; `reserved` launches every frame into a planned slot without querying final sizes |
 | Compressed metadata | A host-side region directory wraps the existing pack metadata and records logical type, validity role, uncompressed extent, and compressed-frame extent |
 | Runtime validation | Must reject invalid sizes, alignment, codec identifiers, metadata bounds, and nvCOMP failures safely |
@@ -340,16 +340,18 @@ This removes host transfer from both halves of the operation. The table reports 
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Legacy `pack()`/`unpack()` path | 16 | 0.361 ms | 0.104 ms | 0.465 ms | 64.000 MiB | 64.01 MiB | 64.00 MiB |
 | Prepared uncompressed | 16 | 0.187 ms | 0.104 ms | 0.291 ms | 64.000 MiB | 64.01 MiB | 64.00 MiB |
-| Cascaded typed regions | 16 | 1.560 ms | 1.132 ms | 2.692 ms | 15.846 MiB | 128.03 MiB | 64.00 MiB |
-| Zstd regions | 16 | 49.244 ms | 16.872 ms | 66.116 ms | 7.861 MiB | 128.04 MiB | 64.00 MiB |
-| Snappy regions | 16 | 16.831 ms | 2.249 ms | 19.080 ms | 9.816 MiB | 138.72 MiB | 64.00 MiB |
+| Cascaded typed regions | 16 | 1.291 ms | 1.132 ms | 2.423 ms | 15.846 MiB | 64.03 MiB | 64.00 MiB |
+| Zstd regions | 16 | 48.921 ms | 16.872 ms | 65.793 ms | 7.861 MiB | 64.04 MiB | 64.00 MiB |
+| Snappy regions | 16 | 16.482 ms | 2.249 ms | 18.731 ms | 9.816 MiB | 74.73 MiB | 64.00 MiB |
 | Legacy `pack()`/`unpack()` path | High | 0.367 ms | 0.106 ms | 0.473 ms | 64.000 MiB | 64.01 MiB | 64.00 MiB |
 | Prepared uncompressed | High | 0.187 ms | 0.104 ms | 0.291 ms | 64.000 MiB | 64.01 MiB | 64.00 MiB |
-| Cascaded typed regions | High | 1.597 ms | 1.080 ms | 2.677 ms | 16.290 MiB | 128.03 MiB | 64.00 MiB |
-| Zstd regions | High | 43.455 ms | 13.602 ms | 57.057 ms | 15.681 MiB | 128.04 MiB | 64.00 MiB |
-| Snappy regions | High | 16.465 ms | 3.218 ms | 19.683 ms | 25.798 MiB | 138.72 MiB | 64.00 MiB |
+| Cascaded typed regions | High | 1.331 ms | 1.080 ms | 2.411 ms | 16.290 MiB | 64.03 MiB | 64.00 MiB |
+| Zstd regions | High | 42.889 ms | 13.602 ms | 56.491 ms | 15.681 MiB | 64.04 MiB | 64.00 MiB |
+| Snappy regions | High | 16.278 ms | 3.218 ms | 19.496 ms | 25.798 MiB | 74.73 MiB | 64.00 MiB |
 
-For device-resident data, prepared uncompressed is about 9.3x faster end to end than Cascaded and about 1.6x faster than the legacy owning path on this workload. Compression only becomes competitive when its smaller retained allocation or a later host, network, or storage transfer has enough value to repay the codec cost.
+For device-resident data, prepared uncompressed is about 8.3x faster end to end than Cascaded and about 1.6x faster than the legacy owning path on this workload. Compression only becomes competitive when its smaller retained allocation or a later host, network, or storage transfer has enough value to repay the codec cost.
+
+The compressed `table_view` path now reads canonical physical regions directly from the input columns. Compared with the former full-staging implementation, this reduces pack peak memory from 128.03 MiB to 64.03 MiB for Cascaded, from 128.04 MiB to 64.04 MiB for Zstd, and from 138.72 MiB to 74.73 MiB for Snappy. Cascaded pack time improves by 17% (1.560 to 1.291 ms at cardinality 16, and 1.597 to 1.331 ms at high cardinality). Zstd and Snappy improve by 1–2% because codec time dominates their former packing copy. These measurements use unsliced, non-nullable fixed-width columns; inputs requiring normalization still take the staging fallback.
 
 #### Reserved output
 
@@ -380,6 +382,6 @@ The benchmark does not yet cover strings, nullable columns, nested schemas, diff
 | --- | --- | --- |
 | 1 | Add a caller-selectable host-transfer strategy: direct mapped-host output versus device staging plus D2H | Performance versus peak-memory tradeoff |
 | 2 | Batch or parallelize region execution and choose codecs by region type/size | Per-region compression latency and effectiveness |
-| 3 | Remove full uncompressed staging by packing regions directly into compression inputs | Peak memory for compressed output |
+| 3 | Replace the all-or-nothing fallback with selective scratch only for regions requiring offset rebasing, validity-bit shifting, or padding normalization | Eliminate full staging for sliced and nested inputs as well |
 | 4 | Extend benchmarks to mixed, nullable, string, and nested tables plus representative shuffle block sizes | Workload coverage |
 | 5 | Revisit Cascade-Next when nvCOMP exposes a distinct supported API | Cascade-Next requirement |
