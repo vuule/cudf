@@ -120,6 +120,55 @@ void compact_shuffle_block(cudf::table_view input, cuda::stream_ref stream)
     plan, cudf::device_span<uint8_t>{retry_payload.data(), retry_payload.size()});
 }
 
+void automatic_compressed_spill(cudf::table_view input, cuda::stream_ref stream)
+{
+  auto options        = cudf::experimental::pack_options{};
+  options.compression = cudf::experimental::pack_compression::automatic;
+
+  auto plan = cudf::experimental::prepare_pack(input, options, stream);
+  auto payload =
+    cudf::detail::make_pinned_vector_async<uint8_t>(plan.sizes().payload_bytes, stream);
+  auto result =
+    cudf::experimental::pack_into(plan, cudf::device_span<uint8_t>{payload.data(), payload.size()});
+
+  // libcudf selects a codec for each physical region and retains a region uncompressed when the
+  // selected codec does not save automatic_min_savings_bytes.
+  auto restored = cudf::experimental::materialize(
+    cudf::experimental::packed_data_view{
+      result.metadata,
+      cudf::device_span<uint8_t const>{payload.data(), result.payload_bytes},
+      result.compression},
+    stream);
+  std::cout << "automatic compressed spill: " << result.payload_bytes << " bytes, "
+            << restored->num_rows() << " rows restored\n";
+}
+
+void expert_region_selection(cudf::table_view input, cuda::stream_ref stream)
+{
+  auto options                  = cudf::experimental::pack_options{};
+  options.region_codec_selector = [](cudf::experimental::pack_region_info const& region) {
+    if (region.kind == cudf::experimental::pack_region_kind::validity) {
+      return cudf::experimental::pack_compression::none;
+    }
+    if (region.column_index == 0) { return cudf::experimental::pack_compression::cascaded; }
+    // Returning automatic delegates just this region back to libcudf's built-in policy.
+    return cudf::experimental::pack_compression::automatic;
+  };
+
+  auto plan = cudf::experimental::prepare_pack(input, options, stream);
+  rmm::device_buffer payload(plan.sizes().payload_bytes, stream);
+  auto result = cudf::experimental::pack_into(
+    plan, cudf::device_span<uint8_t>{static_cast<uint8_t*>(payload.data()), payload.size()});
+  auto restored = cudf::experimental::materialize(
+    cudf::experimental::packed_data_view{
+      result.metadata,
+      cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(payload.data()),
+                                       result.payload_bytes},
+      result.compression},
+    stream);
+  std::cout << "expert region selection: " << restored->num_rows() << " rows restored\n";
+}
+
 void compress_existing_shuffle_block(cudf::table_view input, cuda::stream_ref stream)
 {
   // Some exchange pipelines receive ordinary packed columns before deciding whether compression
@@ -173,6 +222,8 @@ int main()
   direct_uncompressed_spill(input->view(), stream);
   asynchronous_reserved_spill(input->view(), stream);
   compact_shuffle_block(input->view(), stream);
+  automatic_compressed_spill(input->view(), stream);
+  expert_region_selection(input->view(), stream);
   compress_existing_shuffle_block(input->view(), stream);
   device_resident_zero_copy(input->view(), stream);
 }

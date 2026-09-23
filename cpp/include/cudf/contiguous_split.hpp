@@ -11,6 +11,7 @@
 #include <cudf/utilities/memory_resource.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <vector>
@@ -274,11 +275,42 @@ namespace experimental {
  * @brief Compression algorithms supported by the prepared pack prototype.
  */
 enum class pack_compression {
-  none,      ///< Preserve the current uncompressed packed representation
-  cascaded,  ///< nvCOMP Cascaded with an NVCOMP_NATIVE self-describing bitstream
-  zstd,      ///< nvCOMP Zstd with an NVCOMP_NATIVE self-describing bitstream
-  snappy,    ///< nvCOMP Snappy with an NVCOMP_NATIVE self-describing bitstream
+  none,       ///< Preserve the current uncompressed packed representation
+  automatic,  ///< Select a codec independently for each physical region
+  cascaded,   ///< nvCOMP Cascaded with an NVCOMP_NATIVE self-describing bitstream
+  zstd,       ///< nvCOMP Zstd with an NVCOMP_NATIVE self-describing bitstream
+  snappy,     ///< nvCOMP Snappy with an NVCOMP_NATIVE self-describing bitstream
 };
+
+/**
+ * @brief Physical role of a region presented to an expert codec selector.
+ */
+enum class pack_region_kind {
+  data,              ///< Fixed-width or other ordinary column data
+  validity,          ///< Null-validity bitmask
+  offsets,           ///< String or list offsets
+  string_characters  ///< String character bytes
+};
+
+/**
+ * @brief Read-only description passed to an expert per-region codec selector.
+ */
+struct pack_region_info {
+  std::size_t region_index;        ///< Stable index within this prepared pack operation
+  size_type column_index;          ///< Top-level input column owning this region
+  pack_region_kind kind;           ///< Physical role of the region
+  type_id type;                    ///< Logical/native type used to configure the codec
+  std::size_t uncompressed_bytes;  ///< Bytes presented to the selected codec
+};
+
+/**
+ * @brief Expert policy selecting a codec for one physical region.
+ *
+ * Return `none` to retain the region verbatim, `automatic` to apply libcudf's built-in policy to
+ * this region, or a concrete codec to force that codec. The selector runs synchronously during
+ * `prepare_pack()` and is not retained by the resulting plan.
+ */
+using pack_region_codec_selector = std::function<pack_compression(pack_region_info const&)>;
 
 /**
  * @brief Controls whether compressed execution reports the compact size immediately.
@@ -293,8 +325,11 @@ enum class compressed_output_mode {
  */
 struct pack_options {
   pack_compression compression{pack_compression::none};
+  pack_region_codec_selector region_codec_selector{};
   compressed_output_mode output_mode{compressed_output_mode::compact};
   std::size_t compression_chunk_bytes{64 * 1024};
+  std::size_t automatic_min_region_bytes{4 * 1024};
+  std::size_t automatic_min_savings_bytes{256};
   int cascaded_num_RLEs{2};
   int cascaded_num_deltas{1};
   bool cascaded_use_bitpacking{true};

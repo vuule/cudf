@@ -7,7 +7,7 @@
 | Primary uses | Transient shuffle and spilling within a running job |
 | Existing API | `cudf::pack()` and `cudf::unpack()` remain unchanged |
 | Prototype API | Additive API under `cudf::experimental` |
-| Representations | Uncompressed, nvCOMP Cascaded, Zstd, and Snappy |
+| Representations | Uncompressed and per-region mixtures of nvCOMP Cascaded, Zstd, Snappy, or raw bytes |
 | Compression unit | Independent physical column regions: data, validity, offsets, and string characters |
 | Destinations | Caller-owned device-accessible memory, including mapped pinned-host memory |
 | Lifetime | Job-local; temporary spill files are not durable storage |
@@ -19,7 +19,7 @@
 
 | Stage | API or type | Purpose | Important behavior |
 | --- | --- | --- | --- |
-| Select behavior | `pack_options` | Choose compression, codec options, and compressed-output policy | Supports `none`, `cascaded`, `zstd`, and `snappy`; compressed output can be `compact` or `reserved` |
+| Select behavior | `pack_options` | Choose compression, codec options, and compressed-output policy | Defaults to `none`; supports libcudf-owned `automatic`, uniform explicit codecs, and an expert per-region selector; compressed output can be `compact` or `reserved` |
 | Prepare | `prepare_pack(input, options, stream, temp_mr)` | Discover buffers, compute layout, and retain reusable state | Accepts a `table_view` for fused pack-plus-compress or ordinary uncompressed `packed_columns` for late compression; bound to the input and stream |
 | Inspect capacity | `pack_plan::sizes()` | Report metadata size, destination capacity, alignment, and uncompressed size | Capacity is exact when uncompressed and the sum of aligned per-region nvCOMP upper bounds when compressed |
 | Allocate | Caller-owned storage | Let shuffle or spill code choose the destination | Must be device-accessible and satisfy the reported capacity and alignment |
@@ -40,6 +40,8 @@ These examples are limited to the shuffle and transient-spill cases raised in th
 | Keep an uncompressed shuffle block device-resident and reconstruct without copying | `unpack_view()` | Returns a borrowing view over the packed destination |
 | Emit the same prepared batch into another caller-owned destination | Reuse the same `pack_plan` | Reuses table discovery, region classification, layout, metadata, and codec setup while the input is unchanged |
 | Decide to compress after ordinary packing has completed | `prepare_pack(packed_columns, options)` | Borrows the existing packed allocation as the codec input and avoids another packing copy |
+| Let libcudf choose an appropriate codec for every region | `pack_compression::automatic` | Uses a throughput-oriented built-in policy and retains compact regions uncompressed when compression misses the configured savings threshold |
+| Apply engine-specific prior knowledge | `region_codec_selector(pack_region_info)` | Expert callback sees region index, top-level column, physical role, logical type, and byte extent; it may force a codec, retain raw bytes, or delegate a region back to `automatic` |
 
 ### Example-to-request traceability
 
@@ -54,6 +56,8 @@ The buildable examples are in `cpp/examples/pack/pack_example.cu`. The table dis
 | Retry in `compact_shuffle_block()` | Reuse prepared buffer discovery instead of traversing the same table hierarchy again | Direct implementation of RP-7; the retry is illustrative, while repeated execution into caller-owned destinations is the underlying capability | [prepared-state discussion](https://nvidia.slack.com/archives/C01CW5L51QC/p1776277366225799), [cuDF #21321](https://github.com/NVIDIA/cudf/issues/21321) |
 | `device_resident_zero_copy()` | Preserve the current metadata-only, non-owning unpack behavior when an uncompressed payload remains device-resident | Direct implementation of RP-13 through RP-16 | [current unpack behavior](https://nvidia.slack.com/archives/CDTANRCTT/p1770066613741579?thread_ts=1770066280.180409&cid=CDTANRCTT), [lifetime requirement](https://nvidia.slack.com/archives/CDTANRCTT/p1770066793417679?thread_ts=1770066280.180409&cid=CDTANRCTT), [stream-ordering requirement](https://nvidia.slack.com/archives/CDTANRCTT/p1770068345445029?thread_ts=1770066280.180409&cid=CDTANRCTT) |
 | `compress_existing_shuffle_block()` | Make a late compression decision after exchange has already received ordinary `cudf::packed_columns` | Direct implementation of the Velox exchange requirement | [exact Slack request](https://nvidia.slack.com/archives/C0773FR630B/p1790105847001459?thread_ts=1790102556.016479&cid=C0773FR630B) |
+| `automatic_compressed_spill()` | Make good per-region codec choices without requiring shuffle/spill callers to understand physical packed regions | Implements the primary automatic-selection path discussed after the per-region request | [per-region codec request](https://nvidia.slack.com/archives/C0773FR630B/p1790120481822889?thread_ts=1790102556.016479&cid=C0773FR630B), [caller-policy discussion](https://nvidia.slack.com/archives/C0773FR630B/p1790125129881049?thread_ts=1790102556.016479&cid=C0773FR630B) |
+| `expert_region_selection()` | Allow specialized callers to override individual physical regions using column identity, role, type, and size | Implements the rich manual interface while retaining automatic selection as the normal production path | [caller-policy discussion](https://nvidia.slack.com/archives/C0773FR630B/p1790125129881049?thread_ts=1790102556.016479&cid=C0773FR630B) |
 
 The examples intentionally do not claim to demonstrate bounded chunked Spark spilling. That request is covered by SP-1 through SP-11 in the requirements document and remains a separate API track, beginning with the [strict memory-bound request](https://nvidia.slack.com/archives/C045NBR9YKT/p1789660770301469?thread_ts=1789574099.680079&cid=C045NBR9YKT) and [cuDF #21874](https://github.com/NVIDIA/cudf/issues/21874).
 
@@ -86,6 +90,35 @@ auto packed = cudf::experimental::packed_data_view{
 
 auto restored = cudf::experimental::materialize(packed, stream);
 ```
+
+### Automatic and expert per-region codec selection
+
+Compression remains opt-in: default-constructed `pack_options` produce the ordinary uncompressed representation. The recommended compressed path lets libcudf select each physical region independently:
+
+```cpp
+auto options        = cudf::experimental::pack_options{};
+options.compression = cudf::experimental::pack_compression::automatic;
+
+auto plan = cudf::experimental::prepare_pack(input, options, stream);
+```
+
+The initial throughput-oriented policy leaves regions smaller than `automatic_min_region_bytes` raw, selects Snappy for string-character regions, selects Cascaded for other typed regions, and—in compact mode—retains a region raw when compression saves fewer than `automatic_min_savings_bytes`. The defaults are 4 KiB and 256 bytes respectively. They are prototype policy rather than a permanent API guarantee and should be tuned with representative workloads. Reserved mode cannot inspect final frame sizes without sacrificing its asynchronous contract, so its automatic decision uses type, role, and size but does not apply the post-compression savings fallback.
+
+Specialized callers may override individual regions. The selector runs once during planning and is not retained by the plan:
+
+```cpp
+options.region_codec_selector = [](cudf::experimental::pack_region_info const& region) {
+  if (region.kind == cudf::experimental::pack_region_kind::validity) {
+    return cudf::experimental::pack_compression::none;
+  }
+  if (region.column_index == 0) {
+    return cudf::experimental::pack_compression::cascaded;
+  }
+  return cudf::experimental::pack_compression::automatic;
+};
+```
+
+`pack_region_info` exposes the stable region index within the plan, owning top-level column index, physical role (`data`, `validity`, `offsets`, or `string_characters`), logical/native type, and uncompressed extent. Returning a concrete codec forces that choice; returning `none` stores raw bytes; returning `automatic` delegates that region to libcudf's policy.
 
 ### Asynchronous compressed spill with reserved capacity
 
@@ -178,6 +211,8 @@ Both executions use the stream captured by `plan`. The source table must remain 
 | Representation | `sizes().payload_bytes` | `pack_result::payload_bytes` | Synchronization at end of `pack_into()` | Intermediate storage | Zero-copy view |
 | --- | --- | --- | --- | --- | --- |
 | Uncompressed | Exact destination size | Exact bytes written | None added by size reporting | None beyond planning scratch | Yes |
+| Automatic/mixed, compact | Sum of aligned per-region raw sizes or selected-codec upper bounds | Compact sequence of independently tagged raw or compressed regions | Yes for selected codecs; required to apply the savings fallback and place the next frame | Direct source regions when already canonical; full staging fallback for transformed regions | No |
+| Automatic/mixed, reserved | Sum of aligned per-region raw sizes or selected-codec upper bounds | Full reserved capacity | No; type/role/size selection only, without post-compression fallback | Direct source regions when already canonical; full staging fallback for transformed regions | No |
 | Cascaded, compact | Combined regional nvCOMP upper bound | Compact sequence of typed-region frames | Yes, once per region to obtain each frame size | Direct source regions when already canonical; full staging fallback for transformed regions | No |
 | Cascaded, reserved | Required nvCOMP upper bound | Full reserved capacity | No | Direct source regions when already canonical; full staging fallback for transformed regions | No |
 | Zstd, compact | Combined regional nvCOMP upper bound | Compact sequence of region frames | Yes, once per region to obtain each frame size | Direct source regions when already canonical; full staging fallback for transformed regions | No |
@@ -202,7 +237,10 @@ Both executions use the stream captured by `plan`. The source table must remain 
 | Output policy | Let callers choose upper-bound/reserved or compact output | Met | `compressed_output_mode::{reserved, compact}` selects asynchronous retained capacity or synchronized actual prefix |
 | Unpack | Provide zero-copy uncompressed reconstruction | Met | `unpack_view()` returns a borrowing `table_view` |
 | Unpack | Provide owning reconstruction | Met | `materialize()` handles all implemented representations |
-| Compression | Select compression per operation | Met | `pack_options` selects `none`, `cascaded`, `zstd`, or `snappy` |
+| Compression | Preserve uncompressed packing as the default | Met | Default-constructed `pack_options` use `pack_compression::none` |
+| Compression | Provide a good automatic per-region default | Met for prototype policy | `automatic` selects Cascaded for sufficiently large typed/offset/validity regions, Snappy for string characters, leaves small regions raw, and applies a configurable compact-output savings fallback |
+| Compression | Permit uniform explicit codec selection | Met | `pack_options` selects `cascaded`, `zstd`, or `snappy` for every region |
+| Compression | Permit expert per-region codec selection | Met | `region_codec_selector` receives region index, top-level column index, physical role, logical type, and byte extent; mixed raw/Cascaded/Zstd/Snappy round trips pass ([Slack request](https://nvidia.slack.com/archives/C0773FR630B/p1790120481822889?thread_ts=1790102556.016479&cid=C0773FR630B), [policy discussion](https://nvidia.slack.com/archives/C0773FR630B/p1790125129881049?thread_ts=1790102556.016479&cid=C0773FR630B)) |
 | Compression | Support nvCOMP Cascaded | Met | Device and mapped pinned-host round trips pass |
 | Compression | Support Zstd and Snappy | Met | Device and mapped pinned-host round trips pass for both codecs |
 | Compression | Support Cascade-Next | Unmet | Installed nvCOMP 5.3 exposes Cascaded but no distinct Cascade-Next API |
@@ -246,7 +284,7 @@ This overlaps with the fused path after region discovery: both should use the sa
 | `materialize()` | Returned table owns its data independently of packed buffers |
 | Compressed planning | Borrows canonical physical source regions directly. If any region requires normalization, the current implementation falls back to one full uncompressed staging buffer. |
 | Compressed execution | `compact` queries each frame's actual size to place the next frame; `reserved` launches every frame into a planned slot without querying final sizes |
-| Compressed metadata | A host-side region directory wraps the existing pack metadata and records logical type, validity role, uncompressed extent, and compressed-frame extent |
+| Compressed metadata | A host-side region directory wraps the existing pack metadata and records each region's actual codec (including raw), logical type, validity role, uncompressed extent, and retained payload extent |
 | Runtime validation | Must reject invalid sizes, alignment, codec identifiers, metadata bounds, and nvCOMP failures safely |
 | Integrity | Persistence-grade checksums and recovery are not required; transport checksums belong to the shuffle layer when needed |
 
@@ -265,19 +303,22 @@ This overlaps with the fused path after region discovery: both should use the sa
 | Check | Result |
 | --- | --- |
 | Focused target | `COPYING_TEST` builds successfully |
-| Complete suite | 38 enabled `PackUnpackTest` tests pass |
+| Complete suite | 43 enabled `PackUnpackTest` tests pass |
 | Existing disabled test | One pre-existing test remains disabled |
 | Uncompressed destination | Device and mapped pinned-host round trips pass |
 | Cascaded | Device and mapped pinned-host round trips pass |
 | Zstd | Device and mapped pinned-host round trips pass |
 | Snappy | Device and mapped pinned-host round trips pass |
+| Automatic selection | Mixed Cascaded/Snappy output and forced raw fallback round trips pass |
+| Expert selection | Mixed raw/Cascaded/Zstd/Snappy output round trips pass and exposes expected column, role, type, and size metadata |
 | Reuse | Repeated execution into different destinations passes for every codec |
 | Complex tables | Compressed and uncompressed round trips pass for fixed-width, strings, lists, structs, nested, sliced, dictionary, empty, zero-column, and long-offset cases |
 | Typed regions | A mixed nullable `int16`/`int64`/`float32`/string test verifies distinct typed data, validity, character, and offset regions before round trip |
 | Reserved regions | Multi-region reserved-output round trips pass for Cascaded, Zstd, and Snappy |
 | Output policy | Compact and reserved compressed results pass for every codec |
 | Error handling | Undersized and misaligned destinations, codec/header mismatch, and truncated compressed input are rejected |
-| Benchmark target | `PACK_NVBENCH` builds and compares legacy, prepared uncompressed, Cascaded, Zstd, and Snappy paths, including direct legacy `unpack()` versus prepared `unpack_view()` |
+| Benchmark target | `PACK_NVBENCH` builds and compares legacy, prepared uncompressed, automatic, Cascaded, Zstd, and Snappy paths, including direct legacy `unpack()` versus prepared `unpack_view()` |
+| Buildable example | `pack_example` builds and runs automatic and expert-selection paths successfully |
 | Formatting | `git diff --check` passes |
 
 Test command:
@@ -288,12 +329,13 @@ cpp/build/gtests/COPYING_TEST --gtest_filter=PackUnpackTest.\*
 
 ### Pack, compression, and restore benchmark
 
-The `PACK_NVBENCH` target now contains five benchmarks:
+The `PACK_NVBENCH` target now contains six benchmarks:
 
 | Benchmark | Timed operation |
 | --- | --- |
 | `pack_to_pinned_host` | Legacy `pack()` plus D2H, or prepared `pack_into()` directly into mapped pinned-host memory |
 | `pack_to_device` | Legacy `pack()` or prepared `pack_into()` into device memory; includes compression when selected |
+| `encode_existing_pack_to_device` | Encode an already-created ordinary `packed_columns` allocation without timing its initial pack |
 | `restore_from_pinned_host` | Legacy H2D plus `unpack()` plus an owning table copy, or prepared `materialize()` directly from mapped pinned-host memory |
 | `restore_from_device` | Construct an owning table from an already device-resident packed payload |
 | `device_unpack_view` | Legacy `unpack()` versus prepared uncompressed `unpack_view()` over an already device-resident payload; both return borrowing views and do not copy column data |
@@ -340,16 +382,20 @@ This removes host transfer from both halves of the operation. The table reports 
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Legacy `pack()`/`unpack()` path | 16 | 0.361 ms | 0.104 ms | 0.465 ms | 64.000 MiB | 64.01 MiB | 64.00 MiB |
 | Prepared uncompressed | 16 | 0.187 ms | 0.104 ms | 0.291 ms | 64.000 MiB | 64.01 MiB | 64.00 MiB |
+| Automatic per-region policy | 16 | 1.316 ms | Not remeasured | — | 15.846 MiB | 64.03 MiB | — |
 | Cascaded typed regions | 16 | 1.291 ms | 1.132 ms | 2.423 ms | 15.846 MiB | 64.03 MiB | 64.00 MiB |
 | Zstd regions | 16 | 48.921 ms | 16.872 ms | 65.793 ms | 7.861 MiB | 64.04 MiB | 64.00 MiB |
 | Snappy regions | 16 | 16.482 ms | 2.249 ms | 18.731 ms | 9.816 MiB | 74.73 MiB | 64.00 MiB |
 | Legacy `pack()`/`unpack()` path | High | 0.367 ms | 0.106 ms | 0.473 ms | 64.000 MiB | 64.01 MiB | 64.00 MiB |
 | Prepared uncompressed | High | 0.187 ms | 0.104 ms | 0.291 ms | 64.000 MiB | 64.01 MiB | 64.00 MiB |
+| Automatic per-region policy | High | 1.326 ms | Not remeasured | — | 16.290 MiB | 64.03 MiB | — |
 | Cascaded typed regions | High | 1.331 ms | 1.080 ms | 2.411 ms | 16.290 MiB | 64.03 MiB | 64.00 MiB |
 | Zstd regions | High | 42.889 ms | 13.602 ms | 56.491 ms | 15.681 MiB | 64.04 MiB | 64.00 MiB |
 | Snappy regions | High | 16.278 ms | 3.218 ms | 19.496 ms | 25.798 MiB | 74.73 MiB | 64.00 MiB |
 
 For device-resident data, prepared uncompressed is about 8.3x faster end to end than Cascaded and about 1.6x faster than the legacy owning path on this workload. Compression only becomes competitive when its smaller retained allocation or a later host, network, or storage transfer has enough value to repay the codec cost.
+
+On this fixed-width workload, the automatic policy selects Cascaded for every data region. Its measured device-pack time and retained size are effectively identical to explicitly selecting Cascaded, so the policy and per-region dispatch add no measurable cost here. The mixed-type automatic behavior is covered separately by the unit tests and example.
 
 The compressed `table_view` path now reads canonical physical regions directly from the input columns. Compared with the former full-staging implementation, this reduces pack peak memory from 128.03 MiB to 64.03 MiB for Cascaded, from 128.04 MiB to 64.04 MiB for Zstd, and from 138.72 MiB to 74.73 MiB for Snappy. Cascaded pack time improves by 17% (1.560 to 1.291 ms at cardinality 16, and 1.597 to 1.331 ms at high cardinality). Zstd and Snappy improve by 1–2% because codec time dominates their former packing copy. These measurements use unsliced, non-nullable fixed-width columns; inputs requiring normalization still take the staging fallback.
 

@@ -32,6 +32,10 @@ implementation_config get_implementation(std::string const& name)
   using output_mode = cudf::experimental::compressed_output_mode;
   if (name == "legacy") { return {true, compression::none, output_mode::compact}; }
   if (name == "prepared-uncompressed") { return {false, compression::none, output_mode::compact}; }
+  if (name == "automatic-compact") { return {false, compression::automatic, output_mode::compact}; }
+  if (name == "automatic-reserved") {
+    return {false, compression::automatic, output_mode::reserved};
+  }
   if (name == "cascaded-compact") { return {false, compression::cascaded, output_mode::compact}; }
   if (name == "cascaded-reserved") { return {false, compression::cascaded, output_mode::reserved}; }
   if (name == "zstd-compact") { return {false, compression::zstd, output_mode::compact}; }
@@ -326,6 +330,8 @@ void bench_device_unpack_view(nvbench::state& state)
 
 auto const implementations = std::vector<std::string>{"legacy",
                                                       "prepared-uncompressed",
+                                                      "automatic-compact",
+                                                      "automatic-reserved",
                                                       "cascaded-compact",
                                                       "cascaded-reserved",
                                                       "zstd-compact",
@@ -333,8 +339,12 @@ auto const implementations = std::vector<std::string>{"legacy",
                                                       "snappy-compact",
                                                       "snappy-reserved"};
 
-auto const compact_implementations = std::vector<std::string>{
-  "legacy", "prepared-uncompressed", "cascaded-compact", "zstd-compact", "snappy-compact"};
+auto const compact_implementations = std::vector<std::string>{"legacy",
+                                                              "prepared-uncompressed",
+                                                              "automatic-compact",
+                                                              "cascaded-compact",
+                                                              "zstd-compact",
+                                                              "snappy-compact"};
 
 NVBENCH_BENCH(bench_pack_to_pinned_host)
   .set_name("pack_to_pinned_host")
@@ -350,7 +360,8 @@ NVBENCH_BENCH(bench_pack_to_device)
 
 NVBENCH_BENCH(bench_encode_existing_pack_to_device)
   .set_name("encode_existing_pack_to_device")
-  .add_string_axis("implementation", {"cascaded-compact", "zstd-compact", "snappy-compact"})
+  .add_string_axis("implementation",
+                   {"automatic-compact", "cascaded-compact", "zstd-compact", "snappy-compact"})
   .add_int64_axis("size_mib", {64})
   .add_int64_axis("cardinality", {16, 0});
 
