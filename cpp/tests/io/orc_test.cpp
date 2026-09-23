@@ -663,7 +663,7 @@ namespace {
 constexpr int64_t shanghai_offset     = cudf::duration_s{cudf::duration_h{8}}.count();
 constexpr int64_t new_york_offset     = cudf::duration_s{cudf::duration_h{-5}}.count();
 constexpr int64_t new_york_dst_offset = cudf::duration_s{cudf::duration_h{-4}}.count();
-constexpr int64_t est_offset          = cudf::duration_s{cudf::duration_h{-5}}.count();
+constexpr int64_t phoenix_offset      = cudf::duration_s{cudf::duration_h{-7}}.count();
 constexpr int64_t kolkata_offset      = cudf::duration_s{cudf::duration_m{5 * 60 + 30}}.count();
 constexpr int64_t kathmandu_offset    = cudf::duration_s{cudf::duration_m{5 * 60 + 45}}.count();
 
@@ -763,8 +763,11 @@ TEST_F(OrcWriterTest, WriterTimezoneNearEpochBorrow)
       table_view({expected}), read_orc_buffer(buffer, /*ignore_timezone=*/true, ms).tbl->view());
   };
 
+  // Neither zone has observed daylight saving time since before the epoch, so the offset at each
+  // value matches the one at the ORC epoch. One offset of each sign, since the wrong frame skips
+  // the borrow for a positive offset and applies it for a negative one.
   agrees_across_read_modes("Asia/Shanghai", shanghai_offset);
-  agrees_across_read_modes("EST", est_offset);
+  agrees_across_read_modes("America/Phoenix", phoenix_offset);
 }
 
 TEST_F(OrcWriterTest, WriterTimezoneFractionalOffset)
