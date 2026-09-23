@@ -145,17 +145,23 @@ void automatic_compressed_spill(cudf::table_view input, cuda::stream_ref stream)
 
 void expert_region_selection(cudf::table_view input, cuda::stream_ref stream)
 {
-  auto options                  = cudf::experimental::pack_options{};
-  options.region_codec_selector = [](cudf::experimental::pack_region_info const& region) {
-    if (region.kind == cudf::experimental::pack_region_kind::validity) {
-      return cudf::experimental::pack_compression::none;
-    }
-    if (region.column_index == 0) { return cudf::experimental::pack_compression::cascaded; }
-    // Returning automatic delegates just this region back to libcudf's built-in policy.
-    return cudf::experimental::pack_compression::automatic;
-  };
+  auto options        = cudf::experimental::pack_options{};
+  options.compression = cudf::experimental::pack_compression::automatic;
+  auto builder        = cudf::experimental::make_pack_plan_builder(input, options, stream);
 
-  auto plan = cudf::experimental::prepare_pack(input, options, stream);
+  for (auto& region : builder.regions()) {
+    if (region.info.kind == cudf::experimental::pack_region_kind::validity) {
+      region.options.codec = cudf::experimental::pack_compression::none;
+    } else if (region.info.column_index == 0) {
+      region.options.codec                   = cudf::experimental::pack_compression::cascaded;
+      region.options.cascaded_num_RLEs       = 1;
+      region.options.cascaded_num_deltas     = 2;
+      region.options.cascaded_use_bitpacking = true;
+    }
+    // Other regions retain the builder's inherited automatic policy.
+  }
+
+  auto plan = std::move(builder).build();
   rmm::device_buffer payload(plan.sizes().payload_bytes, stream);
   auto result = cudf::experimental::pack_into(
     plan, cudf::device_span<uint8_t>{static_cast<uint8_t*>(payload.data()), payload.size()});

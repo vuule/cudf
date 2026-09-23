@@ -19,7 +19,8 @@
 
 | Stage | API or type | Purpose | Important behavior |
 | --- | --- | --- | --- |
-| Select behavior | `pack_options` | Choose compression, codec options, and compressed-output policy | Defaults to `none`; supports libcudf-owned `automatic`, uniform explicit codecs, and an expert per-region selector; compressed output can be `compact` or `reserved` |
+| Select behavior | `pack_options` | Choose compression, uniform codec options, and compressed-output policy | Defaults to `none`; supports libcudf-owned `automatic` and uniform explicit codecs; compressed output can be `compact` or `reserved` |
+| Configure expert policy | `make_pack_plan_builder()` / `pack_plan_builder::regions()` | Discover the physical regions once and edit their codec settings before finalizing the plan | Region descriptions are immutable; codec, chunk size, minimum savings, and Cascaded parameters are mutable per region |
 | Prepare | `prepare_pack(input, options, stream, temp_mr)` | Discover buffers, compute layout, and retain reusable state | Accepts a `table_view` for fused pack-plus-compress or ordinary uncompressed `packed_columns` for late compression; bound to the input and stream |
 | Inspect capacity | `pack_plan::sizes()` | Report metadata size, destination capacity, alignment, and uncompressed size | Capacity is exact when uncompressed and the sum of aligned per-region nvCOMP upper bounds when compressed |
 | Allocate | Caller-owned storage | Let shuffle or spill code choose the destination | Must be device-accessible and satisfy the reported capacity and alignment |
@@ -41,7 +42,7 @@ These examples are limited to the shuffle and transient-spill cases raised in th
 | Emit the same prepared batch into another caller-owned destination | Reuse the same `pack_plan` | Reuses table discovery, region classification, layout, metadata, and codec setup while the input is unchanged |
 | Decide to compress after ordinary packing has completed | `prepare_pack(packed_columns, options)` | Borrows the existing packed allocation as the codec input and avoids another packing copy |
 | Let libcudf choose an appropriate codec for every region | `pack_compression::automatic` | Uses a throughput-oriented built-in policy and retains compact regions uncompressed when compression misses the configured savings threshold |
-| Apply engine-specific prior knowledge | `region_codec_selector(pack_region_info)` | Expert callback sees region index, top-level column, physical role, logical type, and byte extent; it may force a codec, retain raw bytes, or delegate a region back to `automatic` |
+| Apply engine-specific prior knowledge | `make_pack_plan_builder()` | Expert callers inspect all regions, edit each `pack_region_options`, and consume the builder with `build()`; individual regions may force a codec, remain raw, or retain `automatic` |
 
 ### Example-to-request traceability
 
@@ -104,21 +105,23 @@ auto plan = cudf::experimental::prepare_pack(input, options, stream);
 
 The initial throughput-oriented policy leaves regions smaller than `automatic_min_region_bytes` raw, selects Snappy for string-character regions, selects Cascaded for other typed regions, and—in compact mode—retains a region raw when compression saves fewer than `automatic_min_savings_bytes`. The defaults are 4 KiB and 256 bytes respectively. They are prototype policy rather than a permanent API guarantee and should be tuned with representative workloads. Reserved mode cannot inspect final frame sizes without sacrificing its asynchronous contract, so its automatic decision uses type, role, and size but does not apply the post-compression savings fallback.
 
-Specialized callers may override individual regions. The selector runs once during planning and is not retained by the plan:
+Specialized callers use a two-stage builder. Region discovery happens once; descriptions are immutable while the complete codec configuration remains editable until `build()` finalizes destination capacity and compressor state:
 
 ```cpp
-options.region_codec_selector = [](cudf::experimental::pack_region_info const& region) {
-  if (region.kind == cudf::experimental::pack_region_kind::validity) {
-    return cudf::experimental::pack_compression::none;
+auto builder = cudf::experimental::make_pack_plan_builder(input, options, stream);
+for (auto& region : builder.regions()) {
+  if (region.info.kind == cudf::experimental::pack_region_kind::validity) {
+    region.options.codec = cudf::experimental::pack_compression::none;
+  } else if (region.info.column_index == 0) {
+    region.options.codec               = cudf::experimental::pack_compression::cascaded;
+    region.options.cascaded_num_RLEs   = 1;
+    region.options.cascaded_num_deltas = 2;
   }
-  if (region.column_index == 0) {
-    return cudf::experimental::pack_compression::cascaded;
-  }
-  return cudf::experimental::pack_compression::automatic;
-};
+}
+auto plan = std::move(builder).build();
 ```
 
-`pack_region_info` exposes the stable region index within the plan, owning top-level column index, physical role (`data`, `validity`, `offsets`, or `string_characters`), logical/native type, and uncompressed extent. Returning a concrete codec forces that choice; returning `none` stores raw bytes; returning `automatic` delegates that region to libcudf's policy.
+`pack_region_info` exposes the stable region index within the plan, owning top-level column index, physical role (`data`, `validity`, `offsets`, or `string_characters`), logical/native type, and uncompressed extent. `pack_region_options` controls the codec, nvCOMP chunk size, minimum automatic savings, and Cascaded transforms for that region. A concrete codec is forced; `none` stores raw bytes; `automatic` delegates that region to libcudf's policy. The same builder interface is available for an existing ordinary `packed_columns` allocation.
 
 ### Asynchronous compressed spill with reserved capacity
 
@@ -240,7 +243,7 @@ Both executions use the stream captured by `plan`. The source table must remain 
 | Compression | Preserve uncompressed packing as the default | Met | Default-constructed `pack_options` use `pack_compression::none` |
 | Compression | Provide a good automatic per-region default | Met for prototype policy | `automatic` selects Cascaded for sufficiently large typed/offset/validity regions, Snappy for string characters, leaves small regions raw, and applies a configurable compact-output savings fallback |
 | Compression | Permit uniform explicit codec selection | Met | `pack_options` selects `cascaded`, `zstd`, or `snappy` for every region |
-| Compression | Permit expert per-region codec selection | Met | `region_codec_selector` receives region index, top-level column index, physical role, logical type, and byte extent; mixed raw/Cascaded/Zstd/Snappy round trips pass ([Slack request](https://nvidia.slack.com/archives/C0773FR630B/p1790120481822889?thread_ts=1790102556.016479&cid=C0773FR630B), [policy discussion](https://nvidia.slack.com/archives/C0773FR630B/p1790125129881049?thread_ts=1790102556.016479&cid=C0773FR630B)) |
+| Compression | Permit expert per-region codec selection | Met | `pack_plan_builder::regions()` exposes immutable region identity plus mutable codec, chunk-size, savings, and Cascaded settings; mixed raw/Cascaded/Zstd/Snappy round trips pass for both `table_view` and existing `packed_columns` inputs ([Slack request](https://nvidia.slack.com/archives/C0773FR630B/p1790120481822889?thread_ts=1790102556.016479&cid=C0773FR630B), [policy discussion](https://nvidia.slack.com/archives/C0773FR630B/p1790125129881049?thread_ts=1790102556.016479&cid=C0773FR630B)) |
 | Compression | Support nvCOMP Cascaded | Met | Device and mapped pinned-host round trips pass |
 | Compression | Support Zstd and Snappy | Met | Device and mapped pinned-host round trips pass for both codecs |
 | Compression | Support Cascade-Next | Unmet | Installed nvCOMP 5.3 exposes Cascaded but no distinct Cascade-Next API |

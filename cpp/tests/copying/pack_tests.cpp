@@ -297,6 +297,29 @@ TEST_F(PackUnpackTest, ExperimentalCompressExistingPackedColumns)
       CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
     }
   }
+
+  auto expert_options        = cudf::experimental::pack_options{};
+  expert_options.compression = cudf::experimental::pack_compression::automatic;
+  auto builder = cudf::experimental::make_pack_plan_builder(packed, expert_options, stream);
+  for (auto& region : builder.regions()) {
+    region.options.codec =
+      region.info.kind == cudf::experimental::pack_region_kind::string_characters
+        ? cudf::experimental::pack_compression::snappy
+        : cudf::experimental::pack_compression::cascaded;
+  }
+  auto expert_plan = std::move(builder).build();
+  rmm::device_buffer destination(expert_plan.sizes().payload_bytes, stream);
+  auto result = cudf::experimental::pack_into(
+    expert_plan,
+    cudf::device_span<uint8_t>{static_cast<uint8_t*>(destination.data()), destination.size()});
+  auto materialized = cudf::experimental::materialize(
+    cudf::experimental::packed_data_view{
+      result.metadata,
+      cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(destination.data()),
+                                       result.payload_bytes},
+      result.compression},
+    stream);
+  CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
 }
 
 TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireCompression)
@@ -455,24 +478,33 @@ TEST_F(PackUnpackTest, ExperimentalExpertPerRegionCompression)
   cudf::test::strings_column_wrapper strings(words.begin(), words.end());
   auto const input = cudf::table_view{{numbers, strings}};
 
+  auto options        = cudf::experimental::pack_options{};
+  options.compression = cudf::experimental::pack_compression::automatic;
+  auto builder        = cudf::experimental::make_pack_plan_builder(input, options, stream);
   std::vector<cudf::experimental::pack_region_info> observed;
-  auto options                  = cudf::experimental::pack_options{};
-  options.region_codec_selector = [&](cudf::experimental::pack_region_info const& region) {
-    observed.push_back(region);
-    switch (region.kind) {
+  for (auto& region : builder.regions()) {
+    observed.push_back(region.info);
+    region.options.compression_chunk_bytes = 32 * 1024;
+    switch (region.info.kind) {
       case cudf::experimental::pack_region_kind::validity:
-        return cudf::experimental::pack_compression::none;
+        region.options.codec = cudf::experimental::pack_compression::none;
+        break;
       case cudf::experimental::pack_region_kind::offsets:
-        return cudf::experimental::pack_compression::cascaded;
+        region.options.codec                   = cudf::experimental::pack_compression::cascaded;
+        region.options.cascaded_num_RLEs       = 1;
+        region.options.cascaded_num_deltas     = 1;
+        region.options.cascaded_use_bitpacking = true;
+        break;
       case cudf::experimental::pack_region_kind::string_characters:
-        return cudf::experimental::pack_compression::zstd;
+        region.options.codec = cudf::experimental::pack_compression::zstd;
+        break;
       case cudf::experimental::pack_region_kind::data:
-        return cudf::experimental::pack_compression::snappy;
+        region.options.codec = cudf::experimental::pack_compression::snappy;
+        break;
     }
-    return cudf::experimental::pack_compression::none;
-  };
+  }
 
-  auto plan = cudf::experimental::prepare_pack(input, options, stream);
+  auto plan = std::move(builder).build();
   ASSERT_GE(observed.size(), 4);
   EXPECT_TRUE(std::any_of(observed.begin(), observed.end(), [](auto const& region) {
     return region.column_index == 0 && region.kind == cudf::experimental::pack_region_kind::data &&

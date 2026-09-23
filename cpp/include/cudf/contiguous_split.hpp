@@ -11,7 +11,6 @@
 #include <cudf/utilities/memory_resource.hpp>
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <span>
 #include <vector>
@@ -304,13 +303,27 @@ struct pack_region_info {
 };
 
 /**
- * @brief Expert policy selecting a codec for one physical region.
+ * @brief Expert codec configuration for one physical packed region.
  *
- * Return `none` to retain the region verbatim, `automatic` to apply libcudf's built-in policy to
- * this region, or a concrete codec to force that codec. The selector runs synchronously during
- * `prepare_pack()` and is not retained by the resulting plan.
+ * `automatic` applies libcudf's built-in codec policy and permits compact output to fall back to
+ * raw bytes when compression misses `minimum_savings_bytes`. A concrete codec forces that codec.
  */
-using pack_region_codec_selector = std::function<pack_compression(pack_region_info const&)>;
+struct pack_region_options {
+  pack_compression codec{pack_compression::none};
+  std::size_t compression_chunk_bytes{64 * 1024};
+  std::size_t minimum_savings_bytes{256};
+  int cascaded_num_RLEs{2};
+  int cascaded_num_deltas{1};
+  bool cascaded_use_bitpacking{true};
+};
+
+/**
+ * @brief Immutable region description and its mutable expert codec configuration.
+ */
+struct pack_region {
+  pack_region_info const info;
+  pack_region_options options;
+};
 
 /**
  * @brief Controls whether compressed execution reports the compact size immediately.
@@ -325,7 +338,6 @@ enum class compressed_output_mode {
  */
 struct pack_options {
   pack_compression compression{pack_compression::none};
-  pack_region_codec_selector region_codec_selector{};
   compressed_output_mode output_mode{compressed_output_mode::compact};
   std::size_t compression_chunk_bytes{64 * 1024};
   std::size_t automatic_min_region_bytes{4 * 1024};
@@ -348,6 +360,7 @@ struct pack_sizes {
 };
 
 struct pack_result;
+class pack_plan_builder;
 
 /**
  * @brief Prepared state for repeatedly packing one table into caller-owned memory.
@@ -388,8 +401,64 @@ class pack_plan {
                                 pack_options const&,
                                 cuda::stream_ref,
                                 rmm::device_async_resource_ref);
+  friend class pack_plan_builder;
   friend pack_result pack_into(pack_plan const&, cudf::device_span<uint8_t>);
 };
+
+/**
+ * @brief Two-stage expert configuration for a prepared pack operation.
+ *
+ * The builder discovers physical regions once. Callers may edit only `pack_region::options`; the
+ * descriptions remain immutable. `build()` finalizes compressor state and destination capacity.
+ */
+class pack_plan_builder {
+ public:
+  pack_plan_builder(pack_plan_builder const&)            = delete;
+  pack_plan_builder& operator=(pack_plan_builder const&) = delete;
+  pack_plan_builder(pack_plan_builder&&) noexcept;
+  pack_plan_builder& operator=(pack_plan_builder&&) noexcept;
+  ~pack_plan_builder();
+
+  [[nodiscard]] std::span<pack_region> regions();
+  [[nodiscard]] std::span<pack_region const> regions() const;
+  [[nodiscard]] pack_plan build() &&;
+
+ private:
+  struct impl;
+  std::unique_ptr<impl> _impl;
+
+  explicit pack_plan_builder(std::unique_ptr<impl>&& implementation);
+
+  friend pack_plan_builder make_pack_plan_builder(cudf::table_view const&,
+                                                  pack_options const&,
+                                                  cuda::stream_ref,
+                                                  rmm::device_async_resource_ref);
+  friend pack_plan_builder make_pack_plan_builder(cudf::packed_columns const&,
+                                                  pack_options const&,
+                                                  cuda::stream_ref,
+                                                  rmm::device_async_resource_ref);
+};
+
+/**
+ * @brief Discover configurable physical regions for expert per-region codec selection.
+ *
+ * Each region initially inherits the codec and codec parameters in `options`. Callers may edit the
+ * returned regions before consuming the builder with `build()`.
+ */
+pack_plan_builder make_pack_plan_builder(
+  cudf::table_view const& input,
+  pack_options const& options            = {},
+  cuda::stream_ref stream                = cudf::get_default_stream(),
+  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Discover configurable regions in an existing uncompressed packed allocation.
+ */
+pack_plan_builder make_pack_plan_builder(
+  cudf::packed_columns const& input,
+  pack_options const& options,
+  cuda::stream_ref stream                = cudf::get_default_stream(),
+  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Prepare an exact, reusable uncompressed pack plan for `input`.
