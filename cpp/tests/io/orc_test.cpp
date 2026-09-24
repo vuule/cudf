@@ -30,6 +30,7 @@
 
 #include <cuda/iterator>
 
+#include <algorithm>
 #include <array>
 #include <numeric>
 #include <type_traits>
@@ -734,13 +735,16 @@ TEST_F(OrcWriterTest, WriterTimezoneNonUtc)
 // returned in, so both read modes agree for a zone with no daylight saving time.
 TEST_F(OrcWriterTest, WriterTimezoneNearEpochBorrow)
 {
-  // Wall clocks within the writer's offset of the Unix epoch, where the sign of the value differs
-  // between the UTC frame and the writer's. The last 999 ms before the epoch are left out, as
-  // `NegativeTimestampsNearEpoch` covers the range ORC cannot represent.
+  // The two frames disagree on the sign of a value, and so on whether it borrows, over the window
+  // between the Unix epoch and the writer's offset from it: `[-offset, 0)` for a positive offset
+  // and `[0, -offset)` for a negative one. Three values inside that window and one just outside
+  // each end. Every one has a fractional part, since a whole second never borrows, and none falls
+  // in the 999 ms before the epoch that ORC cannot represent (`NegativeTimestampsNearEpoch`).
   auto const near_epoch_ms = [](int64_t offset_s) {
-    auto const offset_ms = offset_s * 1000;
+    auto const lo = std::min<cudf::timestamp_ms::rep>(-offset_s * 1000, 0);
+    auto const hi = std::max<cudf::timestamp_ms::rep>(-offset_s * 1000, 0);
     return std::vector<cudf::timestamp_ms::rep>{
-      -7'712'117, offset_ms - 1, offset_ms + 1, offset_ms / 2, 1};
+      lo - 1'117, lo + 1, (lo + hi) / 2 + 117, hi - 1'117, hi + 1'117};
   };
 
   auto const agrees_across_read_modes = [&](std::string const& timezone, int64_t offset_s) {

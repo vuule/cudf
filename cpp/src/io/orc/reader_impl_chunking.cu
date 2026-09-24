@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "datetime/timezone_utils.hpp"
 #include "io/comp/common.hpp"
 #include "io/orc/reader_impl.hpp"
 #include "io/orc/reader_impl_chunking.hpp"
@@ -26,6 +25,7 @@
 #include <thrust/scan.h>
 
 #include <algorithm>
+#include <format>
 #include <numeric>
 #include <ranges>
 #include <tuple>
@@ -262,17 +262,17 @@ void reader_impl::preprocess_file(read_mode mode)
   // The ORC epoch as it occurs in the writer's timezone. The data stream is stored relative to it,
   // so the negative timestamp borrow has to be decided in that frame even when the timezone is
   // ignored; the writer's base offset can move a value across the epoch.
-  if (!writer_timezone.empty() && writer_timezone != "UTC") {
-    auto const utc_epoch = _file_itm_data.orc_base_epoch;
-    try {
-      _file_itm_data.orc_base_epoch =
-        utc_epoch -
-        cudf::detail::get_ut_offset(std::nullopt, writer_timezone, timestamp_s{utc_epoch});
-    } catch (cudf::logic_error const&) {
-      // Ignoring the timezone does not otherwise consult the timezone database, so an unresolvable
-      // name must keep reading as it does today rather than start throwing
-      if (!_options.ignore_timezone_in_stripe_footer) { throw; }
-    }
+  try {
+    _file_itm_data.orc_base_epoch = base_epoch_in_timezone(writer_timezone);
+  } catch (cudf::logic_error const& e) {
+    // Ignoring the timezone does not otherwise consult the timezone database, so an unresolvable
+    // name must keep reading as it does today rather than start throwing
+    if (!_options.ignore_timezone_in_stripe_footer) { throw; }
+    CUDF_LOG_WARN(std::format(
+      "Could not resolve the ORC writer timezone '{}'; the negative timestamp borrow falls back "
+      "to UTC, so timestamps within the timezone's offset of 2015-01-01 may be one second off. {}",
+      writer_timezone,
+      e.what()));
   }
 
   //
