@@ -107,7 +107,15 @@ fixed_size_list_layout get_fixed_size_list_layout(ArrowSchemaView const* arrow_v
 
   // Width zero is valid for a foreign Arrow producer even though nanoarrow's schema builder
   // rejects it. Its offsets and child bounds are all zero.
-  if (width == 0) { return {width, num_rows, input->offset, row_end, 0, 0, 0}; }
+  if (width == 0) {
+    return {.width        = width,
+            .num_rows     = num_rows,
+            .row_offset   = input->offset,
+            .row_end      = row_end,
+            .child_offset = 0,
+            .child_length = 0,
+            .child_end    = 0};
+  }
 
   CUDF_EXPECTS(row_end <= std::numeric_limits<int64_t>::max() / width,
                "fixed-size-list child bounds overflow Arrow's int64 representation",
@@ -121,8 +129,13 @@ fixed_size_list_layout get_fixed_size_list_layout(ArrowSchemaView const* arrow_v
                "row count (cudf::size_type)",
                std::overflow_error);
 
-  return {
-    width, num_rows, input->offset, row_end, input->offset * width, child_length, row_end * width};
+  return {.width        = width,
+          .num_rows     = num_rows,
+          .row_offset   = input->offset,
+          .row_end      = row_end,
+          .child_offset = input->offset * width,
+          .child_length = child_length,
+          .child_end    = row_end * width};
 }
 
 ArrowType id_to_arrow_type(cudf::type_id id)

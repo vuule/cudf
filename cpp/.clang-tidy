@@ -18,7 +18,10 @@
 # modernize-use-ranges:
 #     New check that requires a C++20 feature
 # modernize-use-designated-initializers:
-#     New check that requires a C++20 feature
+#     Designated initializers pay off where they let us drop fields that already have a default,
+#     or where an aggregate is too wide to read positionally, and we write them by hand there.
+#     Requiring a designator on every field of every aggregate init does the opposite: it spells
+#     out the defaults it could have omitted.
 # clang-analyzer-cplusplus.NewDeleteLeaks:
 #     This check has numerous bugs, see
 #     https://github.com/llvm/llvm-project/issues?q=is%3Aissue+is%3Aopen+newdeleteleaks
