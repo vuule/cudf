@@ -309,20 +309,20 @@ struct pack_region_info {
  * raw bytes when compression misses `minimum_savings_bytes`. A concrete codec forces that codec.
  */
 struct pack_region_options {
-  pack_compression codec{pack_compression::none};
-  std::size_t compression_chunk_bytes{64 * 1024};
-  std::size_t minimum_savings_bytes{256};
-  int cascaded_num_RLEs{2};
-  int cascaded_num_deltas{1};
-  bool cascaded_use_bitpacking{true};
+  pack_compression codec{pack_compression::none};  ///< Codec for this region
+  std::size_t compression_chunk_bytes{64 * 1024};  ///< nvCOMP chunk size
+  std::size_t minimum_savings_bytes{256};  ///< Minimum savings for `automatic` to keep compression
+  int cascaded_num_RLEs{2};                ///< Cascaded run-length encoding passes
+  int cascaded_num_deltas{1};              ///< Cascaded delta encoding passes
+  bool cascaded_use_bitpacking{true};      ///< Whether Cascaded applies bit-packing
 };
 
 /**
  * @brief Immutable region description and its mutable expert codec configuration.
  */
 struct pack_region {
-  pack_region_info const info;
-  pack_region_options options;
+  pack_region_info const info;  ///< Read-only region description
+  pack_region_options options;  ///< Codec configuration applied to this region
 };
 
 /**
@@ -337,20 +337,18 @@ enum class compressed_output_mode {
  * @brief Options controlling a prepared pack operation.
  */
 struct pack_options {
-  pack_compression compression{pack_compression::none};
-  compressed_output_mode output_mode{compressed_output_mode::compact};
-  std::size_t compression_chunk_bytes{64 * 1024};
-  std::size_t automatic_min_region_bytes{4 * 1024};
-  std::size_t automatic_min_savings_bytes{256};
-  int cascaded_num_RLEs{2};
-  int cascaded_num_deltas{1};
-  bool cascaded_use_bitpacking{true};
+  pack_compression compression{pack_compression::none};                 ///< Codec for every region
+  compressed_output_mode output_mode{compressed_output_mode::compact};  ///< Size-reporting policy
+  std::size_t compression_chunk_bytes{64 * 1024};                       ///< nvCOMP chunk size
+  std::size_t automatic_min_region_bytes{4 * 1024};  ///< Smaller regions stay uncompressed
+  std::size_t automatic_min_savings_bytes{256};  ///< Minimum savings for `automatic` to compress
+  int cascaded_num_RLEs{2};                      ///< Cascaded run-length encoding passes
+  int cascaded_num_deltas{1};                    ///< Cascaded delta encoding passes
+  bool cascaded_use_bitpacking{true};            ///< Whether Cascaded applies bit-packing
 };
 
 /**
  * @brief Storage requirements for a prepared pack operation.
- *
- * This is an experimental prototype. The API and representation may change without notice.
  */
 struct pack_sizes {
   std::size_t metadata_bytes;     ///< Exact host metadata size
@@ -368,19 +366,19 @@ class pack_plan_builder;
  * Construction performs layout planning once. The input table or packed columns, their metadata,
  * and all referenced buffers must remain alive and unchanged until every operation using the plan
  * has completed. A plan is bound to the stream passed to `prepare_pack()`.
- *
- * This is an experimental prototype. The API and representation may change without notice.
  */
 class pack_plan {
  public:
   pack_plan(pack_plan const&)            = delete;
   pack_plan& operator=(pack_plan const&) = delete;
-  pack_plan(pack_plan&&) noexcept;
-  pack_plan& operator=(pack_plan&&) noexcept;
+  pack_plan(pack_plan&&) noexcept;             ///< Move constructor
+  pack_plan& operator=(pack_plan&&) noexcept;  ///< Move assignment @return `*this`
   ~pack_plan();
 
   /**
    * @brief Return the exact storage requirements for this plan.
+   *
+   * @return Metadata and payload sizes and the payload alignment
    */
   [[nodiscard]] pack_sizes sizes() const;
 
@@ -415,13 +413,13 @@ class pack_plan_builder {
  public:
   pack_plan_builder(pack_plan_builder const&)            = delete;
   pack_plan_builder& operator=(pack_plan_builder const&) = delete;
-  pack_plan_builder(pack_plan_builder&&) noexcept;
-  pack_plan_builder& operator=(pack_plan_builder&&) noexcept;
+  pack_plan_builder(pack_plan_builder&&) noexcept;             ///< Move constructor
+  pack_plan_builder& operator=(pack_plan_builder&&) noexcept;  ///< Move assignment @return `*this`
   ~pack_plan_builder();
 
-  [[nodiscard]] std::span<pack_region> regions();
-  [[nodiscard]] std::span<pack_region const> regions() const;
-  [[nodiscard]] pack_plan build() &&;
+  [[nodiscard]] std::span<pack_region> regions();              ///< @return Editable regions
+  [[nodiscard]] std::span<pack_region const> regions() const;  ///< @return Read-only regions
+  [[nodiscard]] pack_plan build() &&;  ///< Consume the builder @return The configured plan
 
  private:
   struct impl;
@@ -444,6 +442,12 @@ class pack_plan_builder {
  *
  * Each region initially inherits the codec and codec parameters in `options`. Callers may edit the
  * returned regions before consuming the builder with `build()`.
+ *
+ * @param input View of the table to pack
+ * @param options Default codec options for every region
+ * @param stream Stream used for planning and subsequent `pack_into()` operations
+ * @param temp_mr Memory resource used for planning and compression staging allocations
+ * @return A builder exposing the discovered regions
  */
 pack_plan_builder make_pack_plan_builder(
   cudf::table_view const& input,
@@ -453,6 +457,12 @@ pack_plan_builder make_pack_plan_builder(
 
 /**
  * @brief Discover configurable regions in an existing uncompressed packed allocation.
+ *
+ * @param input Existing ordinary, uncompressed packed columns
+ * @param options Default codec options for every region
+ * @param stream Stream used for planning and subsequent `pack_into()` operations
+ * @param temp_mr Memory resource used for codec workspace allocations
+ * @return A builder exposing the discovered regions
  */
 pack_plan_builder make_pack_plan_builder(
   cudf::packed_columns const& input,
@@ -547,9 +557,9 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
  * @brief Non-owning view of packed host metadata and device-accessible payload bytes.
  */
 struct packed_data_view {
-  std::span<uint8_t const> metadata;
-  cudf::device_span<uint8_t const> payload;
-  pack_compression compression{pack_compression::none};
+  std::span<uint8_t const> metadata;                     ///< Host metadata from `pack_into()`
+  cudf::device_span<uint8_t const> payload;              ///< Device-accessible payload bytes
+  pack_compression compression{pack_compression::none};  ///< Representation of `payload`
 };
 
 /**
