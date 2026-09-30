@@ -1300,8 +1300,11 @@ struct cast_variant_string_fn {
 // An empty `list<uint8>` column: the shape a VARIANT field extraction produces for an empty input.
 std::unique_ptr<column> make_empty_variant_value_column()
 {
-  return cudf::make_lists_column(
-    0, make_empty_column(type_id::INT32), make_empty_column(type_id::UINT8), 0, {});
+  return cudf::make_lists_column(0,
+                                 make_empty_column(type_id::INT32),
+                                 make_empty_column(type_id::UINT8),
+                                 0,
+                                 cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 void validate_variant_child(column_view const& child)
@@ -1381,7 +1384,8 @@ struct cast_variant_fn {
   size_type num_rows;
   data_type desired_type;
   bitmask_type* d_null_mask;
-  rmm::device_buffer null_mask;
+  cuda::device_buffer<std::byte> null_mask{
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED)};
   cuda::stream_ref stream;
   rmm::device_async_resource_ref mr;
   // In-out status tracking; null when no status was requested.
@@ -1404,7 +1408,9 @@ struct cast_variant_fn {
     return std::make_unique<column>(desired_type,
                                     num_rows,
                                     std::move(data),
-                                    null_count > 0 ? std::move(null_mask) : rmm::device_buffer{},
+                                    null_count > 0
+                                      ? std::move(null_mask)
+                                      : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                     null_count);
   }
 
@@ -1426,7 +1432,9 @@ struct cast_variant_fn {
     return std::make_unique<column>(desired_type,
                                     num_rows,
                                     std::move(data),
-                                    null_count > 0 ? std::move(null_mask) : rmm::device_buffer{},
+                                    null_count > 0
+                                      ? std::move(null_mask)
+                                      : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                     null_count);
   }
 
@@ -1467,7 +1475,9 @@ struct cast_variant_fn {
     return std::make_unique<column>(desired_type,
                                     num_rows,
                                     std::move(data),
-                                    null_count > 0 ? std::move(null_mask) : rmm::device_buffer{},
+                                    null_count > 0
+                                      ? std::move(null_mask)
+                                      : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                     null_count);
   }
 
@@ -1485,7 +1495,9 @@ struct cast_variant_fn {
                                std::move(offsets_column),
                                chars.release(),
                                null_count,
-                               null_count > 0 ? std::move(null_mask) : rmm::device_buffer{});
+                               null_count > 0
+                                 ? std::move(null_mask)
+                                 : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   }
 
   template <typename T>
@@ -1551,17 +1563,21 @@ std::unique_ptr<column> build_path_column(cudf::host_span<std::string const> ste
   }
   host_offsets[depth] = host_chars.size();
 
-  auto d_offsets   = cudf::detail::make_device_uvector_async(host_offsets, stream, mr);
-  auto offsets_col = std::make_unique<column>(data_type{type_id::INT32},
-                                              static_cast<size_type>(host_offsets.size()),
-                                              d_offsets.release(),
-                                              rmm::device_buffer{},
-                                              0);
+  auto d_offsets = cudf::detail::make_device_uvector_async(host_offsets, stream, mr);
+  auto offsets_col =
+    std::make_unique<column>(data_type{type_id::INT32},
+                             static_cast<size_type>(host_offsets.size()),
+                             d_offsets.release(),
+                             cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+                             0);
 
   auto d_chars = cudf::detail::make_device_uvector(
     host_span<char const>{host_chars.data(), host_chars.size()}, stream, mr);
-  return cudf::make_strings_column(
-    depth, std::move(offsets_col), d_chars.release(), 0, rmm::device_buffer{});
+  return cudf::make_strings_column(depth,
+                                   std::move(offsets_col),
+                                   d_chars.release(),
+                                   0,
+                                   cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 }  // namespace
@@ -1614,7 +1630,7 @@ std::unique_ptr<column> get_variant_field(column_view const& variant_column,
     variant_column.nullable()
       ? cudf::detail::copy_bitmask(variant_column, stream, mr)
       : cudf::create_null_mask(variant_column.size(), mask_state::ALL_VALID, stream, mr);
-  auto* d_null_mask = static_cast<bitmask_type*>(null_mask.data());
+  auto* d_null_mask = reinterpret_cast<bitmask_type*>(null_mask.data());
 
   auto grid = cudf::detail::grid_1d{num_rows, block_size};
 
@@ -1667,7 +1683,9 @@ std::unique_ptr<column> get_variant_field(column_view const& variant_column,
                            std::move(offsets_column),
                            std::move(val_child),
                            null_count,
-                           null_count > 0 ? std::move(null_mask) : rmm::device_buffer{});
+                           null_count > 0
+                             ? std::move(null_mask)
+                             : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
 std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
@@ -1743,10 +1761,11 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   cudf::lists_column_device_view val_lists_device_view(*val_device_view);
 
   // Input row validity, copied so that it is indexable by row regardless of any slice offset
-  auto const row_mask     = variant_column.nullable()
-                              ? cudf::detail::copy_bitmask(variant_column, stream, temp_mr)
-                              : rmm::device_buffer{};
-  auto const* d_row_valid = static_cast<bitmask_type const*>(row_mask.data());
+  auto const row_mask =
+    variant_column.nullable()
+      ? cudf::detail::copy_bitmask(variant_column, stream, temp_mr)
+      : cudf::detail::create_null_mask(0, mask_state::UNALLOCATED, stream, temp_mr);
+  auto const* d_row_valid = reinterpret_cast<bitmask_type const*>(row_mask.data());
 
   // Per-path outputs are contiguous, so each path's sizes can be scanned on their own. The scan
   // below runs over one extra element per path, so bound that rather than just the output count.
@@ -1759,12 +1778,12 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   rmm::device_uvector<size_type> d_src_offsets(num_outputs, stream, temp_mr);
 
   // One null mask per output column, narrowed from all-valid by the walk
-  std::vector<rmm::device_buffer> null_masks;
+  std::vector<cuda::device_buffer<std::byte>> null_masks;
   null_masks.reserve(num_paths);
   auto h_null_masks = cudf::detail::make_pinned_vector_async<bitmask_type*>(num_paths, stream);
   for (size_type p = 0; p < num_paths; ++p) {
     null_masks.push_back(cudf::create_null_mask(num_rows, mask_state::ALL_VALID, stream, mr));
-    h_null_masks[p] = static_cast<bitmask_type*>(null_masks.back().data());
+    h_null_masks[p] = reinterpret_cast<bitmask_type*>(null_masks.back().data());
   }
   auto const d_null_masks = cudf::detail::make_device_uvector_async(h_null_masks, stream, temp_mr);
 
@@ -1951,12 +1970,13 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
 
   for (size_type p = 0; p < num_paths; ++p) {
     auto const null_count = num_rows - static_cast<size_type>(totals_and_nulls[num_paths + p]);
-    output.push_back(
-      make_lists_column(num_rows,
-                        std::move(offsets_columns[p]),
-                        std::move(value_children[p]),
-                        null_count,
-                        null_count > 0 ? std::move(null_masks[p]) : rmm::device_buffer{}));
+    output.push_back(make_lists_column(
+      num_rows,
+      std::move(offsets_columns[p]),
+      std::move(value_children[p]),
+      null_count,
+      null_count > 0 ? std::move(null_masks[p])
+                     : cudf::detail::create_null_mask(0, mask_state::UNALLOCATED, stream, mr)));
   }
 
   return std::make_unique<table>(std::move(output));
@@ -1985,7 +2005,7 @@ std::unique_ptr<column> cast_variant(column_view const& values,
   auto null_mask    = values.nullable()
                         ? cudf::detail::copy_bitmask(values, stream, mr)
                         : cudf::create_null_mask(num_rows, mask_state::ALL_VALID, stream, mr);
-  auto* d_null_mask = static_cast<bitmask_type*>(null_mask.data());
+  auto* d_null_mask = reinterpret_cast<bitmask_type*>(null_mask.data());
 
   return cudf::type_dispatcher(
     desired_type,
@@ -2049,7 +2069,7 @@ std::unique_ptr<column> get_variant_type_id(column_view const& values,
   auto null_mask    = values.nullable()
                         ? cudf::detail::copy_bitmask(values, stream, mr)
                         : cudf::create_null_mask(num_rows, mask_state::ALL_VALID, stream, mr);
-  auto* d_null_mask = static_cast<bitmask_type*>(null_mask.data());
+  auto* d_null_mask = reinterpret_cast<bitmask_type*>(null_mask.data());
 
   rmm::device_buffer data{static_cast<std::size_t>(num_rows) * sizeof(uint8_t), stream, mr};
 
@@ -2070,7 +2090,9 @@ std::unique_ptr<column> get_variant_type_id(column_view const& values,
   return std::make_unique<column>(data_type{type_id::UINT8},
                                   num_rows,
                                   std::move(data),
-                                  null_count > 0 ? std::move(null_mask) : rmm::device_buffer{},
+                                  null_count > 0
+                                    ? std::move(null_mask)
+                                    : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                                   null_count);
 }
 
