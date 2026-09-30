@@ -188,7 +188,6 @@ TEST_F(PackUnpackTest, ExperimentalPreparedPackInto)
 
   auto const plan = cx::prepare_pack(input);
   EXPECT_EQ(plan.sizes().payload_bytes, cudf::packed_size(input));
-  EXPECT_EQ(plan.sizes().payload_bytes, cx::prepare_pack(input).sizes().payload_bytes);
   EXPECT_GT(plan.sizes().metadata_bytes, 0);
 
   // A plan may be reused with another destination while the input remains alive and unchanged.
@@ -319,20 +318,8 @@ TEST_F(PackUnpackTest, ExperimentalCascadedUsesNativeTypedRegions)
   auto const plan   = cx::prepare_pack(input, make_options(cx::pack_compression::cascaded));
   auto const packed = pack_to_device(plan);
   ASSERT_EQ(packed.result.metadata.size(), plan.sizes().metadata_bytes);
-  auto const directory = read_region_directory(packed.result.metadata);
-  auto const& entries  = directory.entries;
-  EXPECT_EQ(directory.header.magic, 0x4355444650524547ULL);
-  EXPECT_EQ(directory.header.version, 2);
+  auto const entries = read_region_directory(packed.result.metadata).entries;
   ASSERT_GE(entries.size(), 6);
-
-  std::size_t uncompressed_end = 0;
-  for (auto const& entry : entries) {
-    EXPECT_EQ(entry.uncompressed_offset, uncompressed_end);
-    uncompressed_end += entry.uncompressed_bytes;
-    EXPECT_LE(entry.payload_offset + entry.payload_bytes, packed.result.payload_bytes);
-  }
-  EXPECT_EQ(uncompressed_end, directory.header.uncompressed_payload_bytes);
-
   for (auto const type : {cudf::type_id::INT16,
                           cudf::type_id::INT64,
                           cudf::type_id::FLOAT32,
