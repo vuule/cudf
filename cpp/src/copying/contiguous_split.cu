@@ -3329,6 +3329,7 @@ std::span<pack_region const> pack_plan_builder::regions() const
 
 pack_plan pack_plan_builder::build() &&
 {
+  CUDF_FUNC_RANGE();
   CUDF_EXPECTS(_impl != nullptr, "Cannot build a moved-from pack plan builder");
   auto const builder = std::move(_impl);
   return pack_plan{
@@ -3350,6 +3351,7 @@ pack_plan_builder make_pack_plan_builder(cudf::table_view const& input,
                                          cuda::stream_ref stream,
                                          rmm::device_async_resource_ref temp_mr)
 {
+  CUDF_FUNC_RANGE();
   return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
     make_plan_input(input, stream, temp_mr), options, temp_mr)};
 }
@@ -3359,6 +3361,7 @@ pack_plan_builder make_pack_plan_builder(cudf::packed_columns const& input,
                                          cuda::stream_ref stream,
                                          rmm::device_async_resource_ref temp_mr)
 {
+  CUDF_FUNC_RANGE();
   return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
     make_plan_input(input, stream, temp_mr), options, temp_mr)};
 }
@@ -3367,6 +3370,7 @@ pack_plan prepare_pack(cudf::table_view const& input,
                        cuda::stream_ref stream,
                        rmm::device_async_resource_ref temp_mr)
 {
+  CUDF_FUNC_RANGE();
   return prepare_pack(input, pack_options{}, stream, temp_mr);
 }
 
@@ -3375,6 +3379,7 @@ pack_plan prepare_pack(cudf::table_view const& input,
                        cuda::stream_ref stream,
                        rmm::device_async_resource_ref temp_mr)
 {
+  CUDF_FUNC_RANGE();
   return pack_plan{std::make_unique<pack_plan::impl>(
     make_prepared_pack_components(make_plan_input(input, stream, temp_mr), options, temp_mr))};
 }
@@ -3384,6 +3389,7 @@ pack_plan prepare_pack(cudf::packed_columns const& input,
                        cuda::stream_ref stream,
                        rmm::device_async_resource_ref temp_mr)
 {
+  CUDF_FUNC_RANGE();
   CUDF_EXPECTS(options.compression != pack_compression::none,
                "The packed_columns overload requires a compressed output representation");
   return pack_plan{std::make_unique<pack_plan::impl>(
@@ -3392,6 +3398,7 @@ pack_plan prepare_pack(cudf::packed_columns const& input,
 
 pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destination)
 {
+  CUDF_FUNC_RANGE();
   CUDF_EXPECTS(plan._impl != nullptr, "Cannot execute a moved-from pack plan");
   auto const& impl  = *plan._impl;
   auto const& sizes = impl.storage_sizes;
@@ -3576,6 +3583,7 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
 
 table_view unpack_view(packed_data_view input)
 {
+  CUDF_FUNC_RANGE();
   CUDF_EXPECTS(input.compression == pack_compression::none,
                "Compressed packed data cannot be exposed as a zero-copy table view");
   if (input.metadata.empty()) { return table_view{}; }
