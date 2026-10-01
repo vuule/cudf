@@ -20,6 +20,7 @@
 #include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/integer_utils.hpp>
+#include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/dictionary/dictionary_column_view.hpp>
 #include <cudf/io/detail/codec.hpp>
@@ -55,6 +56,7 @@
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
 
 namespace cudf {
 namespace {
@@ -2613,27 +2615,53 @@ void decompress_batch(pack_compression codec,
                       cuda::stream_ref stream)
 {
   if (codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream); }
-  if (codec != pack_compression::cascaded) {
-    return cudf::io::detail::decompress(
-      to_io_compression(codec), inputs, outputs, results, max_chunk_bytes, total_bytes, stream);
-  }
-  auto args = cudf::io::detail::nvcomp::create_batched_nvcomp_args(inputs, outputs, stream);
-  rmm::device_uvector<std::size_t> actual_bytes(inputs.size(), stream);
-  rmm::device_uvector<nvcompStatus_t> statuses(inputs.size(), stream);
-  CUDF_EXPECTS(nvcompBatchedCascadedDecompressAsync(args.input_data_ptrs.data(),
-                                                    args.input_data_sizes.data(),
-                                                    args.output_data_sizes.data(),
-                                                    actual_bytes.data(),
-                                                    inputs.size(),
-                                                    nullptr,
-                                                    0,
-                                                    args.output_data_ptrs.data(),
-                                                    nvcompBatchedCascadedDecompressDefaultOpts,
-                                                    statuses.data(),
-                                                    stream.get()) == nvcompSuccess,
-               "Failed to launch Cascaded decompression");
-  cudf::io::detail::nvcomp::update_compression_results(statuses, actual_bytes, results, stream);
+  cudf::io::detail::decompress(
+    to_io_compression(codec), inputs, outputs, results, max_chunk_bytes, total_bytes, stream);
 }
+
+/**
+ * @brief A Cascaded decompression call whose device arguments are allocated on construction.
+ *
+ * Launching on a forked stream then allocates nothing there; freeing memory on several streams
+ * slows later allocations from a CUDA async memory pool.
+ */
+class cascaded_decompression {
+ public:
+  cascaded_decompression(device_span<device_span<uint8_t const> const> inputs,
+                         device_span<device_span<uint8_t> const> outputs,
+                         device_span<codec_exec_result> results,
+                         cuda::stream_ref stream)
+    : _args{cudf::io::detail::nvcomp::create_batched_nvcomp_args(inputs, outputs, stream)},
+      _actual_bytes(inputs.size(), stream),
+      _statuses(inputs.size(), stream),
+      _results{results}
+  {
+  }
+
+  void launch(cuda::stream_ref stream)
+  {
+    CUDF_EXPECTS(nvcompBatchedCascadedDecompressAsync(_args.input_data_ptrs.data(),
+                                                      _args.input_data_sizes.data(),
+                                                      _args.output_data_sizes.data(),
+                                                      _actual_bytes.data(),
+                                                      _results.size(),
+                                                      nullptr,
+                                                      0,
+                                                      _args.output_data_ptrs.data(),
+                                                      nvcompBatchedCascadedDecompressDefaultOpts,
+                                                      _statuses.data(),
+                                                      stream.get()) == nvcompSuccess,
+                 "Failed to launch Cascaded decompression");
+    cudf::io::detail::nvcomp::update_compression_results(
+      _statuses, _actual_bytes, _results, stream);
+  }
+
+ private:
+  cudf::io::detail::nvcomp::batched_args _args;
+  rmm::device_uvector<std::size_t> _actual_bytes;
+  rmm::device_uvector<nvcompStatus_t> _statuses;
+  device_span<codec_exec_result> _results;
+};
 
 // nvCOMP fails to decompress a Cascaded batch whose chunks have different data types.
 struct decompression_work {
@@ -3712,30 +3740,58 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     }
   }
 
-  auto const temp_mr = cudf::get_current_device_resource_ref();
-  std::vector<rmm::device_uvector<codec_exec_result>> results;
+  if (work.empty()) { return std::make_unique<table>(std::move(columns)); }
+
+  // Descriptors for all codecs go up in one copy and their results come back in one copy.
+  std::vector<std::size_t> work_offsets{0};
+  std::vector<device_span<uint8_t const>> inputs;
+  std::vector<device_span<uint8_t>> outputs;
   for (auto const& codec : work) {
-    auto const d_inputs  = cudf::detail::make_device_uvector(codec.inputs, stream, temp_mr);
-    auto const d_outputs = cudf::detail::make_device_uvector(codec.outputs, stream, temp_mr);
-    auto& codec_results  = results.emplace_back(codec.inputs.size(), stream, temp_mr);
-    thrust::fill(rmm::exec_policy_nosync(stream, temp_mr),
-                 codec_results.begin(),
-                 codec_results.end(),
-                 codec_exec_result{0, codec_status::FAILURE});
-    decompress_batch(codec.codec,
-                     d_inputs,
-                     d_outputs,
-                     codec_results,
-                     codec.max_chunk_bytes,
-                     codec.total_bytes,
-                     stream);
+    inputs.insert(inputs.end(), codec.inputs.begin(), codec.inputs.end());
+    outputs.insert(outputs.end(), codec.outputs.begin(), codec.outputs.end());
+    work_offsets.push_back(inputs.size());
+  }
+  auto const temp_mr   = cudf::get_current_device_resource_ref();
+  auto const d_inputs  = cudf::detail::make_device_uvector_async(inputs, stream, temp_mr);
+  auto const d_outputs = cudf::detail::make_device_uvector_async(outputs, stream, temp_mr);
+  rmm::device_uvector<codec_exec_result> results(inputs.size(), stream, temp_mr);
+  thrust::fill(rmm::exec_policy_nosync(stream, temp_mr),
+               results.begin(),
+               results.end(),
+               codec_exec_result{0, codec_status::FAILURE});
+
+  auto const spans = [&](std::size_t i) {
+    auto const begin = work_offsets[i];
+    auto const count = work_offsets[i + 1] - begin;
+    return std::tuple{device_span<device_span<uint8_t const> const>{d_inputs}.subspan(begin, count),
+                      device_span<device_span<uint8_t> const>{d_outputs}.subspan(begin, count),
+                      device_span<codec_exec_result>{results}.subspan(begin, count)};
+  };
+  // Each Cascaded data type needs its own call, so the calls run on forked streams.
+  std::vector<cascaded_decompression> cascaded;
+  for (std::size_t i = 0; i < work.size(); ++i) {
+    if (work[i].codec != pack_compression::cascaded) { continue; }
+    auto const [d_in, d_out, d_results] = spans(i);
+    cascaded.emplace_back(d_in, d_out, d_results, stream);
+  }
+  auto const forked = cudf::detail::fork_streams(stream, cascaded.size());
+  for (std::size_t k = 0; k < cascaded.size(); ++k) {
+    cascaded[k].launch(forked[k]);
   }
   for (std::size_t i = 0; i < work.size(); ++i) {
+    if (work[i].codec == pack_compression::cascaded) { continue; }
+    auto const [d_in, d_out, d_results] = spans(i);
+    decompress_batch(
+      work[i].codec, d_in, d_out, d_results, work[i].max_chunk_bytes, work[i].total_bytes, stream);
+  }
+  cudf::detail::join_streams(forked, stream);
+
+  auto const h_results = cudf::detail::make_std_vector(results, stream);
+  for (std::size_t i = 0; i < work.size(); ++i) {
     if (work[i].codec == pack_compression::none) { continue; }
-    auto const h_results = cudf::detail::make_std_vector(results[i], stream);
-    for (std::size_t k = 0; k < h_results.size(); ++k) {
+    for (std::size_t k = work_offsets[i]; k < work_offsets[i + 1]; ++k) {
       CUDF_EXPECTS(h_results[k].status == codec_status::SUCCESS &&
-                     h_results[k].bytes_written == work[i].outputs[k].size(),
+                     h_results[k].bytes_written == outputs[k].size(),
                    "Decompression failed");
     }
   }
