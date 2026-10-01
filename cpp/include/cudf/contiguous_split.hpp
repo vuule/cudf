@@ -276,9 +276,9 @@ namespace experimental {
 enum class pack_compression {
   none,       ///< Preserve the current uncompressed packed representation
   automatic,  ///< Select a codec independently for each physical region
-  cascaded,   ///< nvCOMP Cascaded with an NVCOMP_NATIVE self-describing bitstream
-  zstd,       ///< nvCOMP Zstd with an NVCOMP_NATIVE self-describing bitstream
-  snappy,     ///< nvCOMP Snappy with an NVCOMP_NATIVE self-describing bitstream
+  cascaded,   ///< nvCOMP Cascaded
+  zstd,       ///< Zstd
+  snappy,     ///< Snappy
 };
 
 /**
@@ -305,16 +305,17 @@ struct pack_region_info {
 /**
  * @brief Expert codec configuration for one physical packed region.
  *
- * `automatic` applies libcudf's built-in codec policy and permits compact output to fall back to
- * raw bytes when compression misses `minimum_savings_bytes`. A concrete codec forces that codec.
+ * `automatic` applies libcudf's built-in codec policy and permits compact output to store a chunk
+ * raw when compressing it misses `minimum_savings_bytes`. A concrete codec forces that codec.
  */
 struct pack_region_options {
   pack_compression codec{pack_compression::none};  ///< Codec for this region
-  std::size_t compression_chunk_bytes{64 * 1024};  ///< nvCOMP chunk size
-  std::size_t minimum_savings_bytes{256};  ///< Minimum savings for `automatic` to keep compression
-  int cascaded_num_RLEs{2};                ///< Cascaded run-length encoding passes
-  int cascaded_num_deltas{1};              ///< Cascaded delta encoding passes
-  bool cascaded_use_bitpacking{true};      ///< Whether Cascaded applies bit-packing
+  std::size_t compression_chunk_bytes{64 * 1024};  ///< Uncompressed bytes per compression chunk
+  std::size_t minimum_savings_bytes{
+    256};                              ///< Minimum savings per chunk for `automatic` to compress
+  int cascaded_num_RLEs{2};            ///< Cascaded run-length encoding passes
+  int cascaded_num_deltas{1};          ///< Cascaded delta encoding passes
+  bool cascaded_use_bitpacking{true};  ///< Whether Cascaded applies bit-packing
 };
 
 /**
@@ -339,12 +340,14 @@ enum class compressed_output_mode {
 struct pack_options {
   pack_compression compression{pack_compression::none};                 ///< Codec for every region
   compressed_output_mode output_mode{compressed_output_mode::compact};  ///< Size-reporting policy
-  std::size_t compression_chunk_bytes{64 * 1024};                       ///< nvCOMP chunk size
+  std::size_t compression_chunk_bytes{64 * 1024};    ///< Uncompressed bytes per compression chunk
   std::size_t automatic_min_region_bytes{4 * 1024};  ///< Smaller regions stay uncompressed
-  std::size_t automatic_min_savings_bytes{256};  ///< Minimum savings for `automatic` to compress
-  int cascaded_num_RLEs{2};                      ///< Cascaded run-length encoding passes
-  int cascaded_num_deltas{1};                    ///< Cascaded delta encoding passes
-  bool cascaded_use_bitpacking{true};            ///< Whether Cascaded applies bit-packing
+  std::size_t automatic_min_savings_bytes{256};      ///< Minimum savings per chunk to compress
+  int cascaded_num_RLEs{2};                          ///< Cascaded run-length encoding passes
+  int cascaded_num_deltas{1};                        ///< Cascaded delta encoding passes
+  bool cascaded_use_bitpacking{true};                ///< Whether Cascaded applies bit-packing
+  /// Device memory `pack_into()` uses to stage host output and to compact compressed output
+  std::size_t staging_buffer_bytes{128 * 1024 * 1024};
 };
 
 /**
@@ -487,9 +490,10 @@ pack_plan prepare_pack(
  * @brief Prepare a reusable pack plan with explicit compression options.
  *
  * Compression first creates the normalized contiguous representation, then independently
- * compresses each physical column buffer (data, offsets, characters, or validity) as an nvCOMP
- * native bitstream. Cascaded is configured with the native width and signedness of each region
- * when nvCOMP supports it. `sizes().payload_bytes` is the combined upper-bound capacity;
+ * compresses each physical column buffer (data, offsets, characters, or validity) in chunks of
+ * `compression_chunk_bytes`. The chunks of all regions that share a codec are compressed in one
+ * batched call. Cascaded is configured with the native width and signedness of each region when
+ * nvCOMP supports it. `sizes().payload_bytes` is the combined upper-bound capacity;
  * `pack_into()` reports either the compact prefix or reserved capacity selected by `options`.
  *
  * @param input View of the table to pack
@@ -539,11 +543,18 @@ struct pack_result {
 };
 
 /**
- * @brief Execute a prepared pack directly into caller-owned device-accessible memory.
+ * @brief Execute a prepared pack into caller-owned device or host memory.
  *
- * `destination` may be device memory or mapped pinned-host memory. It must contain at least
- * `plan.sizes().payload_bytes` bytes. Work is submitted to the stream captured by the plan.
- * The caller must preserve the input and destination until that stream reaches the operation.
+ * `destination` may be device memory, pinned host memory, or pageable host memory; it must contain
+ * at least `plan.sizes().payload_bytes` bytes. Host destinations are written with DMA copies
+ * through `pack_options::staging_buffer_bytes` of temporary device memory, twice that for compact
+ * compressed output, so packing for spilling needs no device allocation proportional to the
+ * table. Compact compressed output to device memory also stages through that buffer. Zstd and
+ * Snappy take about as long per staged window as for a whole table, so a buffer smaller than the
+ * compressed payload's capacity slows them down.
+ *
+ * Work is submitted to the stream captured by the plan. The caller must preserve the input and
+ * destination until that stream reaches the operation.
  *
  * The same plan may be executed repeatedly while its input remains valid and unchanged.
  *
@@ -558,7 +569,7 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
  */
 struct packed_data_view {
   std::span<uint8_t const> metadata;                     ///< Host metadata from `pack_into()`
-  cudf::device_span<uint8_t const> payload;              ///< Device-accessible payload bytes
+  cudf::device_span<uint8_t const> payload;              ///< Device, pinned, or pageable bytes
   pack_compression compression{pack_compression::none};  ///< Representation of `payload`
 };
 
@@ -575,6 +586,8 @@ table_view unpack_view(packed_data_view input);
 
 /**
  * @brief Materialize an owning table from any supported packed representation.
+ *
+ * A pageable host payload is first copied to temporary device memory.
  *
  * @param input Packed metadata and payload
  * @param stream Stream used for the deep copy

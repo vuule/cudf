@@ -12,6 +12,7 @@
 
 #include <cudf/contiguous_split.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/detail/utilities/host_vector.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 
 #include <algorithm>
@@ -33,6 +34,7 @@ struct compressed_region_header {
   uint64_t magic;
   uint32_t version;
   uint32_t num_regions;
+  uint64_t num_chunks;
   uint64_t legacy_metadata_bytes;
   uint64_t uncompressed_payload_bytes;
 };
@@ -40,8 +42,10 @@ struct compressed_region_header {
 struct compressed_region_entry {
   uint64_t uncompressed_offset;
   uint64_t uncompressed_bytes;
-  uint64_t payload_offset;
-  uint64_t payload_bytes;
+  uint64_t data_bytes;
+  uint64_t chunk_bytes;
+  uint64_t chunk_begin;
+  uint64_t num_chunks;
   int32_t type;
   uint32_t is_validity;
   int32_t compression;
@@ -77,6 +81,18 @@ cx::pack_options make_options(
   return options;
 }
 
+// Small chunks and staging force pack_into() through many staging windows.
+cx::pack_options make_windowed_options(cx::pack_compression compression,
+                                       cx::compressed_output_mode output_mode)
+{
+  auto options                    = make_options(compression, output_mode);
+  options.compression_chunk_bytes = 1024;
+  options.staging_buffer_bytes    = 8 * 1024;
+  return options;
+}
+
+enum class destination_kind { device, pinned, pageable };
+
 cudf::device_span<uint8_t> as_span(rmm::device_buffer& buffer)
 {
   return {static_cast<uint8_t*>(buffer.data()), buffer.size()};
@@ -84,22 +100,51 @@ cudf::device_span<uint8_t> as_span(rmm::device_buffer& buffer)
 
 struct packed_output {
   rmm::device_buffer buffer;
+  cudf::detail::host_vector<uint8_t> pinned;
+  std::vector<uint8_t> pageable;
   cx::pack_result result;
+  uint8_t const* data;
 
   [[nodiscard]] cx::packed_data_view view() const
   {
     return {result.metadata,
-            cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(buffer.data()),
-                                             result.payload_bytes},
+            cudf::device_span<uint8_t const>{data, result.payload_bytes},
             result.compression};
   }
 };
 
+packed_output pack_to(cx::pack_plan const& plan, destination_kind kind)
+{
+  auto const stream = cudf::get_default_stream();
+  auto const bytes  = plan.sizes().payload_bytes;
+  auto const align  = plan.sizes().payload_alignment;
+  packed_output output{rmm::device_buffer(kind == destination_kind::device ? bytes : 0, stream),
+                       cudf::detail::make_pinned_vector_async<uint8_t>(
+                         kind == destination_kind::pinned ? bytes : 0, stream),
+                       std::vector<uint8_t>(kind == destination_kind::pageable ? bytes + align : 0),
+                       {},
+                       nullptr};
+  cudf::device_span<uint8_t> destination;
+  switch (kind) {
+    case destination_kind::device: destination = as_span(output.buffer); break;
+    case destination_kind::pinned:
+      destination = {output.pinned.data(), output.pinned.size()};
+      break;
+    case destination_kind::pageable: {
+      auto const base = reinterpret_cast<std::uintptr_t>(output.pageable.data());
+      destination     = {reinterpret_cast<uint8_t*>((base + align - 1) / align * align), bytes};
+      break;
+    }
+  }
+  output.result = cx::pack_into(plan, destination);
+  output.data   = destination.data();
+  stream.sync();
+  return output;
+}
+
 packed_output pack_to_device(cx::pack_plan const& plan)
 {
-  rmm::device_buffer buffer(plan.sizes().payload_bytes, cudf::get_default_stream());
-  auto result = cx::pack_into(plan, as_span(buffer));
-  return {std::move(buffer), std::move(result)};
+  return pack_to(plan, destination_kind::device);
 }
 
 void expect_materializes_to(cudf::table_view const& expected, cx::packed_data_view const& packed)
@@ -138,16 +183,25 @@ struct PackUnpackTest : public cudf::test::BaseFixture {
     for (auto const compression : compressed_codecs) {
       for (auto const output_mode :
            {cx::compressed_output_mode::compact, cx::compressed_output_mode::reserved}) {
-        SCOPED_TRACE(static_cast<int>(compression));
-        SCOPED_TRACE(static_cast<int>(output_mode));
-        auto const plan   = cx::prepare_pack(input, make_options(compression, output_mode));
-        auto const packed = pack_to_device(plan);
-        EXPECT_EQ(packed.result.compression, compression);
-        EXPECT_EQ(packed.result.output_mode, output_mode);
-        if (output_mode == cx::compressed_output_mode::reserved) {
-          EXPECT_EQ(packed.result.payload_bytes, plan.sizes().payload_bytes);
+        for (auto const windowed : {false, true}) {
+          auto const options = windowed ? make_windowed_options(compression, output_mode)
+                                        : make_options(compression, output_mode);
+          auto const plan    = cx::prepare_pack(input, options);
+          for (auto const kind :
+               {destination_kind::device, destination_kind::pinned, destination_kind::pageable}) {
+            SCOPED_TRACE(static_cast<int>(compression));
+            SCOPED_TRACE(static_cast<int>(output_mode));
+            SCOPED_TRACE(windowed);
+            SCOPED_TRACE(static_cast<int>(kind));
+            auto const packed = pack_to(plan, kind);
+            EXPECT_EQ(packed.result.compression, compression);
+            EXPECT_EQ(packed.result.output_mode, output_mode);
+            if (output_mode == cx::compressed_output_mode::reserved) {
+              EXPECT_EQ(packed.result.payload_bytes, plan.sizes().payload_bytes);
+            }
+            expect_materializes_to(input, packed.view());
+          }
         }
-        expect_materializes_to(input, packed.view());
       }
     }
   }
@@ -200,9 +254,8 @@ TEST_F(PackUnpackTest, ExperimentalPreparedPackInto)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalPackIntoPinnedHost)
+TEST_F(PackUnpackTest, ExperimentalPackIntoHost)
 {
-  auto const stream = cudf::get_default_stream();
   cudf::test::fixed_width_column_wrapper<int64_t> numbers({10, 20, 30, 40, 50},
                                                           {true, true, false, true, true});
   cudf::test::strings_column_wrapper strings({"mapped", "pinned", "host", "destination", "buffer"});
@@ -212,24 +265,22 @@ TEST_F(PackUnpackTest, ExperimentalPackIntoPinnedHost)
                                  cx::pack_compression::cascaded,
                                  cx::pack_compression::zstd,
                                  cx::pack_compression::snappy}) {
-    SCOPED_TRACE(static_cast<int>(compression));
-    auto const plan = cx::prepare_pack(input, make_options(compression));
-    auto destination =
-      cudf::detail::make_pinned_vector_async<uint8_t>(plan.sizes().payload_bytes, stream);
-    ASSERT_TRUE(destination.get_allocator().is_device_accessible());
-
-    auto const result =
-      cx::pack_into(plan, cudf::device_span<uint8_t>{destination.data(), destination.size()});
-    auto const packed = cx::packed_data_view{
-      result.metadata,
-      cudf::device_span<uint8_t const>{destination.data(), result.payload_bytes},
-      result.compression};
-    // The packed view directly references mapped host memory. Materialization performs the owning
-    // host-to-device copy without an intermediate packed device allocation.
-    if (compression == cx::pack_compression::none) {
-      CUDF_TEST_EXPECT_TABLES_EQUAL(input, cx::unpack_view(packed));
+    for (auto const windowed : {false, true}) {
+      auto const options =
+        windowed ? make_windowed_options(compression, cx::compressed_output_mode::compact)
+                 : make_options(compression);
+      auto const plan = cx::prepare_pack(input, options);
+      for (auto const kind : {destination_kind::pinned, destination_kind::pageable}) {
+        SCOPED_TRACE(static_cast<int>(compression));
+        SCOPED_TRACE(windowed);
+        SCOPED_TRACE(static_cast<int>(kind));
+        auto const packed = pack_to(plan, kind);
+        if (compression == cx::pack_compression::none && kind == destination_kind::pinned) {
+          CUDF_TEST_EXPECT_TABLES_EQUAL(input, cx::unpack_view(packed.view()));
+        }
+        expect_materializes_to(input, packed.view());
+      }
     }
-    expect_materializes_to(input, packed);
   }
 }
 
