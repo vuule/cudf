@@ -511,14 +511,9 @@ pack_plan prepare_pack(
 /**
  * @brief Prepare compression of an existing uncompressed `cudf::packed_columns` allocation.
  *
- * This overload supports callers that decide whether to compress only after ordinary packing has
- * completed. It borrows `input.gpu_data` as the compression source and therefore avoids copying or
- * repacking the column data. The ordinary pack metadata is retained inside the compressed
- * representation for reconstruction by `materialize()`.
- *
- * `options.compression` must select a compressed representation. The input metadata and device
- * allocation must remain alive and unchanged until every execution using the returned plan has
- * completed.
+ * Compresses directly from `input.gpu_data` without repacking. `options.compression` must select a
+ * compressed representation, and `input` must remain alive and unchanged until every execution
+ * using the returned plan has completed.
  *
  * @param input Existing ordinary, uncompressed packed columns
  * @param options Compression and output-layout options
@@ -546,12 +541,10 @@ struct pack_result {
  * @brief Execute a prepared pack into caller-owned device or host memory.
  *
  * `destination` may be device memory, pinned host memory, or pageable host memory; it must contain
- * at least `plan.sizes().payload_bytes` bytes. Host destinations are written with DMA copies
- * through `pack_options::staging_buffer_bytes` of temporary device memory, twice that for compact
- * compressed output, so packing for spilling needs no device allocation proportional to the
- * table. Compact compressed output to device memory also stages through that buffer. Zstd and
- * Snappy take about as long per staged window as for a whole table, so a buffer smaller than the
- * compressed payload's capacity slows them down.
+ * at least `plan.sizes().payload_bytes` bytes. Host destinations and compact compressed output
+ * are staged through `pack_options::staging_buffer_bytes` of device memory, twice that for compact
+ * output to host memory. A buffer smaller than the payload capacity is processed in several
+ * windows, each of which costs Zstd and Snappy a separate batched call.
  *
  * Work is submitted to the stream captured by the plan. The caller must preserve the input and
  * destination until that stream reaches the operation.
@@ -596,6 +589,26 @@ table_view unpack_view(packed_data_view input);
  */
 std::unique_ptr<table> materialize(
   packed_data_view input,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Materialize an owning table from a subset of the packed top-level columns.
+ *
+ * Only the selected columns are copied or decompressed, and only their bytes are read from a
+ * pageable host payload. Indices may repeat and appear in any order; each one produces an
+ * independent column.
+ *
+ * @throws std::out_of_range if an index is not in `[0, num_columns)`
+ * @param input Packed metadata and payload
+ * @param column_indices Indices of the top-level columns to materialize, in output order
+ * @param stream Stream used for the deep copy
+ * @param mr Memory resource for the returned table
+ * @return An owning table with one column per entry of `column_indices`
+ */
+std::unique_ptr<table> materialize(
+  packed_data_view input,
+  std::span<size_type const> column_indices,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 
@@ -777,6 +790,8 @@ class packed_metadata_view {
  private:
   // Span from the first top-level column entry to the end of the metadata buffer.
   std::span<std::uint8_t const> _entries;
+  // Byte offset of each top-level column's entry within `_entries`.
+  std::vector<std::size_t> _column_offsets;
   size_type _num_columns{};
   // Table row count, read directly from the serialized table header.
   size_type _num_rows{};

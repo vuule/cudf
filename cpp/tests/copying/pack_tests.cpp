@@ -284,6 +284,75 @@ TEST_F(PackUnpackTest, ExperimentalPackIntoHost)
   }
 }
 
+TEST_F(PackUnpackTest, ExperimentalMaterializeColumnSubset)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4, 5, 6},
+                                                          {true, false, true, true, true, true});
+  cudf::test::strings_column_wrapper strings({"a", "", "ccc", "dddd", "e", "ff"},
+                                             {true, true, false, true, true, true});
+  cudf::test::lists_column_wrapper<int64_t> lists{{1, 2}, {}, {3}, {4, 5, 6}, {7}, {8}};
+  cudf::test::fixed_width_column_wrapper<int16_t> member({1, 2, 3, 4, 5, 6});
+  cudf::test::structs_column_wrapper structs({member});
+  auto const input = cudf::table_view{{numbers, strings, lists, structs}};
+  std::vector<std::vector<cudf::size_type>> const selections{{2, 0}, {1, 1}, {3}, {}};
+
+  for (auto const compression : {cx::pack_compression::none,
+                                 cx::pack_compression::automatic,
+                                 cx::pack_compression::cascaded,
+                                 cx::pack_compression::zstd,
+                                 cx::pack_compression::snappy}) {
+    for (auto const output_mode :
+         {cx::compressed_output_mode::compact, cx::compressed_output_mode::reserved}) {
+      auto options                       = make_options(compression, output_mode);
+      options.automatic_min_region_bytes = 0;
+      auto const plan                    = cx::prepare_pack(input, options);
+      for (auto const kind :
+           {destination_kind::device, destination_kind::pinned, destination_kind::pageable}) {
+        SCOPED_TRACE(static_cast<int>(compression));
+        SCOPED_TRACE(static_cast<int>(output_mode));
+        SCOPED_TRACE(static_cast<int>(kind));
+        auto const packed = pack_to(plan, kind);
+        for (auto const& selection : selections) {
+          auto const materialized = cx::materialize(packed.view(), selection);
+          ASSERT_EQ(materialized->num_columns(), static_cast<cudf::size_type>(selection.size()));
+          if (!selection.empty()) {
+            CUDF_TEST_EXPECT_TABLES_EQUAL(input.select(selection), materialized->view());
+          }
+        }
+        for (auto const index : {-1, input.num_columns()}) {
+          EXPECT_THROW(cx::materialize(packed.view(), std::vector<cudf::size_type>{index}),
+                       std::out_of_range);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(PackUnpackTest, ExperimentalMaterializeSparseColumnSubset)
+{
+  // An incompressible middle column makes a pageable subset upload disjoint byte ranges. The first
+  // column is stored raw with an odd length, and Cascaded requires aligned input for the last one.
+  constexpr cudf::size_type num_rows = 512 * 1024 + 3;
+  auto const noise                   = cudf::detail::make_counting_transform_iterator(
+    0, [](int64_t i) { return (i * 2654435761) ^ (i << 17) ^ (i >> 5); });
+  auto const runs = cudf::detail::make_counting_transform_iterator(
+    0, [](int64_t i) { return (i / 3) % 7 + (i / 1000) * 1000; });
+  cudf::test::fixed_width_column_wrapper<int8_t> first(noise, noise + num_rows);
+  cudf::test::fixed_width_column_wrapper<int64_t> second(noise, noise + num_rows);
+  cudf::test::fixed_width_column_wrapper<int64_t> third(runs, runs + num_rows);
+  auto const input = cudf::table_view{{first, second, third}};
+  std::vector<cudf::size_type> const selection{2, 0};
+
+  for (auto const compression :
+       {cx::pack_compression::none, cx::pack_compression::cascaded, cx::pack_compression::snappy}) {
+    SCOPED_TRACE(static_cast<int>(compression));
+    auto const packed =
+      pack_to(cx::prepare_pack(input, make_options(compression)), destination_kind::pageable);
+    CUDF_TEST_EXPECT_TABLES_EQUAL(input.select(selection),
+                                  cx::materialize(packed.view(), selection)->view());
+  }
+}
+
 TEST_F(PackUnpackTest, ExperimentalPackIntoRejectsInvalidDestination)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> col({1, 2, 3, 4});

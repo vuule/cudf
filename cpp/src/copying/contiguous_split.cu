@@ -156,11 +156,11 @@ struct compression_region_layout {
 };
 
 /**
- * @brief A range of copy batches whose output fits a bounded staging buffer.
+ * @brief A range of copy batches or compression chunks whose output fits a bounded staging buffer.
  */
 struct pack_window {
-  std::size_t first_batch;
-  std::size_t num_batches;
+  std::size_t begin;
+  std::size_t end;
   std::size_t offset;  ///< Payload offset of the window's first byte
   std::size_t bytes;
 };
@@ -2074,19 +2074,10 @@ struct contiguous_split_state {
 
     if (is_empty || input.num_columns() == 0) { return; }
 
-    auto const num_batches_total =
+    // Do not advance the iterator: a prepared plan is intentionally reusable.
+    auto const num_batches =
       std::get<1>(chunk_iter_state->get_current_starting_index_and_buff_count());
-
-    // Passing a user buffer makes copy_data use each batch's destination offset relative to that
-    // buffer. Unlike chunked_pack, the offsets describe the complete payload and all batches are
-    // submitted at once. Do not advance the iterator: a prepared plan is intentionally reusable.
-    copy_data(num_batches_total,
-              0,
-              src_and_dst_pointers->d_src_bufs,
-              src_and_dst_pointers->d_dst_bufs,
-              chunk_iter_state->d_batched_dst_buf_info,
-              user_buffer.data(),
-              stream);
+    pack_window_into({0, num_batches, 0, get_total_contiguous_size()}, user_buffer.data());
   }
 
   /**
@@ -2107,12 +2098,12 @@ struct contiguous_split_state {
       CUDF_EXPECTS(begin >= end, "Copy batches are not ordered by destination offset");
       CUDF_EXPECTS(bytes <= max_bytes, "The staging buffer is smaller than a copy batch");
       if (windows.empty() || begin + bytes - windows.back().offset > max_bytes) {
-        windows.push_back({i, 0, begin, 0});
+        windows.push_back({i, i, begin, 0});
       }
-      auto& window       = windows.back();
-      window.num_batches = i + 1 - window.first_batch;
-      window.bytes       = begin + bytes - window.offset;
-      end                = begin + bytes;
+      auto& window = windows.back();
+      window.end   = i + 1;
+      window.bytes = begin + bytes - window.offset;
+      end          = begin + bytes;
     }
     return windows;
   }
@@ -2125,8 +2116,8 @@ struct contiguous_split_state {
     // copy_data writes each batch at its payload offset relative to the base pointer.
     auto* const base =
       reinterpret_cast<uint8_t*>(reinterpret_cast<std::uintptr_t>(buffer) - window.offset);
-    copy_data(window.num_batches,
-              window.first_batch,
+    copy_data(window.end - window.begin,
+              window.begin,
               src_and_dst_pointers->d_src_bufs,
               src_and_dst_pointers->d_dst_bufs,
               chunk_iter_state->d_batched_dst_buf_info,
@@ -2486,24 +2477,13 @@ nvcompType_t to_nvcomp_type(type_id type, bool is_validity)
   }
 }
 
-std::size_t nvcomp_type_size(nvcompType_t type)
-{
-  switch (type) {
-    case NVCOMP_TYPE_SHORT:
-    case NVCOMP_TYPE_USHORT: return 2;
-    case NVCOMP_TYPE_INT:
-    case NVCOMP_TYPE_UINT: return 4;
-    case NVCOMP_TYPE_LONGLONG:
-    case NVCOMP_TYPE_ULONGLONG: return 8;
-    default: return 1;
-  }
-}
-
 // Cascaded chunks must hold whole values, so regions that do not are compressed as bytes.
 nvcompType_t cascaded_type(type_id type, bool is_validity, std::size_t data_bytes)
 {
   auto const native = to_nvcomp_type(type, is_validity);
-  return data_bytes % nvcomp_type_size(native) == 0 ? native : NVCOMP_TYPE_UCHAR;
+  auto const value_bytes =
+    native == NVCOMP_TYPE_UCHAR ? 1 : (is_validity ? 4 : cudf::size_of(data_type{type}));
+  return data_bytes % value_bytes == 0 ? native : NVCOMP_TYPE_UCHAR;
 }
 
 cudaMemoryType memory_type(void const* ptr)
@@ -2719,16 +2699,6 @@ struct chunk_descriptor {
   bool raw;
 };
 
-/**
- * @brief Consecutive chunks whose reserved slots fit the staging buffer together.
- */
-struct chunk_window {
-  std::size_t chunk_begin;
-  std::size_t chunk_end;
-  std::size_t slot_offset;
-  std::size_t bytes;
-};
-
 compressed_metadata_entry make_entry(prepared_compression_region const& region,
                                      pack_compression compression)
 {
@@ -2882,13 +2852,118 @@ void collect_buffer_offsets(packed_metadata_view::column_view const& metadata,
   }
 }
 
-// Copies every column buffer out of an uncompressed payload without synchronizing. A buffer's
-// extent runs to the next buffer's offset, so no buffer sizes are read back from the device.
+/**
+ * @brief Device-accessible access to a packed payload.
+ *
+ * Device and pinned payloads are read in place. Only the byte ranges requested before `upload()`
+ * are copied from a pageable payload, so materializing a column subset transfers only its bytes.
+ */
+class payload_reader {
+ public:
+  explicit payload_reader(cudf::device_span<uint8_t const> payload)
+    : _payload{payload},
+      _pageable{!payload.empty() && memory_type(payload.data()) == cudaMemoryTypeUnregistered}
+  {
+  }
+
+  void request(uint8_t const* data, std::size_t bytes)
+  {
+    if (_pageable && bytes > 0) {
+      // Staged bytes keep their alignment in the payload, which codecs such as Cascaded require.
+      auto const offset = static_cast<std::size_t>(data - _payload.data());
+      _ranges.push_back({offset / split_align * split_align, offset + bytes, 0});
+    }
+  }
+
+  void upload(cuda::stream_ref stream)
+  {
+    if (_ranges.empty()) { return; }
+    // Gaps this small cost less to copy than a separate transfer.
+    constexpr std::size_t max_gap_bytes = 256 * 1024;
+    std::sort(_ranges.begin(), _ranges.end(), [](auto const& lhs, auto const& rhs) {
+      return lhs.begin < rhs.begin;
+    });
+    std::vector<range> merged{_ranges.front()};
+    for (auto const& next : _ranges) {
+      if (next.begin <= merged.back().end + max_gap_bytes) {
+        merged.back().end = std::max(merged.back().end, next.end);
+      } else {
+        merged.push_back(next);
+      }
+    }
+    std::size_t staged_bytes = 0;
+    for (auto& item : merged) {
+      item.staged_offset = staged_bytes;
+      staged_bytes = cudf::util::round_up_safe(staged_bytes + item.end - item.begin, split_align);
+    }
+    _staged = rmm::device_buffer(staged_bytes, stream, cudf::get_current_device_resource_ref());
+    for (auto const& item : merged) {
+      CUDF_CUDA_TRY(
+        cudf::detail::memcpy_async(static_cast<uint8_t*>(_staged.data()) + item.staged_offset,
+                                   _payload.data() + item.begin,
+                                   item.end - item.begin,
+                                   stream));
+    }
+    _ranges = std::move(merged);
+  }
+
+  /// Translates a payload pointer whose bytes were requested to a device-accessible pointer.
+  [[nodiscard]] uint8_t const* device_pointer(uint8_t const* data) const
+  {
+    if (!_pageable) { return data; }
+    auto const offset = static_cast<std::size_t>(data - _payload.data());
+    auto const item   = std::prev(std::upper_bound(
+      _ranges.begin(), _ranges.end(), offset, [](std::size_t value, auto const& candidate) {
+        return value < candidate.begin;
+      }));
+    return static_cast<uint8_t const*>(_staged.data()) + item->staged_offset +
+           (offset - item->begin);
+  }
+
+ private:
+  struct range {
+    std::size_t begin;
+    std::size_t end;
+    std::size_t staged_offset;
+  };
+
+  cudf::device_span<uint8_t const> _payload;
+  bool _pageable;
+  std::vector<range> _ranges;
+  rmm::device_buffer _staged;
+};
+
+/// Materializes the selected top-level columns, or every column when `selection` is empty.
+template <typename AllocateBuffer>
+std::vector<std::unique_ptr<column>> materialize_columns(
+  packed_metadata_view const& metadata,
+  std::optional<std::span<size_type const>> selection,
+  AllocateBuffer& allocate_buffer)
+{
+  auto const count =
+    selection.has_value() ? selection->size() : static_cast<std::size_t>(metadata.num_columns());
+  std::vector<std::unique_ptr<column>> columns;
+  columns.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    auto const index = selection.has_value() ? (*selection)[i] : static_cast<size_type>(i);
+    columns.push_back(allocate_materialized_column(metadata.column(index), allocate_buffer));
+  }
+  return columns;
+}
+
+// Copies column buffers out of an uncompressed payload without synchronizing. A buffer's extent
+// runs to the next buffer's offset, so no buffer sizes are read back from the device.
 std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
+                                                std::optional<std::span<size_type const>> selection,
+                                                payload_reader& reader,
                                                 cuda::stream_ref stream,
                                                 rmm::device_async_resource_ref mr)
 {
-  if (input.metadata.empty()) { return std::make_unique<table>(); }
+  if (input.metadata.empty()) {
+    CUDF_EXPECTS(
+      !selection.has_value() || selection->empty(), "column index out of range", std::out_of_range);
+    return std::make_unique<table>();
+  }
   auto const metadata = packed_metadata_view{input.metadata};
   std::vector<int64_t> offsets;
   for (size_type i = 0; i < metadata.num_columns(); ++i) {
@@ -2912,12 +2987,13 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
     sources.push_back(input.payload.data() + offset);
     destinations.push_back(static_cast<uint8_t*>(buffer.data()));
     sizes.push_back(bytes);
+    reader.request(sources.back(), bytes);
     return buffer;
   };
-  std::vector<std::unique_ptr<column>> columns;
-  columns.reserve(metadata.num_columns());
-  for (size_type i = 0; i < metadata.num_columns(); ++i) {
-    columns.push_back(allocate_materialized_column(metadata.column(i), allocate_buffer));
+  auto columns = materialize_columns(metadata, selection, allocate_buffer);
+  reader.upload(stream);
+  for (auto& source : sources) {
+    source = reader.device_pointer(source);
   }
 
   // Uploading the batch descriptors costs more than a few individual copies.
@@ -3001,8 +3077,7 @@ struct prepared_pack_components {
   std::vector<chunk_batch> batches;
   std::vector<chunk_descriptor> chunks;
   std::optional<rmm::device_uvector<chunk_descriptor>> d_chunks;
-  std::vector<chunk_window> windows;
-  std::vector<pack_window> uncompressed_windows;
+  std::vector<pack_window> windows;  ///< Chunk windows, or copy batch windows when uncompressed
   std::size_t max_window_bytes  = 0;
   std::size_t max_window_chunks = 0;
   std::unique_ptr<rmm::device_buffer> staging_buffer;
@@ -3040,8 +3115,8 @@ prepared_pack_components make_prepared_pack_components(
     std::min(max_raw_chunk_bytes, window_budget) / split_align * split_align;
 
   if (uncompressed_bytes > 0 && !uses_region_envelope) {
-    result.uncompressed_windows = input.state->get_pack_windows(options.staging_buffer_bytes);
-    for (auto const& window : result.uncompressed_windows) {
+    result.windows = input.state->get_pack_windows(options.staging_buffer_bytes);
+    for (auto const& window : result.windows) {
       result.max_window_bytes = std::max(result.max_window_bytes, window.bytes);
     }
   }
@@ -3114,56 +3189,43 @@ prepared_pack_components make_prepared_pack_components(
                  "Prepared compression regions do not cover the complete payload");
 
     // Chunks of all regions that share a codec, and for Cascaded its options, form one batch.
-    std::vector<std::size_t> region_batch(regions.size(), std::numeric_limits<std::size_t>::max());
-    std::size_t num_chunks = 0;
-    for (std::size_t first = 0; first < regions.size(); ++first) {
-      if (region_batch[first] != std::numeric_limits<std::size_t>::max()) { continue; }
-      chunk_batch batch{
-        regions[first].compression, regions[first].cascaded_options, num_chunks, 0, 0, 0};
-      for (std::size_t i = first; i < regions.size(); ++i) {
-        if (region_batch[i] != std::numeric_limits<std::size_t>::max() ||
-            regions[i].compression != regions[first].compression ||
-            (regions[i].compression == pack_compression::cascaded &&
-             !same_cascaded_options(regions[i].cascaded_options,
-                                    regions[first].cascaded_options))) {
-          continue;
-        }
-        region_batch[i]        = result.batches.size();
-        regions[i].chunk_begin = num_chunks;
-        num_chunks += regions[i].num_chunks;
-        batch.max_chunk_bytes = std::max(batch.max_chunk_bytes, regions[i].chunk_bytes);
-        batch.total_bytes += regions[i].layout.data_bytes;
+    auto& batches = result.batches;
+    std::vector<std::size_t> region_batch;
+    for (auto const& region : regions) {
+      auto const batch = std::find_if(batches.begin(), batches.end(), [&](auto const& item) {
+        return item.codec == region.compression &&
+               (item.codec != pack_compression::cascaded ||
+                same_cascaded_options(item.cascaded_options, region.cascaded_options));
+      });
+      region_batch.push_back(batch - batches.begin());
+      if (batch == batches.end()) {
+        batches.push_back(chunk_batch{region.compression, region.cascaded_options, 0, 0, 0, 0});
       }
-      batch.chunk_end = num_chunks;
-      result.batches.push_back(batch);
-    }
-
-    std::vector<std::size_t> batch_slot_bytes;
-    std::vector<std::size_t> batch_alignment;
-    for (auto const& batch : result.batches) {
-      auto const raw = batch.codec == pack_compression::none;
-      batch_slot_bytes.push_back(raw ? 0 : max_compressed_chunk_bytes(batch));
-      batch_alignment.push_back(raw ? sizeof(uint64_t) : chunk_alignment(batch.codec));
+      auto& target           = batches[region_batch.back()];
+      target.max_chunk_bytes = std::max(target.max_chunk_bytes, region.chunk_bytes);
+      target.total_bytes += region.layout.data_bytes;
     }
     auto& chunks = result.chunks;
-    chunks.resize(num_chunks);
-    for (std::size_t i = 0; i < regions.size(); ++i) {
-      auto& region     = regions[i];
-      region.alignment = batch_alignment[region_batch[i]];
-      auto const raw   = region.compression == pack_compression::none;
-      for (std::size_t k = 0; k < region.num_chunks; ++k) {
-        auto const offset = k * region.chunk_bytes;
-        auto const bytes  = std::min(region.chunk_bytes, region.layout.data_bytes - offset);
-        chunks[region.chunk_begin + k] =
-          chunk_descriptor{region.source + offset,
-                           bytes,
-                           raw ? bytes : batch_slot_bytes[region_batch[i]],
-                           0,
-                           0,
-                           i,
-                           raw};
+    for (std::size_t b = 0; b < batches.size(); ++b) {
+      auto const raw         = batches[b].codec == pack_compression::none;
+      auto const slot_bytes  = raw ? 0 : max_compressed_chunk_bytes(batches[b]);
+      auto const alignment   = raw ? sizeof(uint64_t) : chunk_alignment(batches[b].codec);
+      batches[b].chunk_begin = chunks.size();
+      for (std::size_t i = 0; i < regions.size(); ++i) {
+        if (region_batch[i] != b) { continue; }
+        auto& region       = regions[i];
+        region.chunk_begin = chunks.size();
+        region.alignment   = alignment;
+        for (std::size_t offset = 0; offset < region.layout.data_bytes;
+             offset += region.chunk_bytes) {
+          auto const bytes = std::min(region.chunk_bytes, region.layout.data_bytes - offset);
+          chunks.push_back(chunk_descriptor{
+            region.source + offset, bytes, raw ? bytes : slot_bytes, 0, 0, i, raw});
+        }
       }
+      batches[b].chunk_end = chunks.size();
     }
+    auto const num_chunks = chunks.size();
 
     // Reserved layout: the chunk size table, then a slot per chunk in chunk order. A slot also
     // fits the raw chunk, which bounds compact output with uncompressed fallback.
@@ -3175,18 +3237,17 @@ prepared_pack_components make_prepared_pack_components(
       CUDF_EXPECTS(extent <= window_budget,
                    "The staging buffer is too small for the compression chunk size");
       if (result.windows.empty() ||
-          destination_bytes + extent - result.windows.back().slot_offset > window_budget) {
-        result.windows.push_back(chunk_window{c, c, destination_bytes, 0});
+          destination_bytes + extent - result.windows.back().offset > window_budget) {
+        result.windows.push_back(pack_window{c, c, destination_bytes, 0});
       }
       auto& window        = result.windows.back();
       chunk.slot_offset   = destination_bytes;
-      chunk.window_offset = destination_bytes - window.slot_offset;
+      chunk.window_offset = destination_bytes - window.offset;
       destination_bytes += extent;
-      window.chunk_end        = c + 1;
-      window.bytes            = destination_bytes - window.slot_offset;
-      result.max_window_bytes = std::max(result.max_window_bytes, window.bytes);
-      result.max_window_chunks =
-        std::max(result.max_window_chunks, window.chunk_end - window.chunk_begin);
+      window.end               = c + 1;
+      window.bytes             = destination_bytes - window.offset;
+      result.max_window_bytes  = std::max(result.max_window_bytes, window.bytes);
+      result.max_window_chunks = std::max(result.max_window_chunks, window.end - window.begin);
     }
     result.d_chunks = cudf::detail::make_device_uvector(result.chunks, stream, temp_mr);
   }
@@ -3355,7 +3416,7 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
   if (impl.regions.empty()) {
     if (to_host) {
       rmm::device_buffer staging(impl.max_window_bytes, stream);
-      for (auto const& window : impl.uncompressed_windows) {
+      for (auto const& window : impl.windows) {
         state.pack_window_into(window, static_cast<uint8_t*>(staging.data()));
         copy_to_host(window.offset, staging.data(), window.bytes);
       }
@@ -3401,10 +3462,10 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
                                      chunk.output_bytes};
                        results[i] = {0, codec_status::FAILURE};
                      });
-  auto const compress_window = [&](chunk_window const& window, bool copy_raw) {
+  auto const compress_window = [&](pack_window const& window, bool copy_raw) {
     for (auto const& batch : impl.batches) {
-      auto const begin = std::max(batch.chunk_begin, window.chunk_begin);
-      auto const end   = std::min(batch.chunk_end, window.chunk_end);
+      auto const begin = std::max(batch.chunk_begin, window.begin);
+      auto const end   = std::min(batch.chunk_end, window.end);
       if (begin >= end || (batch.codec == pack_compression::none && !copy_raw)) { continue; }
       compress_batch(
         batch,
@@ -3415,17 +3476,16 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
     }
   };
 
-  std::vector<compressed_metadata_entry> entries;
+  std::vector<uint64_t> table(reserved ? 0 : num_chunks, 0);
   std::vector<uint64_t> chunk_offsets(num_chunks, 0);
-  entries.reserve(impl.regions.size());
+  auto payload_bytes = sizes.payload_bytes;
   if (reserved) {
-    if (in_place) {
-      compress_window(chunk_window{0, num_chunks, 0, 0}, true);
-    } else {
-      for (auto const& window : impl.windows) {
-        compress_window(window, true);
-        copy_to_host(window.slot_offset, slots, window.bytes);
-      }
+    auto const whole   = pack_window{0, num_chunks, 0, 0};
+    auto const windows = in_place ? std::span<pack_window const>{&whole, 1}
+                                  : std::span<pack_window const>{impl.windows};
+    for (auto const& window : windows) {
+      compress_window(window, true);
+      if (!in_place) { copy_to_host(window.offset, slots, window.bytes); }
     }
     rmm::device_uvector<uint64_t> host_table(to_host ? num_chunks : 0, stream);
     thrust::transform(
@@ -3440,81 +3500,76 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
           return result.status == codec_status::SUCCESS ? result.bytes_written : 0;
         }));
     if (to_host) { copy_to_host(0, host_table.data(), table_bytes); }
-    for (auto const& region : impl.regions) {
-      entries.push_back(make_entry(region, region.compression));
-    }
     std::transform(
       impl.chunks.begin(), impl.chunks.end(), chunk_offsets.begin(), [](auto const& chunk) {
         return chunk.slot_offset;
       });
-    return pack_result{
-      make_compressed_metadata(
-        impl.input.metadata, sizes.uncompressed_payload_bytes, entries, chunk_offsets),
-      sizes.payload_bytes,
-      impl.compression,
-      impl.output_mode};
+  } else {
+    payload_bytes = table_bytes;
+    for (auto const& window : impl.windows) {
+      compress_window(window, false);
+      auto const h_results =
+        cudf::detail::make_std_vector(device_span<codec_exec_result const>{results}.subspan(
+                                        window.begin, window.end - window.begin),
+                                      stream);
+      auto const window_begin = payload_bytes;
+      std::vector<uint8_t const*> sources;
+      std::vector<uint8_t*> targets;
+      std::vector<std::size_t> copy_bytes;
+      for (auto c = window.begin; c < window.end; ++c) {
+        auto const& chunk  = impl.chunks[c];
+        auto const& region = impl.regions[chunk.region];
+        auto const& result = h_results[c - window.begin];
+        auto raw           = chunk.raw;
+        if (!raw) {
+          auto const failed = result.status != codec_status::SUCCESS;
+          CUDF_EXPECTS(!failed || region.allow_uncompressed_fallback, "Compression failed");
+          raw = region.allow_uncompressed_fallback &&
+                (failed || result.bytes_written >= chunk.input_bytes ||
+                 chunk.input_bytes - result.bytes_written < region.minimum_savings_bytes);
+        }
+        auto const bytes = raw ? chunk.input_bytes : result.bytes_written;
+        payload_bytes =
+          cudf::util::round_up_safe(payload_bytes, raw ? sizeof(uint64_t) : region.alignment);
+        chunk_offsets[c] = payload_bytes;
+        table[c]         = raw ? (raw_chunk_flag | bytes) : bytes;
+        sources.push_back(raw ? chunk.input : slots + chunk.window_offset);
+        targets.push_back(to_host ? compacted + (payload_bytes - window_begin)
+                                  : destination.data() + payload_bytes);
+        copy_bytes.push_back(bytes);
+        payload_bytes += bytes;
+      }
+      auto const temp_mr      = cudf::get_current_device_resource_ref();
+      auto const d_sources    = cudf::detail::make_device_uvector(sources, stream, temp_mr);
+      auto const d_targets    = cudf::detail::make_device_uvector(targets, stream, temp_mr);
+      auto const d_copy_bytes = cudf::detail::make_device_uvector(copy_bytes, stream, temp_mr);
+      cudf::detail::batched_memcpy_async(
+        d_sources.begin(), d_targets.begin(), d_copy_bytes.begin(), d_sources.size(), stream);
+      if (to_host) { copy_to_host(window_begin, compacted, payload_bytes - window_begin); }
+    }
+    if (to_host) {
+      std::memcpy(destination.data(), table.data(), table_bytes);
+    } else {
+      cudf::detail::cuda_memcpy<uint64_t>(
+        device_span<uint64_t>{reinterpret_cast<uint64_t*>(destination.data()), num_chunks},
+        table,
+        stream);
+    }
   }
 
-  std::vector<uint64_t> table(num_chunks, 0);
-  std::size_t offset = table_bytes;
-  for (auto const& window : impl.windows) {
-    compress_window(window, false);
-    auto const count     = window.chunk_end - window.chunk_begin;
-    auto const h_results = cudf::detail::make_std_vector(
-      device_span<codec_exec_result const>{results}.subspan(window.chunk_begin, count), stream);
-    auto const window_begin = offset;
-    std::vector<uint8_t const*> sources;
-    std::vector<uint8_t*> targets;
-    std::vector<std::size_t> copy_bytes;
-    for (auto c = window.chunk_begin; c < window.chunk_end; ++c) {
-      auto const& chunk  = impl.chunks[c];
-      auto const& region = impl.regions[chunk.region];
-      auto const& result = h_results[c - window.chunk_begin];
-      auto raw           = chunk.raw;
-      if (!raw) {
-        auto const failed = result.status != codec_status::SUCCESS;
-        CUDF_EXPECTS(!failed || region.allow_uncompressed_fallback, "Compression failed");
-        raw = region.allow_uncompressed_fallback &&
-              (failed || result.bytes_written >= chunk.input_bytes ||
-               chunk.input_bytes - result.bytes_written < region.minimum_savings_bytes);
-      }
-      auto const bytes = raw ? chunk.input_bytes : result.bytes_written;
-      offset = cudf::util::round_up_safe(offset, raw ? sizeof(uint64_t) : region.alignment);
-      chunk_offsets[c] = offset;
-      table[c]         = raw ? (raw_chunk_flag | bytes) : bytes;
-      sources.push_back(raw ? chunk.input : slots + chunk.window_offset);
-      targets.push_back(to_host ? compacted + (offset - window_begin)
-                                : destination.data() + offset);
-      copy_bytes.push_back(bytes);
-      offset += bytes;
-    }
-    auto const temp_mr      = cudf::get_current_device_resource_ref();
-    auto const d_sources    = cudf::detail::make_device_uvector(sources, stream, temp_mr);
-    auto const d_targets    = cudf::detail::make_device_uvector(targets, stream, temp_mr);
-    auto const d_copy_bytes = cudf::detail::make_device_uvector(copy_bytes, stream, temp_mr);
-    cudf::detail::batched_memcpy_async(
-      d_sources.begin(), d_targets.begin(), d_copy_bytes.begin(), d_sources.size(), stream);
-    if (to_host) { copy_to_host(window_begin, compacted, offset - window_begin); }
-  }
-  if (to_host) {
-    std::memcpy(destination.data(), table.data(), table_bytes);
-  } else {
-    cudf::detail::cuda_memcpy<uint64_t>(
-      device_span<uint64_t>{reinterpret_cast<uint64_t*>(destination.data()), num_chunks},
-      table,
-      stream);
-  }
+  std::vector<compressed_metadata_entry> entries;
+  entries.reserve(impl.regions.size());
   for (auto const& region : impl.regions) {
-    auto const first   = table.begin() + region.chunk_begin;
-    auto const all_raw = std::all_of(first, first + region.num_chunks, [](uint64_t entry) {
-      return (entry & raw_chunk_flag) != 0;
-    });
+    auto const all_raw =
+      !reserved && std::all_of(table.begin() + region.chunk_begin,
+                               table.begin() + region.chunk_begin + region.num_chunks,
+                               [](auto entry) { return entry & raw_chunk_flag; });
     entries.push_back(make_entry(region, all_raw ? pack_compression::none : region.compression));
   }
   return pack_result{
     make_compressed_metadata(
       impl.input.metadata, sizes.uncompressed_payload_bytes, entries, chunk_offsets),
-    offset,
+    payload_bytes,
     impl.compression,
     impl.output_mode};
 }
@@ -3529,18 +3584,17 @@ table_view unpack_view(packed_data_view input)
   return cudf::unpack(input.metadata.data(), input.payload.data());
 }
 
-std::unique_ptr<table> materialize(packed_data_view input,
-                                   cuda::stream_ref stream,
-                                   rmm::device_async_resource_ref mr)
+namespace {
+
+std::unique_ptr<table> materialize_selection(packed_data_view input,
+                                             std::optional<std::span<size_type const>> selection,
+                                             cuda::stream_ref stream,
+                                             rmm::device_async_resource_ref mr)
 {
-  rmm::device_buffer uploaded;
-  if (!input.payload.empty() && memory_type(input.payload.data()) == cudaMemoryTypeUnregistered) {
-    uploaded = rmm::device_buffer(
-      input.payload.data(), input.payload.size(), stream, cudf::get_current_device_resource_ref());
-    input.payload = {static_cast<uint8_t const*>(uploaded.data()), uploaded.size()};
-  }
+  payload_reader reader{input.payload};
+  if (!selection.has_value()) { reader.request(input.payload.data(), input.payload.size()); }
   if (input.compression == pack_compression::none || input.payload.empty()) {
-    return materialize_uncompressed(input, stream, mr);
+    return materialize_uncompressed(input, selection, reader, stream, mr);
   }
 
   CUDF_EXPECTS(
@@ -3617,6 +3671,7 @@ std::unique_ptr<table> materialize(packed_data_view input,
       auto& codec =
         raw ? work_for(pack_compression::none, NVCOMP_TYPE_UCHAR) : work_for(compression, cascaded);
       codec.inputs.emplace_back(input.payload.data() + parsed.chunk_offsets[c], bytes);
+      reader.request(codec.inputs.back().data(), bytes);
       codec.outputs.emplace_back(output + offset, expected);
       codec.max_chunk_bytes = std::max(codec.max_chunk_bytes, expected);
       codec.total_bytes += expected;
@@ -3640,11 +3695,13 @@ std::unique_ptr<table> materialize(packed_data_view input,
     submit_decompression(*entry, buffer.data());
     return buffer;
   };
-  auto const packed_metadata = packed_metadata_view{parsed.legacy_metadata};
-  std::vector<std::unique_ptr<column>> columns;
-  columns.reserve(packed_metadata.num_columns());
-  for (size_type i = 0; i < packed_metadata.num_columns(); ++i) {
-    columns.push_back(allocate_materialized_column(packed_metadata.column(i), allocate_buffer));
+  auto columns =
+    materialize_columns(packed_metadata_view{parsed.legacy_metadata}, selection, allocate_buffer);
+  reader.upload(stream);
+  for (auto& codec : work) {
+    for (auto& chunk : codec.inputs) {
+      chunk = {reader.device_pointer(chunk.data()), chunk.size()};
+    }
   }
 
   auto const temp_mr = cudf::get_current_device_resource_ref();
@@ -3675,6 +3732,25 @@ std::unique_ptr<table> materialize(packed_data_view input,
     }
   }
   return std::make_unique<table>(std::move(columns));
+}
+
+}  // namespace
+
+std::unique_ptr<table> materialize(packed_data_view input,
+                                   cuda::stream_ref stream,
+                                   rmm::device_async_resource_ref mr)
+{
+  CUDF_FUNC_RANGE();
+  return materialize_selection(input, std::nullopt, stream, mr);
+}
+
+std::unique_ptr<table> materialize(packed_data_view input,
+                                   std::span<size_type const> column_indices,
+                                   cuda::stream_ref stream,
+                                   rmm::device_async_resource_ref mr)
+{
+  CUDF_FUNC_RANGE();
+  return materialize_selection(input, column_indices, stream, mr);
 }
 
 }  // namespace experimental
