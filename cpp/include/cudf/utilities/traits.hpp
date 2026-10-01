@@ -7,6 +7,7 @@
 
 #include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/concepts.hpp>
 #include <cudf/wrappers/dictionary.hpp>
 #include <cudf/wrappers/durations.hpp>
 #include <cudf/wrappers/timestamps.hpp>
@@ -50,10 +51,6 @@ using less_comparable = decltype(cuda::std::declval<L>() < cuda::std::declval<R>
 template <typename L, typename R>
 using greater_comparable = decltype(cuda::std::declval<L>() > cuda::std::declval<R>());
 
-/// Checks if two types are comparable using equality operator (i.e. ==).
-template <typename L, typename R>
-using equality_comparable = decltype(cuda::std::declval<L>() == cuda::std::declval<R>());
-
 namespace detail {
 template <typename L, typename R, typename = void>
 struct is_relationally_comparable_impl : cuda::std::false_type {};
@@ -68,8 +65,10 @@ template <typename L, typename R, typename = void>
 struct is_equality_comparable_impl : cuda::std::false_type {};
 
 template <typename L, typename R>
-struct is_equality_comparable_impl<L, R, void_t<equality_comparable<L, R>>> : cuda::std::true_type {
-};
+struct is_equality_comparable_impl<
+  L,
+  R,
+  void_t<decltype(cuda::std::declval<L>() == cuda::std::declval<R>())>> : cuda::std::true_type {};
 
 // has common type
 template <typename AlwaysVoid, typename... Ts>
