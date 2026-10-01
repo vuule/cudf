@@ -43,33 +43,7 @@ using void_t = void;
  */
 #define CUDF_ENABLE_IF(...) cuda::std::enable_if_t<(__VA_ARGS__)>* = nullptr
 
-/// Checks if two types are comparable using less operator (i.e. <).
-template <typename L, typename R>
-using less_comparable = decltype(cuda::std::declval<L>() < cuda::std::declval<R>());
-
-/// Checks if two types are comparable using greater operator (i.e. >).
-template <typename L, typename R>
-using greater_comparable = decltype(cuda::std::declval<L>() > cuda::std::declval<R>());
-
 namespace detail {
-template <typename L, typename R, typename = void>
-struct is_relationally_comparable_impl : cuda::std::false_type {};
-
-template <typename L, typename R>
-struct is_relationally_comparable_impl<L,
-                                       R,
-                                       void_t<less_comparable<L, R>, greater_comparable<L, R>>>
-  : cuda::std::true_type {};
-
-template <typename L, typename R, typename = void>
-struct is_equality_comparable_impl : cuda::std::false_type {};
-
-template <typename L, typename R>
-struct is_equality_comparable_impl<
-  L,
-  R,
-  void_t<decltype(cuda::std::declval<L>() == cuda::std::declval<R>())>> : cuda::std::true_type {};
-
 // has common type
 template <typename AlwaysVoid, typename... Ts>
 struct has_common_type_impl : cuda::std::false_type {};
@@ -122,7 +96,7 @@ using is_duration_t = cuda::std::disjunction<cuda::std::is_same<cudf::duration_D
 template <typename L, typename R>
 constexpr inline bool is_relationally_comparable()
 {
-  return detail::is_relationally_comparable_impl<L, R>::value;
+  return relationally_comparable<L, R>;
 }
 
 /**
@@ -149,7 +123,7 @@ bool is_relationally_comparable(data_type type);
 template <typename L, typename R>
 constexpr inline bool is_equality_comparable()
 {
-  return detail::is_equality_comparable_impl<L, R>::value;
+  return equality_comparable<L, R>;
 }
 
 /**
