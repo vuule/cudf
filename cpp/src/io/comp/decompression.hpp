@@ -55,7 +55,7 @@ struct decompression_info {
   size_t max_uncomp_chunk_size,
   size_t max_total_uncomp_size,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref temp_mr);
+  cudf::memory_resources mr);
 
 /**
  * @brief Checks if the decompression scratch size can be computed using the extended API of the

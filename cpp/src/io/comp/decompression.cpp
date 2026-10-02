@@ -521,7 +521,7 @@ void device_decompress(compression_type compression,
                        size_t max_uncomp_chunk_size,
                        size_t max_total_uncomp_size,
                        cuda::stream_ref stream,
-                       rmm::device_async_resource_ref temp_mr)
+                       cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   if (compression == compression_type::NONE or inputs.empty()) { return; }
@@ -538,11 +538,11 @@ void device_decompress(compression_type compression,
                                       max_uncomp_chunk_size,
                                       max_total_uncomp_size,
                                       stream,
-                                      temp_mr);
+                                      mr);
   }
 
   switch (compression) {
-    case compression_type::BROTLI: return gpu_debrotli(inputs, outputs, results, stream, temp_mr);
+    case compression_type::BROTLI: return gpu_debrotli(inputs, outputs, results, stream, mr);
     case compression_type::GZIP:
       return gpuinflate(inputs, outputs, results, gzip_header_included::YES, stream);
     case compression_type::SNAPPY: return gpu_unsnap(inputs, outputs, results, stream);
@@ -657,7 +657,7 @@ size_t get_uncompressed_size(compression_type compression, host_span<uint8_t con
   size_t max_uncomp_chunk_size,
   size_t max_total_uncomp_size,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref temp_mr)
+  cudf::memory_resources mr)
 {
   if (compression == compression_type::NONE or
       get_host_engine_state(compression) == host_engine_state::ON) {
@@ -672,7 +672,7 @@ size_t get_uncompressed_size(compression_type compression, host_span<uint8_t con
     !nvcomp_disabled,
     "Cannot compute decompression scratch size for " + compression_type_name(compression));
   return nvcomp::batched_decompress_temp_size_ex(
-    nvcomp_type.value(), inputs, max_uncomp_chunk_size, max_total_uncomp_size, stream, temp_mr);
+    nvcomp_type.value(), inputs, max_uncomp_chunk_size, max_total_uncomp_size, stream, mr);
 }
 
 [[nodiscard]] bool is_decompression_scratch_size_ex_supported(compression_type compression)
@@ -778,15 +778,16 @@ void decompress(compression_type compression,
                 size_t max_uncomp_chunk_size,
                 size_t max_total_uncomp_size,
                 cuda::stream_ref stream,
-                rmm::device_async_resource_ref temp_mr)
+                cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
+  auto const temp_mr = mr.get_temporary_mr();
 
   if (inputs.empty()) { return; }
 
   // sort inputs by size, largest first
   auto const [sorted_inputs, sorted_outputs, order] =
-    sort_decompression_tasks(inputs, outputs, stream, temp_mr);
+    sort_decompression_tasks(inputs, outputs, stream, cudf::memory_resources{temp_mr, temp_mr});
   device_span<device_span<uint8_t const> const> inputs_view = sorted_inputs;
   device_span<device_span<uint8_t> const> outputs_view      = sorted_outputs;
 
@@ -818,7 +819,7 @@ void decompress(compression_type compression,
                               max_uncomp_chunk_size,
                               max_total_uncomp_size,
                               streams[0],
-                              temp_mr);
+                              mr);
     detail::host_decompress(compression,
                             inputs_view.subspan(0, split_idx),
                             outputs_view.subspan(0, split_idx),
@@ -833,12 +834,12 @@ void decompress(compression_type compression,
                               max_uncomp_chunk_size,
                               max_total_uncomp_size,
                               stream,
-                              temp_mr);
+                              mr);
   } else {
     detail::host_decompress(compression, inputs_view, outputs_view, results_view, stream);
   }
 
-  copy_results_to_original_order(results_view, results, order, stream, temp_mr);
+  copy_results_to_original_order(results_view, results, order, stream, mr);
 }
 
 [[nodiscard]] bool is_host_decompression_supported(compression_type compression)

@@ -110,14 +110,14 @@ std::vector<uint8_t> compress(compression_type compression, host_span<uint8_t co
  * @param outputs Device memory buffers to store the compressed output
  * @param results Compression results
  * @param stream CUDA stream used for device memory operations and kernel launches
- * @param temp_mr Memory resource for temporary device allocations, including codec scratch memory
+ * @param mr Memory resources; only the temporary resource is used, including for scratch
  */
 void compress(compression_type compression,
               device_span<device_span<uint8_t const> const> inputs,
               device_span<device_span<uint8_t> const> outputs,
               device_span<codec_exec_result> results,
               cuda::stream_ref stream,
-              rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+              cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Decompresses a host memory buffer.
@@ -151,7 +151,7 @@ size_t decompress(compression_type compression,
  * @param max_uncomp_chunk_size Maximum size of any single uncompressed chunk
  * @param max_total_uncomp_size Maximum size of the total uncompressed data
  * @param stream CUDA stream used for device memory operations and kernel launches
- * @param temp_mr Memory resource for temporary device allocations, including codec scratch memory
+ * @param mr Memory resources; only the temporary resource is used, including for scratch
  */
 void decompress(compression_type compression,
                 device_span<device_span<uint8_t const> const> inputs,
@@ -160,7 +160,7 @@ void decompress(compression_type compression,
                 size_t max_uncomp_chunk_size,
                 size_t max_total_uncomp_size,
                 cuda::stream_ref stream,
-                rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+                cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 /** @} */  // end of group
 }  // namespace io::detail

@@ -432,7 +432,7 @@ void roundtrip_test(cudf::io::compression_type compression,
   auto const run_codec = [&](auto&& codec_call) {
     if (harness == nullptr) { return codec_call(mr); }
     auto const scope = harness->fail_on_current_device_resource_use();
-    codec_call(rmm::device_async_resource_ref{harness->temporary_mr()});
+    codec_call(harness->resources());
     harness->synchronize(stream);
   };
   std::vector<uint8_t> expected;
@@ -480,8 +480,8 @@ void roundtrip_test(cudf::io::compression_type compression,
       hd_stats[0]   = codec_exec_result{0, codec_status::FAILURE};
       hd_stats.host_to_device_async(stream);
 
-      run_codec([&](rmm::device_async_resource_ref temp_mr) {
-        cudf::io::detail::compress(compression, hd_srcs, hd_dsts, hd_stats, stream, temp_mr);
+      run_codec([&](cudf::memory_resources codec_mr) {
+        cudf::io::detail::compress(compression, hd_srcs, hd_dsts, hd_stats, stream, codec_mr);
       });
       hd_stats.device_to_host(stream);
       ASSERT_EQ(hd_stats[0].status, codec_status::SUCCESS);
@@ -502,7 +502,7 @@ void roundtrip_test(cudf::io::compression_type compression,
       hd_stats[0]   = codec_exec_result{0, codec_status::FAILURE};
       hd_stats.host_to_device_async(stream);
 
-      run_codec([&](rmm::device_async_resource_ref temp_mr) {
+      run_codec([&](cudf::memory_resources codec_mr) {
         cudf::io::detail::decompress(compression,
                                      hd_srcs,
                                      hd_dsts,
@@ -510,7 +510,7 @@ void roundtrip_test(cudf::io::compression_type compression,
                                      test_input.size(),
                                      test_input.size(),
                                      stream,
-                                     temp_mr);
+                                     codec_mr);
       });
       hd_stats.device_to_host(stream);
       ASSERT_EQ(hd_stats[0].status, codec_status::SUCCESS);
@@ -551,8 +551,9 @@ TEST_P(DeviceCodecMemoryResourceTest, TemporaryAllocations)
   }
   auto harness = cudf::test::memory_resource_test_harness{};
   roundtrip_test(GetParam(), &harness);
-  harness.expect_temporary_allocation_activity();
-  harness.expect_temporary_allocations_released();
+  harness.expect_resource_usage(0,
+                                {.temporary = cudf::test::temporary_allocation_expectation::SOME},
+                                cudf::get_default_stream());
 }
 
 INSTANTIATE_TEST_CASE_P(DeviceCodecMemoryResource,
