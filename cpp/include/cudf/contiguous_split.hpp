@@ -372,19 +372,19 @@ class pack_plan {
 
   explicit pack_plan(std::unique_ptr<impl>&& implementation);
 
-  friend pack_plan prepare_pack(cudf::table_view const&,
-                                cuda::stream_ref,
-                                rmm::device_async_resource_ref);
+  friend pack_plan prepare_pack(cudf::table_view const&, cuda::stream_ref, cudf::memory_resources);
   friend pack_plan prepare_pack(cudf::table_view const&,
                                 pack_options const&,
                                 cuda::stream_ref,
-                                rmm::device_async_resource_ref);
+                                cudf::memory_resources);
   friend pack_plan prepare_pack(cudf::packed_columns const&,
                                 pack_options const&,
                                 cuda::stream_ref,
-                                rmm::device_async_resource_ref);
+                                cudf::memory_resources);
   friend class pack_plan_builder;
-  friend pack_result pack_into(pack_plan const&, cudf::device_span<uint8_t>);
+  friend pack_result pack_into(pack_plan const&,
+                               cudf::device_span<uint8_t>,
+                               cudf::memory_resources);
 };
 
 /**
@@ -414,7 +414,7 @@ class pack_plan_builder {
   friend pack_plan_builder make_pack_plan_builder(cudf::table_view const&,
                                                   pack_options const&,
                                                   cuda::stream_ref,
-                                                  rmm::device_async_resource_ref);
+                                                  cudf::memory_resources);
 };
 
 /**
@@ -423,30 +423,33 @@ class pack_plan_builder {
  * Each region initially inherits the codec in `options`. Callers may edit the
  * returned regions before consuming the builder with `build()`.
  *
+ * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
+ *
  * @param input View of the table to pack
  * @param options Default codec options for every region
  * @param stream Stream used for planning and subsequent `pack_into()` operations
- * @param temp_mr Memory resource used for planning and compression staging allocations
+ * @param mr Memory resources used by the returned plan. The output resource backs allocations that
+ *           live as long as the plan; the temporary resource backs planning scratch
  * @return A builder exposing the discovered regions
  */
 pack_plan_builder make_pack_plan_builder(
   cudf::table_view const& input,
-  pack_options const& options            = {},
-  cuda::stream_ref stream                = cudf::get_default_stream(),
-  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+  pack_options const& options = {},
+  cuda::stream_ref stream     = cudf::get_default_stream(),
+  cudf::memory_resources mr   = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Prepare an exact, reusable uncompressed pack plan for `input`.
  *
  * @param input View of the table to pack
  * @param stream Stream used for planning and subsequent `pack_into()` operations
- * @param temp_mr Memory resource used for planning scratch allocations
+ * @param mr Memory resources used by the returned plan. The output resource backs allocations that
+ *           live as long as the plan; the temporary resource backs planning scratch
  * @return A move-only plan bound to `input` and `stream`
  */
-pack_plan prepare_pack(
-  cudf::table_view const& input,
-  cuda::stream_ref stream                = cudf::get_default_stream(),
-  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+pack_plan prepare_pack(cudf::table_view const& input,
+                       cuda::stream_ref stream   = cudf::get_default_stream(),
+                       cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Prepare a reusable pack plan with explicit compression options.
@@ -458,17 +461,20 @@ pack_plan prepare_pack(
  * `sizes().payload_bytes` is the combined upper-bound capacity; `pack_into()` reports the actual
  * compressed size.
  *
+ * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
+ * @throw cudf::logic_error if the selected codec is disabled
+ *
  * @param input View of the table to pack
  * @param options Compression and codec options
  * @param stream Stream used for planning and subsequent `pack_into()` operations
- * @param temp_mr Memory resource used for planning and compression staging allocations
+ * @param mr Memory resources used by the returned plan. The output resource backs allocations that
+ *           live as long as the plan; the temporary resource backs planning scratch
  * @return A move-only plan bound to `input` and `stream`
  */
-pack_plan prepare_pack(
-  cudf::table_view const& input,
-  pack_options const& options,
-  cuda::stream_ref stream                = cudf::get_default_stream(),
-  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+pack_plan prepare_pack(cudf::table_view const& input,
+                       pack_options const& options,
+                       cuda::stream_ref stream   = cudf::get_default_stream(),
+                       cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Prepare compression of an existing uncompressed `cudf::packed_columns` allocation.
@@ -476,17 +482,22 @@ pack_plan prepare_pack(
  * Compresses directly from `input.gpu_data` without repacking, for example each partition produced
  * by `cudf::contiguous_split()`. `options.compression` must select a compressed representation.
  *
+ * @throw cudf::logic_error if `options.compression` is `pack_compression::none`
+ * @throw cudf::logic_error if `input.metadata` does not describe the layout of `input.gpu_data`
+ * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
+ * @throw cudf::logic_error if the selected codec is disabled
+ *
  * @param input Existing ordinary, uncompressed packed columns
  * @param options Compression options
  * @param stream Stream used for planning and subsequent `pack_into()` operations
- * @param temp_mr Memory resource used for planning and compression staging allocations
+ * @param mr Memory resources used by the returned plan. The output resource backs allocations that
+ *           live as long as the plan; the temporary resource backs planning scratch
  * @return A move-only plan that borrows `input` and is bound to `stream`
  */
-pack_plan prepare_pack(
-  cudf::packed_columns const& input,
-  pack_options const& options,
-  cuda::stream_ref stream                = cudf::get_default_stream(),
-  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+pack_plan prepare_pack(cudf::packed_columns const& input,
+                       pack_options const& options,
+                       cuda::stream_ref stream   = cudf::get_default_stream(),
+                       cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Host metadata and payload size produced by `pack_into()`.
@@ -512,11 +523,18 @@ struct pack_result {
  *
  * The same plan may be executed repeatedly while its input remains valid and unchanged.
  *
+ * @throw cudf::logic_error if `destination` is smaller than `plan.sizes().payload_bytes`
+ * @throw cudf::logic_error if `destination` is not aligned to `plan.sizes().payload_alignment`
+ * @throw cudf::logic_error if compression fails for a region with a forced codec
+ *
  * @param plan Prepared pack plan
  * @param destination Caller-owned output span
+ * @param mr Memory resources used for temporary allocations, including the staging buffers
  * @return Host metadata and the number of payload bytes written
  */
-pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destination);
+pack_result pack_into(pack_plan const& plan,
+                      cudf::device_span<uint8_t> destination,
+                      cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Non-owning view of packed host metadata and device-accessible payload bytes.
@@ -533,6 +551,11 @@ struct packed_data_view {
  * The returned view must not outlive either buffer in `input`.
  * Compressed inputs must be passed to `materialize()` instead.
  *
+ * @throw cudf::logic_error if `input.compression` is not `pack_compression::none`
+ * @throw cudf::logic_error if the payload is pageable host memory and the device cannot access
+ * pageable memory
+ * @throw cudf::logic_error if `input.metadata` is truncated or malformed
+ *
  * @param input Packed metadata and payload
  * @return A non-owning table view into `input.payload`
  */
@@ -543,15 +566,18 @@ table_view unpack_view(packed_data_view input);
  *
  * A pageable host payload is first copied to temporary device memory.
  *
+ * @throw cudf::logic_error if `input.metadata` or `input.payload` is truncated or malformed
+ * @throw cudf::logic_error if the payload codec does not match `input.compression` or is disabled
+ *
  * @param input Packed metadata and payload
  * @param stream Stream used for the deep copy
- * @param mr Memory resource for the returned table
+ * @param mr Memory resources used for temporary allocations and the returned table
  * @return An owning table independent of the packed buffers
  */
 std::unique_ptr<table> materialize(
   packed_data_view input,
-  cuda::stream_ref stream           = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+  cuda::stream_ref stream   = cudf::get_default_stream(),
+  cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Materialize an owning table from a subset of the packed top-level columns.
@@ -560,18 +586,21 @@ std::unique_ptr<table> materialize(
  * pageable host payload. Indices may repeat and appear in any order; each one produces an
  * independent column.
  *
- * @throws std::out_of_range if an index is not in `[0, num_columns)`
+ * @throw std::out_of_range if an index is not in `[0, num_columns)`
+ * @throw cudf::logic_error if `input.metadata` or `input.payload` is truncated or malformed
+ * @throw cudf::logic_error if the payload codec does not match `input.compression` or is disabled
+ *
  * @param input Packed metadata and payload
  * @param column_indices Indices of the top-level columns to materialize, in output order
  * @param stream Stream used for the deep copy
- * @param mr Memory resource for the returned table
+ * @param mr Memory resources used for temporary allocations and the returned table
  * @return An owning table with one column per entry of `column_indices`
  */
 std::unique_ptr<table> materialize(
   packed_data_view input,
   std::span<size_type const> column_indices,
-  cuda::stream_ref stream           = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+  cuda::stream_ref stream   = cudf::get_default_stream(),
+  cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 }  // namespace experimental
 

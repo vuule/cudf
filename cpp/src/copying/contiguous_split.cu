@@ -50,6 +50,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -1774,6 +1775,7 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
  * @param num_partitions the number of partitions (1 meaning no splits)
  * @param user_buffer_size if non-zero, it is the size in bytes that 1MB batches should be
  *        grouped in, as different iterations.
+ * @param batch_size the maximum size in bytes of a batch, a power of two
  * @param stream Optional CUDA stream on which to execute kernels
  * @param temp_mr A memory resource for temporary and scratch space
  *
@@ -1784,6 +1786,7 @@ std::unique_ptr<chunk_iteration_state> compute_batches(int num_bufs,
                                                        std::size_t const* const h_buf_sizes,
                                                        std::size_t num_partitions,
                                                        std::size_t user_buffer_size,
+                                                       std::size_t batch_size,
                                                        cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref temp_mr)
 {
@@ -1799,7 +1802,7 @@ std::unique_ptr<chunk_iteration_state> compute_batches(int num_bufs,
     d_dst_buf_info + num_bufs,
     batches.begin(),
     cuda::proclaim_return_type<cuda::std::pair<std::size_t, std::size_t>>(
-      [desired_batch_size = desired_batch_size] __device__(
+      [desired_batch_size = batch_size] __device__(
         dst_buf_info const& buf) -> cuda::std::pair<std::size_t, std::size_t> {
         // Total bytes for this incoming partition
         std::size_t const bytes = buf.num_elements * static_cast<std::size_t>(buf.element_size);
@@ -1910,8 +1913,9 @@ struct contiguous_split_state {
                          std::size_t user_buffer_size,
                          cuda::stream_ref stream,
                          std::optional<rmm::device_async_resource_ref> mr,
-                         rmm::device_async_resource_ref temp_mr)
-    : contiguous_split_state(input, {}, user_buffer_size, stream, mr, temp_mr)
+                         rmm::device_async_resource_ref temp_mr,
+                         std::size_t batch_size = desired_batch_size)
+    : contiguous_split_state(input, {}, user_buffer_size, batch_size, stream, mr, temp_mr)
   {
   }
 
@@ -1920,7 +1924,7 @@ struct contiguous_split_state {
                          cuda::stream_ref stream,
                          std::optional<rmm::device_async_resource_ref> mr,
                          rmm::device_async_resource_ref temp_mr)
-    : contiguous_split_state(input, splits, 0, stream, mr, temp_mr)
+    : contiguous_split_state(input, splits, 0, desired_batch_size, stream, mr, temp_mr)
   {
   }
 
@@ -2158,6 +2162,7 @@ struct contiguous_split_state {
   contiguous_split_state(cudf::table_view const& input,
                          std::vector<size_type> const& splits,
                          std::size_t user_buffer_size,
+                         std::size_t batch_size,
                          cuda::stream_ref stream,
                          std::optional<rmm::device_async_resource_ref> mr,
                          rmm::device_async_resource_ref temp_mr)
@@ -2193,6 +2198,7 @@ struct contiguous_split_state {
                                        partition_buf_size_and_dst_buf_info->h_buf_sizes,
                                        num_partitions,
                                        user_buffer_size,
+                                       batch_size,
                                        stream,
                                        temp_mr);
 
@@ -2570,7 +2576,8 @@ void compress_batch(chunk_batch const& batch,
                     device_span<device_span<uint8_t const> const> inputs,
                     device_span<device_span<uint8_t> const> outputs,
                     device_span<codec_exec_result> results,
-                    cuda::stream_ref stream)
+                    cuda::stream_ref stream,
+                    rmm::device_async_resource_ref temp_mr)
 {
   if (batch.codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream); }
   if (batch.codec != pack_compression::cascaded) {
@@ -2578,7 +2585,7 @@ void compress_batch(chunk_batch const& batch,
       to_io_compression(batch.codec), inputs, outputs, results, stream);
   }
   auto args = cudf::io::detail::nvcomp::create_batched_nvcomp_args(inputs, outputs, stream);
-  rmm::device_uvector<nvcompStatus_t> statuses(inputs.size(), stream);
+  rmm::device_uvector<nvcompStatus_t> statuses(inputs.size(), stream, temp_mr);
   CUDF_EXPECTS(nvcompBatchedCascadedCompressAsync(args.input_data_ptrs.data(),
                                                   args.input_data_sizes.data(),
                                                   batch.max_chunk_bytes,
@@ -2619,10 +2626,11 @@ class cascaded_decompression {
   cascaded_decompression(device_span<device_span<uint8_t const> const> inputs,
                          device_span<device_span<uint8_t> const> outputs,
                          device_span<codec_exec_result> results,
-                         cuda::stream_ref stream)
+                         cuda::stream_ref stream,
+                         rmm::device_async_resource_ref temp_mr)
     : _args{cudf::io::detail::nvcomp::create_batched_nvcomp_args(inputs, outputs, stream)},
-      _actual_bytes(inputs.size(), stream),
-      _statuses(inputs.size(), stream),
+      _actual_bytes(inputs.size(), stream, temp_mr),
+      _statuses(inputs.size(), stream, temp_mr),
       _results{results}
   {
   }
@@ -2893,7 +2901,7 @@ class payload_reader {
     }
   }
 
-  void upload(cuda::stream_ref stream)
+  void upload(cuda::stream_ref stream, rmm::device_async_resource_ref temp_mr)
   {
     if (_ranges.empty()) { return; }
     // Gaps this small cost less to copy than a separate transfer.
@@ -2914,7 +2922,7 @@ class payload_reader {
       item.staged_offset = staged_bytes;
       staged_bytes = cudf::util::round_up_safe(staged_bytes + item.end - item.begin, split_align);
     }
-    _staged = rmm::device_buffer(staged_bytes, stream, cudf::get_current_device_resource_ref());
+    _staged = rmm::device_buffer(staged_bytes, stream, temp_mr);
     for (auto const& item : merged) {
       CUDF_CUDA_TRY(
         cudf::detail::memcpy_async(static_cast<uint8_t*>(_staged.data()) + item.staged_offset,
@@ -2975,7 +2983,7 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
                                                 std::optional<std::span<size_type const>> selection,
                                                 payload_reader& reader,
                                                 cuda::stream_ref stream,
-                                                rmm::device_async_resource_ref mr)
+                                                cudf::memory_resources mr)
 {
   if (input.metadata.empty()) {
     CUDF_EXPECTS(
@@ -2999,9 +3007,12 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
   auto allocate_buffer = [&](int64_t offset, bool, std::size_t required_bytes) {
     auto const next = std::upper_bound(offsets.begin(), offsets.end(), offset);
     auto const end = next == offsets.end() ? input.payload.size() : static_cast<std::size_t>(*next);
-    auto const bytes = end - static_cast<std::size_t>(offset);
+    // A payload span longer than the packed data would otherwise oversize its last buffer.
+    auto const bytes = next == offsets.end() && required_bytes > 0
+                         ? std::min(required_bytes, end - static_cast<std::size_t>(offset))
+                         : end - static_cast<std::size_t>(offset);
     CUDF_EXPECTS(bytes >= required_bytes, "Packed column buffer is smaller than its column");
-    rmm::device_buffer buffer(bytes, stream, mr);
+    rmm::device_buffer buffer(bytes, stream, mr.get_output_mr());
     sources.push_back(input.payload.data() + offset);
     destinations.push_back(static_cast<uint8_t*>(buffer.data()));
     sizes.push_back(bytes);
@@ -3009,7 +3020,7 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
     return buffer;
   };
   auto columns = materialize_columns(metadata, selection, allocate_buffer);
-  reader.upload(stream);
+  reader.upload(stream, mr.get_temporary_mr());
   for (auto& source : sources) {
     source = reader.device_pointer(source);
   }
@@ -3021,7 +3032,7 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(destinations[i], sources[i], sizes[i], stream));
     }
   } else {
-    auto const temp_mr   = cudf::get_current_device_resource_ref();
+    auto const temp_mr   = mr.get_temporary_mr();
     auto const d_sources = cudf::detail::make_device_uvector_async(sources, stream, temp_mr);
     auto const d_destinations =
       cudf::detail::make_device_uvector_async(destinations, stream, temp_mr);
@@ -3045,30 +3056,47 @@ struct plan_input {
   cudf::device_span<uint8_t const> packed_source;  ///< Borrowed allocation of packed_columns input
 };
 
+// Uncompressed host output is staged one window of copy batches at a time, so a batch must fit in
+// the staging buffer.
+std::size_t copy_batch_bytes(pack_options const& options)
+{
+  CUDF_EXPECTS(options.staging_buffer_bytes >= 4 * split_align,
+               "The staging buffer must hold at least 256 bytes");
+  return std::min(desired_batch_size, std::bit_floor(options.staging_buffer_bytes));
+}
+
 plan_input make_plan_input(cudf::table_view const& input,
+                           pack_options const& options,
                            cuda::stream_ref stream,
-                           rmm::device_async_resource_ref temp_mr)
+                           rmm::device_async_resource_ref plan_mr)
 {
   // A zero user-buffer size selects the existing whole-table layout. std::nullopt suppresses the
   // output allocation while preserving the already-computed source buffers, destination offsets,
   // batching, and metadata state for pack_into().
-  auto state =
-    std::make_unique<detail::contiguous_split_state>(input, 0, stream, std::nullopt, temp_mr);
+  auto state = std::make_unique<detail::contiguous_split_state>(
+    input, 0, stream, std::nullopt, plan_mr, copy_batch_bytes(options));
   auto metadata = state->build_packed_column_metadata();
   return {
     std::move(state), metadata == nullptr ? std::vector<uint8_t>{} : std::move(*metadata), {}};
 }
 
 plan_input make_plan_input(cudf::packed_columns const& input,
+                           pack_options const& options,
                            cuda::stream_ref stream,
-                           rmm::device_async_resource_ref temp_mr)
+                           rmm::device_async_resource_ref plan_mr)
 {
   CUDF_EXPECTS(input.metadata != nullptr && input.gpu_data != nullptr,
                "Packed input must contain metadata and a device allocation");
   auto state = std::make_unique<detail::contiguous_split_state>(
-    cudf::unpack(input), 0, stream, std::nullopt, temp_mr);
-  CUDF_EXPECTS(state->get_total_contiguous_size() == input.gpu_data->size(),
-               "Packed metadata does not describe the complete device allocation");
+    cudf::unpack(input), 0, stream, std::nullopt, plan_mr, copy_batch_bytes(options));
+  // The metadata records every buffer offset, so equal metadata means the planned layout matches
+  // the existing allocation. Empty columns may be described in several ways, but with no bytes
+  // there is no layout to match.
+  auto const planned = state->build_packed_column_metadata();
+  CUDF_EXPECTS(
+    state->get_total_contiguous_size() == input.gpu_data->size() &&
+      (input.gpu_data->size() == 0 || (planned != nullptr && *planned == *input.metadata)),
+    "Packed metadata does not describe the layout of the device allocation");
   return {std::move(state),
           *input.metadata,
           {static_cast<uint8_t const*>(input.gpu_data->data()), input.gpu_data->size()}};
@@ -3091,7 +3119,7 @@ struct prepared_pack_components {
 prepared_pack_components make_prepared_pack_components(
   plan_input&& input,
   pack_options const& options,
-  rmm::device_async_resource_ref temp_mr,
+  rmm::device_async_resource_ref plan_mr,
   std::vector<compression_region_layout> layouts  = {},
   std::span<pack_region const> configured_regions = {})
 {
@@ -3111,9 +3139,7 @@ prepared_pack_components make_prepared_pack_components(
     has_expert_configuration
       ? (uses_compressed_metadata ? pack_compression::automatic : pack_compression::none)
       : options.compression;
-  auto destination_bytes = uncompressed_bytes;
-  CUDF_EXPECTS(options.staging_buffer_bytes >= 4 * split_align,
-               "The staging buffer must hold at least 256 bytes");
+  auto destination_bytes   = uncompressed_bytes;
   auto const window_budget = options.staging_buffer_bytes;
   auto const raw_chunk_bytes =
     std::min(max_raw_chunk_bytes, window_budget) / split_align * split_align;
@@ -3135,7 +3161,7 @@ prepared_pack_components make_prepared_pack_components(
       });
     if (input.packed_source.empty() && !all_regions_are_direct) {
       result.staging_buffer =
-        std::make_unique<rmm::device_buffer>(uncompressed_bytes, stream, temp_mr);
+        std::make_unique<rmm::device_buffer>(uncompressed_bytes, stream, plan_mr);
     }
     auto const* const packed_base = result.staging_buffer != nullptr
                                       ? static_cast<uint8_t const*>(result.staging_buffer->data())
@@ -3246,7 +3272,7 @@ prepared_pack_components make_prepared_pack_components(
       result.max_window_bytes  = std::max(result.max_window_bytes, window.bytes);
       result.max_window_chunks = std::max(result.max_window_chunks, window.end - window.begin);
     }
-    result.d_chunks = cudf::detail::make_device_uvector(result.chunks, stream, temp_mr);
+    result.d_chunks = cudf::detail::make_device_uvector(result.chunks, stream, plan_mr);
   }
 
   auto const metadata_bytes =
@@ -3269,10 +3295,10 @@ struct pack_plan::impl : prepared_pack_components {
 };
 
 struct pack_plan_builder::impl {
-  impl(plan_input&& input, pack_options const& options, rmm::device_async_resource_ref temp_mr)
+  impl(plan_input&& input, pack_options const& options, rmm::device_async_resource_ref plan_mr)
     : input(std::move(input)),
       options(options),
-      temp_mr(temp_mr),
+      plan_mr(plan_mr),
       layouts(this->input.state->get_compression_regions())
   {
     auto const inherited = pack_region_options{options.compression};
@@ -3288,7 +3314,7 @@ struct pack_plan_builder::impl {
 
   plan_input input;
   pack_options options;
-  rmm::device_async_resource_ref temp_mr;
+  rmm::device_async_resource_ref plan_mr;
   std::vector<compression_region_layout> layouts;
   std::vector<pack_region> regions;
 };
@@ -3332,7 +3358,7 @@ pack_plan pack_plan_builder::build() &&
   return pack_plan{
     std::make_unique<pack_plan::impl>(make_prepared_pack_components(std::move(builder->input),
                                                                     builder->options,
-                                                                    builder->temp_mr,
+                                                                    builder->plan_mr,
                                                                     std::move(builder->layouts),
                                                                     builder->regions))};
 }
@@ -3346,44 +3372,46 @@ pack_sizes pack_plan::sizes() const
 pack_plan_builder make_pack_plan_builder(cudf::table_view const& input,
                                          pack_options const& options,
                                          cuda::stream_ref stream,
-                                         rmm::device_async_resource_ref temp_mr)
+                                         cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
-    make_plan_input(input, stream, temp_mr), options, temp_mr)};
+    make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr())};
 }
 
 pack_plan prepare_pack(cudf::table_view const& input,
                        cuda::stream_ref stream,
-                       rmm::device_async_resource_ref temp_mr)
+                       cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
-  return prepare_pack(input, pack_options{}, stream, temp_mr);
+  return prepare_pack(input, pack_options{}, stream, mr);
 }
 
 pack_plan prepare_pack(cudf::table_view const& input,
                        pack_options const& options,
                        cuda::stream_ref stream,
-                       rmm::device_async_resource_ref temp_mr)
+                       cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
-  return pack_plan{std::make_unique<pack_plan::impl>(
-    make_prepared_pack_components(make_plan_input(input, stream, temp_mr), options, temp_mr))};
+  return pack_plan{std::make_unique<pack_plan::impl>(make_prepared_pack_components(
+    make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr()))};
 }
 
 pack_plan prepare_pack(cudf::packed_columns const& input,
                        pack_options const& options,
                        cuda::stream_ref stream,
-                       rmm::device_async_resource_ref temp_mr)
+                       cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   CUDF_EXPECTS(options.compression != pack_compression::none,
                "The packed_columns overload requires a compressed output representation");
-  return pack_plan{std::make_unique<pack_plan::impl>(
-    make_prepared_pack_components(make_plan_input(input, stream, temp_mr), options, temp_mr))};
+  return pack_plan{std::make_unique<pack_plan::impl>(make_prepared_pack_components(
+    make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr()))};
 }
 
-pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destination)
+pack_result pack_into(pack_plan const& plan,
+                      cudf::device_span<uint8_t> destination,
+                      cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   CUDF_EXPECTS(plan._impl != nullptr, "Cannot execute a moved-from pack plan");
@@ -3396,7 +3424,8 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
     destination.empty() ||
       reinterpret_cast<std::uintptr_t>(destination.data()) % sizes.payload_alignment == 0,
     "The destination pointer does not satisfy the prepared payload alignment");
-  auto const stream = state.get_stream();
+  auto const stream  = state.get_stream();
+  auto const temp_mr = mr.get_temporary_mr();
   // Host destinations are written with DMA copies through bounded device staging memory, because
   // kernels storing to host memory across PCIe are several times slower.
   auto const to_host = !destination.empty() && [&] {
@@ -3409,7 +3438,7 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
 
   if (impl.regions.empty()) {
     if (to_host) {
-      rmm::device_buffer staging(impl.max_window_bytes, stream);
+      rmm::device_buffer staging(impl.max_window_bytes, stream, temp_mr);
       for (auto const& window : impl.windows) {
         state.pack_window_into(window, static_cast<uint8_t*>(staging.data()));
         copy_to_host(window.offset, staging.data(), window.bytes);
@@ -3431,14 +3460,14 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
   auto const table_bytes = num_chunks * sizeof(uint64_t);
   auto const compacted_bytes =
     to_host ? impl.max_window_bytes + impl.max_window_chunks * split_align : 0;
-  rmm::device_buffer staging(impl.max_window_bytes + compacted_bytes, stream);
+  rmm::device_buffer staging(impl.max_window_bytes + compacted_bytes, stream, temp_mr);
   auto* const slots     = static_cast<uint8_t*>(staging.data());
   auto* const compacted = slots + impl.max_window_bytes;
 
-  rmm::device_uvector<device_span<uint8_t const>> inputs(num_chunks, stream);
-  rmm::device_uvector<device_span<uint8_t>> outputs(num_chunks, stream);
-  rmm::device_uvector<codec_exec_result> results(num_chunks, stream);
-  thrust::for_each_n(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+  rmm::device_uvector<device_span<uint8_t const>> inputs(num_chunks, stream, temp_mr);
+  rmm::device_uvector<device_span<uint8_t>> outputs(num_chunks, stream, temp_mr);
+  rmm::device_uvector<codec_exec_result> results(num_chunks, stream, temp_mr);
+  thrust::for_each_n(rmm::exec_policy_nosync(stream, temp_mr),
                      cuda::counting_iterator<std::size_t>{0},
                      num_chunks,
                      [chunks  = impl.d_chunks->data(),
@@ -3462,7 +3491,8 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
         device_span<device_span<uint8_t const> const>{inputs}.subspan(begin, end - begin),
         device_span<device_span<uint8_t> const>{outputs}.subspan(begin, end - begin),
         device_span<codec_exec_result>{results}.subspan(begin, end - begin),
-        stream);
+        stream,
+        temp_mr);
     }
   };
 
@@ -3502,7 +3532,6 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
       copy_bytes.push_back(bytes);
       payload_bytes += bytes;
     }
-    auto const temp_mr      = cudf::get_current_device_resource_ref();
     auto const d_sources    = cudf::detail::make_device_uvector(sources, stream, temp_mr);
     auto const d_targets    = cudf::detail::make_device_uvector(targets, stream, temp_mr);
     auto const d_copy_bytes = cudf::detail::make_device_uvector(copy_bytes, stream, temp_mr);
@@ -3540,6 +3569,16 @@ table_view unpack_view(packed_data_view input)
   CUDF_EXPECTS(input.compression == pack_compression::none,
                "Compressed packed data cannot be exposed as a zero-copy table view");
   if (input.metadata.empty()) { return table_view{}; }
+  CUDF_EXPECTS(
+    input.payload.empty() || memory_type(input.payload.data()) != cudaMemoryTypeUnregistered ||
+      [] {
+        int device = 0;
+        int access = 0;
+        CUDF_CUDA_TRY(cudaGetDevice(&device));
+        CUDF_CUDA_TRY(cudaDeviceGetAttribute(&access, cudaDevAttrPageableMemoryAccess, device));
+        return access != 0;
+      }(),
+    "A zero-copy view requires a device-accessible payload");
   // Validate the self-sized metadata before using the legacy pointer-based unpack implementation.
   [[maybe_unused]] auto const metadata = cudf::packed_metadata_view{input.metadata};
   return cudf::unpack(input.metadata.data(), input.payload.data());
@@ -3550,7 +3589,7 @@ namespace {
 std::unique_ptr<table> materialize_selection(packed_data_view input,
                                              std::optional<std::span<size_type const>> selection,
                                              cuda::stream_ref stream,
-                                             rmm::device_async_resource_ref mr)
+                                             cudf::memory_resources mr)
 {
   payload_reader reader{input.payload};
   if (!selection.has_value()) { reader.request(input.payload.data(), input.payload.size()); }
@@ -3652,13 +3691,14 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                    std::to_string(target));
     CUDF_EXPECTS(entry->uncompressed_bytes >= required_bytes,
                  "Compressed region is smaller than its column buffer");
-    rmm::device_buffer buffer(entry->uncompressed_bytes, stream, mr);
+    rmm::device_buffer buffer(entry->uncompressed_bytes, stream, mr.get_output_mr());
     submit_decompression(*entry, buffer.data());
     return buffer;
   };
   auto columns =
     materialize_columns(packed_metadata_view{parsed.legacy_metadata}, selection, allocate_buffer);
-  reader.upload(stream);
+  auto const temp_mr = mr.get_temporary_mr();
+  reader.upload(stream, temp_mr);
   for (auto& codec : work) {
     for (auto& chunk : codec.inputs) {
       chunk = {reader.device_pointer(chunk.data()), chunk.size()};
@@ -3676,7 +3716,6 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     outputs.insert(outputs.end(), codec.outputs.begin(), codec.outputs.end());
     work_offsets.push_back(inputs.size());
   }
-  auto const temp_mr   = cudf::get_current_device_resource_ref();
   auto const d_inputs  = cudf::detail::make_device_uvector_async(inputs, stream, temp_mr);
   auto const d_outputs = cudf::detail::make_device_uvector_async(outputs, stream, temp_mr);
   rmm::device_uvector<codec_exec_result> results(inputs.size(), stream, temp_mr);
@@ -3697,7 +3736,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
   for (std::size_t i = 0; i < work.size(); ++i) {
     if (work[i].codec != pack_compression::cascaded) { continue; }
     auto const [d_in, d_out, d_results] = spans(i);
-    cascaded.emplace_back(d_in, d_out, d_results, stream);
+    cascaded.emplace_back(d_in, d_out, d_results, stream, temp_mr);
   }
   auto const forked = cudf::detail::fork_streams(stream, cascaded.size());
   for (std::size_t k = 0; k < cascaded.size(); ++k) {
@@ -3727,7 +3766,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
 
 std::unique_ptr<table> materialize(packed_data_view input,
                                    cuda::stream_ref stream,
-                                   rmm::device_async_resource_ref mr)
+                                   cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   return materialize_selection(input, std::nullopt, stream, mr);
@@ -3736,7 +3775,7 @@ std::unique_ptr<table> materialize(packed_data_view input,
 std::unique_ptr<table> materialize(packed_data_view input,
                                    std::span<size_type const> column_indices,
                                    cuda::stream_ref stream,
-                                   rmm::device_async_resource_ref mr)
+                                   cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   return materialize_selection(input, column_indices, stream, mr);

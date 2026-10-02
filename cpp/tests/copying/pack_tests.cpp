@@ -8,12 +8,14 @@
 #include <cudf_test/base_fixture.hpp>
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/iterator_utilities.hpp>
+#include <cudf_test/memory_resource_utilities.hpp>
 #include <cudf_test/table_utilities.hpp>
 
 #include <cudf/contiguous_split.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/detail/utilities/host_vector.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/io/detail/codec.hpp>
 
 #include <algorithm>
 #include <array>
@@ -70,6 +72,20 @@ region_directory read_region_directory(std::vector<uint8_t> const& metadata)
 
 constexpr std::array compressed_codecs{
   cx::pack_compression::cascaded, cx::pack_compression::zstd, cx::pack_compression::snappy};
+
+bool is_codec_enabled(cx::pack_compression compression)
+{
+  auto const io_type = [&] {
+    switch (compression) {
+      case cx::pack_compression::zstd: return cudf::io::compression_type::ZSTD;
+      case cx::pack_compression::snappy: return cudf::io::compression_type::SNAPPY;
+      default: return cudf::io::compression_type::NONE;
+    }
+  }();
+  return io_type == cudf::io::compression_type::NONE ||
+         (cudf::io::detail::is_compression_supported(io_type) &&
+          cudf::io::detail::is_decompression_supported(io_type));
+}
 
 cx::pack_options make_options(cx::pack_compression compression)
 {
@@ -175,21 +191,23 @@ struct PackUnpackTest : public cudf::test::BaseFixture {
 
   void verify_prepared_compressed_round_trip(cudf::table_view const& input)
   {
+    // Host destinations are always windowed; ExperimentalPackIntoHost covers the other pairings.
+    constexpr std::array cases{std::pair{false, destination_kind::device},
+                               std::pair{true, destination_kind::pinned},
+                               std::pair{true, destination_kind::pageable}};
     for (auto const compression : compressed_codecs) {
-      for (auto const windowed : {false, true}) {
+      if (!is_codec_enabled(compression)) { continue; }
+      for (auto const [windowed, kind] : cases) {
+        SCOPED_TRACE(static_cast<int>(compression));
+        SCOPED_TRACE(windowed);
+        SCOPED_TRACE(static_cast<int>(kind));
         auto const options =
           windowed ? make_windowed_options(compression) : make_options(compression);
-        auto const plan = cx::prepare_pack(input, options);
-        for (auto const kind :
-             {destination_kind::device, destination_kind::pinned, destination_kind::pageable}) {
-          SCOPED_TRACE(static_cast<int>(compression));
-          SCOPED_TRACE(windowed);
-          SCOPED_TRACE(static_cast<int>(kind));
-          auto const packed = pack_to(plan, kind);
-          EXPECT_EQ(packed.result.compression, compression);
-          EXPECT_LE(packed.result.payload_bytes, plan.sizes().payload_bytes);
-          expect_materializes_to(input, packed.view());
-        }
+        auto const plan   = cx::prepare_pack(input, options);
+        auto const packed = pack_to(plan, kind);
+        EXPECT_EQ(packed.result.compression, compression);
+        EXPECT_LE(packed.result.payload_bytes, plan.sizes().payload_bytes);
+        expect_materializes_to(input, packed.view());
       }
     }
   }
@@ -269,6 +287,128 @@ TEST_F(PackUnpackTest, ExperimentalPackIntoHost)
       }
     }
   }
+}
+
+TEST_F(PackUnpackTest, ExperimentalPackIntoHostBufferLargerThanStaging)
+{
+  constexpr cudf::size_type num_rows = 256 * 1024;
+  auto const values =
+    cudf::detail::make_counting_transform_iterator(0, [](int64_t i) { return i; });
+  cudf::test::fixed_width_column_wrapper<int64_t> numbers(
+    values, values + num_rows, cudf::test::iterators::null_at(7));
+  auto const input = cudf::table_view{{numbers}};
+
+  // The 2 MiB data buffer spans several 1 MiB copy batches, each larger than the staging buffer.
+  auto options                 = make_options(cx::pack_compression::none);
+  options.staging_buffer_bytes = 64 * 1024 + 3 * 64;
+  auto const plan              = cx::prepare_pack(input, options);
+  for (auto const kind : {destination_kind::pinned, destination_kind::pageable}) {
+    SCOPED_TRACE(static_cast<int>(kind));
+    expect_materializes_to(input, pack_to(plan, kind).view());
+  }
+}
+
+TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
+{
+  cudf::test::fixed_width_column_wrapper<int64_t> numbers({1, 2, 3, 4, 5, 6},
+                                                          {true, false, true, true, true, true});
+  cudf::test::strings_column_wrapper strings(
+    {"explicit", "memory", "", "resources", "for", "pack"});
+  auto const input  = cudf::table_view{{numbers, strings}};
+  auto const stream = cudf::get_default_stream();
+
+  {
+    auto harness = cudf::test::memory_resource_test_harness{};
+    // Plan state is owned by the returned plan, so it comes from the output resource.
+    auto const plan = [&] {
+      auto const scope = harness.fail_on_current_device_resource_use();
+      auto result      = cx::prepare_pack(input, cx::pack_options{}, stream, harness.resources());
+      harness.synchronize(stream);
+      return result;
+    }();
+    harness.expect_output_allocations_live(stream);
+
+    auto pinned =
+      cudf::detail::make_pinned_vector_async<uint8_t>(plan.sizes().payload_bytes, stream);
+    auto const packed = [&] {
+      auto const scope = harness.fail_on_current_device_resource_use();
+      auto result      = cx::pack_into(
+        plan, cudf::device_span<uint8_t>{pinned.data(), pinned.size()}, harness.resources());
+      harness.synchronize(stream);
+      return result;
+    }();
+    harness.expect_temporary_allocation_activity(stream);
+    harness.expect_temporary_allocations_released(stream);
+
+    auto const view =
+      cx::packed_data_view{packed.metadata,
+                           cudf::device_span<uint8_t const>{pinned.data(), packed.payload_bytes},
+                           packed.compression};
+    auto materialized = [&] {
+      auto const scope = harness.fail_on_current_device_resource_use();
+      auto result      = cx::materialize(view, stream, harness.resources());
+      harness.synchronize(stream);
+      return result;
+    }();
+    CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
+    materialized.reset();
+  }
+
+  {
+    auto harness    = cudf::test::memory_resource_test_harness{};
+    auto const plan = cx::prepare_pack(
+      input, make_options(cx::pack_compression::cascaded), stream, harness.resources());
+    harness.expect_output_allocations_live(stream);
+    auto output       = rmm::device_buffer(plan.sizes().payload_bytes, stream);
+    auto const packed = cx::pack_into(plan, as_span(output), harness.resources());
+    harness.expect_temporary_allocation_activity(stream);
+    harness.expect_temporary_allocations_released(stream);
+
+    auto const temporary_before = harness.temporary_mr().get_bytes_counter().total;
+    auto const view =
+      cx::packed_data_view{packed.metadata,
+                           cudf::device_span<uint8_t const>{
+                             static_cast<uint8_t const*>(output.data()), packed.payload_bytes},
+                           packed.compression};
+    auto materialized = cx::materialize(view, stream, harness.resources());
+    harness.expect_temporary_allocations_released(stream);
+    EXPECT_GT(harness.temporary_mr().get_bytes_counter().total, temporary_before);
+    CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
+  }
+}
+
+TEST_F(PackUnpackTest, ExperimentalUnpackViewPageablePayload)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3});
+  auto const input  = cudf::table_view{{numbers}};
+  auto const packed = pack_to(cx::prepare_pack(input), destination_kind::pageable);
+  int device        = 0;
+  int access        = 0;
+  CUDF_CUDA_TRY(cudaGetDevice(&device));
+  CUDF_CUDA_TRY(cudaDeviceGetAttribute(&access, cudaDevAttrPageableMemoryAccess, device));
+  if (access != 0) {
+    CUDF_TEST_EXPECT_TABLES_EQUAL(input, cx::unpack_view(packed.view()));
+  } else {
+    EXPECT_THROW(cx::unpack_view(packed.view()), cudf::logic_error);
+  }
+}
+
+TEST_F(PackUnpackTest, ExperimentalMaterializeOversizedUncompressedPayload)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4, 5});
+  auto const input  = cudf::table_view{{numbers}};
+  auto const plan   = cx::prepare_pack(input);
+  auto const stream = cudf::get_default_stream();
+  rmm::device_buffer buffer(plan.sizes().payload_bytes + 4096, stream);
+  auto const result = cx::pack_into(plan, as_span(buffer));
+  auto const view   = cx::packed_data_view{
+    result.metadata,
+    cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(buffer.data()), buffer.size()},
+    result.compression};
+  auto materialized = cx::materialize(view);
+  CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
+  auto columns = materialized->release();
+  EXPECT_EQ(columns.front()->release().data->size(), 5 * sizeof(int32_t));
 }
 
 TEST_F(PackUnpackTest, ExperimentalMaterializeColumnSubset)
@@ -380,6 +520,7 @@ TEST_F(PackUnpackTest, ExperimentalCompressExistingPackedColumns)
   auto const packed = cudf::pack(input);
 
   for (auto const compression : compressed_codecs) {
+    if (!is_codec_enabled(compression)) { continue; }
     SCOPED_TRACE(static_cast<int>(compression));
     auto const plan = cx::prepare_pack(packed, make_options(compression));
     EXPECT_EQ(plan.sizes().uncompressed_payload_bytes, packed.gpu_data->size());
@@ -394,10 +535,31 @@ TEST_F(PackUnpackTest, ExperimentalCompressContiguousSplitPartitions)
     cudf::detail::make_counting_transform_iterator(0, [](int64_t i) { return (i / 16) % 1000; });
   cudf::test::fixed_width_column_wrapper<int64_t> numbers(
     values, values + num_rows, cudf::test::iterators::null_at(5));
-  auto const words = cudf::detail::make_counting_transform_iterator(
-    0, [](int32_t i) { return std::to_string(i % 100); });
+  // Strings and lists are all empty in the partition [1000, 20000).
+  auto const is_empty_row = [](cudf::size_type i) { return i >= 1000 && i < 20000; };
+  auto const words        = cudf::detail::make_counting_transform_iterator(
+    0, [&](int32_t i) { return is_empty_row(i) ? std::string{} : std::to_string(i % 100); });
   cudf::test::strings_column_wrapper strings(words, words + num_rows);
-  auto const input = cudf::table_view{{numbers, strings}};
+  std::vector<cudf::size_type> list_offsets(num_rows + 1, 0);
+  for (cudf::size_type i = 0; i < num_rows; ++i) {
+    list_offsets[i + 1] = list_offsets[i] + (is_empty_row(i) ? 0 : 2);
+  }
+  auto const elements =
+    cudf::detail::make_counting_transform_iterator(0, [](int32_t i) { return i % 7; });
+  auto lists = cudf::make_lists_column(
+    num_rows,
+    cudf::test::fixed_width_column_wrapper<cudf::size_type>(list_offsets.begin(),
+                                                            list_offsets.end())
+      .release(),
+    cudf::test::fixed_width_column_wrapper<int32_t>(elements, elements + list_offsets.back())
+      .release(),
+    0,
+    {});
+  auto const members = cudf::detail::make_counting_transform_iterator(
+    0, [](int32_t i) { return static_cast<int16_t>(i % 300); });
+  cudf::test::fixed_width_column_wrapper<int16_t> member(members, members + num_rows);
+  cudf::test::structs_column_wrapper structs({member}, cudf::test::iterators::null_at(30000));
+  auto const input = cudf::table_view{{numbers, strings, lists->view(), structs}};
 
   std::vector<cudf::size_type> const splits{0, 1000, 20000, 20001, 50000};
   auto const partitions = cudf::contiguous_split(input, splits);
@@ -416,6 +578,27 @@ TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireCompression)
   cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4});
   auto const packed = cudf::pack(cudf::table_view{{numbers}});
   EXPECT_THROW(cx::prepare_pack(packed, cx::pack_options{}), cudf::logic_error);
+}
+
+TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireMatchingLayout)
+{
+  // Two columns stored in reverse order: the total size matches the planned layout, but the
+  // buffer offsets do not.
+  constexpr cudf::size_type num_rows = 64;
+  constexpr std::size_t column_bytes = num_rows * sizeof(int32_t);
+  auto const stream                  = cudf::get_default_stream();
+  auto data = std::make_unique<rmm::device_buffer>(2 * column_bytes, stream);
+  CUDF_CUDA_TRY(cudaMemsetAsync(data->data(), 0, data->size(), stream.get()));
+  auto const* const base = static_cast<uint8_t const*>(data->data());
+  auto const type        = cudf::data_type{cudf::type_id::INT32};
+  auto const input =
+    cudf::table_view{{cudf::column_view{type, num_rows, base + column_bytes, nullptr, 0},
+                      cudf::column_view{type, num_rows, base, nullptr, 0}}};
+  auto metadata =
+    std::make_unique<std::vector<uint8_t>>(cudf::pack_metadata(input, base, data->size()));
+  cudf::packed_columns const packed{std::move(metadata), std::move(data)};
+  EXPECT_THROW(cx::prepare_pack(packed, make_options(cx::pack_compression::cascaded)),
+               cudf::logic_error);
 }
 
 TEST_F(PackUnpackTest, ExperimentalCascadedUsesNativeTypedRegions)
