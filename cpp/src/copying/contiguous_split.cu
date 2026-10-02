@@ -3381,24 +3381,22 @@ pack_plan_builder make_pack_plan_builder(cudf::table_view const& input,
     make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr())};
 }
 
+pack_plan_builder make_pack_plan_builder(cudf::packed_columns const& input,
+                                         pack_options const& options,
+                                         cuda::stream_ref stream,
+                                         cudf::memory_resources mr)
+{
+  CUDF_FUNC_RANGE();
+  return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
+    make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr())};
+}
+
 pack_plan prepare_pack(cudf::table_view const& input,
                        pack_options const& options,
                        cuda::stream_ref stream,
                        cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
-  return pack_plan{std::make_unique<pack_plan::impl>(make_prepared_pack_components(
-    make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr()))};
-}
-
-pack_plan prepare_pack(cudf::packed_columns const& input,
-                       pack_options const& options,
-                       cuda::stream_ref stream,
-                       cudf::memory_resources mr)
-{
-  CUDF_FUNC_RANGE();
-  CUDF_EXPECTS(options.compression != pack_compression::none,
-               "The packed_columns overload requires a compressed output representation");
   return pack_plan{std::make_unique<pack_plan::impl>(make_prepared_pack_components(
     make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr()))};
 }

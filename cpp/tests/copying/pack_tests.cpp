@@ -515,10 +515,41 @@ TEST_F(PackUnpackTest, ExperimentalCompressExistingPackedColumns)
   for (auto const compression : compressed_codecs) {
     if (!is_codec_enabled(compression)) { continue; }
     SCOPED_TRACE(static_cast<int>(compression));
-    auto const plan = cx::prepare_pack(packed, make_options(compression));
+    auto const plan = cx::make_pack_plan_builder(packed, make_options(compression)).build();
     EXPECT_EQ(plan.sizes().uncompressed_payload_bytes, packed.gpu_data->size());
     expect_materializes_to(input, pack_to_device(plan).view());
   }
+}
+
+TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsPerRegionCompression)
+{
+  if (!is_codec_enabled(cx::pack_compression::zstd)) { GTEST_SKIP() << "Zstd is disabled"; }
+  std::vector<int32_t> values(4096, 17);
+  std::vector<std::string> words(4096, "existing-packed-region-selection");
+  cudf::test::fixed_width_column_wrapper<int32_t> numbers(values.begin(), values.end());
+  cudf::test::strings_column_wrapper strings(words.begin(), words.end());
+  auto const input  = cudf::table_view{{numbers, strings}};
+  auto const packed = cudf::pack(input);
+
+  auto builder = cx::make_pack_plan_builder(packed, make_options(cx::pack_compression::none));
+  for (auto& region : builder.regions()) {
+    if (region.info.kind == cx::pack_region_kind::string_characters) {
+      region.codec = cx::pack_compression::zstd;
+    }
+  }
+  auto const plan = std::move(builder).build();
+  EXPECT_EQ(plan.sizes().uncompressed_payload_bytes, packed.gpu_data->size());
+
+  auto const result  = pack_to_device(plan);
+  auto const entries = read_region_directory(result.result.metadata).entries;
+  auto const count   = [&](cx::pack_compression compression) {
+    return std::count_if(entries.begin(), entries.end(), [&](auto const& entry) {
+      return static_cast<cx::pack_compression>(entry.compression) == compression;
+    });
+  };
+  EXPECT_EQ(count(cx::pack_compression::zstd), 1);
+  EXPECT_EQ(count(cx::pack_compression::none), std::ssize(entries) - 1);
+  expect_materializes_to(input, result.view());
 }
 
 TEST_F(PackUnpackTest, ExperimentalCompressContiguousSplitPartitions)
@@ -561,17 +592,22 @@ TEST_F(PackUnpackTest, ExperimentalCompressContiguousSplitPartitions)
   for (std::size_t i = 0; i < partitions.size(); ++i) {
     SCOPED_TRACE(i);
     auto const plan =
-      cx::prepare_pack(partitions[i].data, make_options(cx::pack_compression::cascaded));
+      cx::make_pack_plan_builder(partitions[i].data, make_options(cx::pack_compression::cascaded))
+        .build();
     expect_materializes_to(expected[i], pack_to_device(plan).view());
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireCompression)
+TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsUncompressedCopy)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4});
-  auto const packed = cudf::pack(cudf::table_view{{numbers}});
-  EXPECT_THROW(cx::prepare_pack(packed, make_options(cx::pack_compression::none)),
-               cudf::logic_error);
+  auto const input  = cudf::table_view{{numbers}};
+  auto const packed = cudf::pack(input);
+  auto const plan =
+    cx::make_pack_plan_builder(packed, make_options(cx::pack_compression::none)).build();
+  auto const result = pack_to_device(plan);
+  EXPECT_EQ(result.result.payload_bytes, packed.gpu_data->size());
+  CUDF_TEST_EXPECT_TABLES_EQUAL(input, cx::unpack_view(result.view()));
 }
 
 TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireMatchingLayout)
@@ -591,7 +627,7 @@ TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireMatchingLayout)
   auto metadata =
     std::make_unique<std::vector<uint8_t>>(cudf::pack_metadata(input, base, data->size()));
   cudf::packed_columns const packed{std::move(metadata), std::move(data)};
-  EXPECT_THROW(cx::prepare_pack(packed, make_options(cx::pack_compression::cascaded)),
+  EXPECT_THROW(cx::make_pack_plan_builder(packed, make_options(cx::pack_compression::cascaded)),
                cudf::logic_error);
 }
 

@@ -369,10 +369,6 @@ class pack_plan {
                                 pack_options const&,
                                 cuda::stream_ref,
                                 cudf::memory_resources);
-  friend pack_plan prepare_pack(cudf::packed_columns const&,
-                                pack_options const&,
-                                cuda::stream_ref,
-                                cudf::memory_resources);
   friend class pack_plan_builder;
   friend pack_result pack_into(pack_plan const&, std::span<uint8_t>, cudf::memory_resources);
 };
@@ -405,6 +401,10 @@ class pack_plan_builder {
                                                   pack_options const&,
                                                   cuda::stream_ref,
                                                   cudf::memory_resources);
+  friend pack_plan_builder make_pack_plan_builder(cudf::packed_columns const&,
+                                                  pack_options const&,
+                                                  cuda::stream_ref,
+                                                  cudf::memory_resources);
 };
 
 /**
@@ -424,6 +424,29 @@ class pack_plan_builder {
  */
 pack_plan_builder make_pack_plan_builder(
   cudf::table_view const& input,
+  pack_options const& options = {},
+  cuda::stream_ref stream     = cudf::get_default_stream(),
+  cudf::memory_resources mr   = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Discover configurable physical regions of an existing uncompressed `packed_columns`.
+ *
+ * The resulting plan compresses directly from `input.gpu_data` without repacking, for example each
+ * partition produced by `cudf::contiguous_split()`. Each region initially inherits the codec in
+ * `options`. Call `build()` directly to apply `options` to every region.
+ *
+ * @throw cudf::logic_error if `input.metadata` does not describe the layout of `input.gpu_data`
+ * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
+ *
+ * @param input Existing ordinary, uncompressed packed columns
+ * @param options Default codec options for every region
+ * @param stream Stream used for planning and subsequent `pack_into()` operations
+ * @param mr Memory resources used by the returned plan. The output resource backs allocations that
+ *           live as long as the plan; the temporary resource backs planning scratch
+ * @return A builder exposing the discovered regions; its plan borrows `input`
+ */
+pack_plan_builder make_pack_plan_builder(
+  cudf::packed_columns const& input,
   pack_options const& options = {},
   cuda::stream_ref stream     = cudf::get_default_stream(),
   cudf::memory_resources mr   = cudf::get_current_device_resource_ref());
@@ -452,29 +475,6 @@ pack_plan_builder make_pack_plan_builder(
  * @return A move-only plan bound to `input` and `stream`
  */
 pack_plan prepare_pack(cudf::table_view const& input,
-                       pack_options const& options = {},
-                       cuda::stream_ref stream     = cudf::get_default_stream(),
-                       cudf::memory_resources mr   = cudf::get_current_device_resource_ref());
-
-/**
- * @brief Prepare compression of an existing uncompressed `cudf::packed_columns` allocation.
- *
- * Compresses directly from `input.gpu_data` without repacking, for example each partition produced
- * by `cudf::contiguous_split()`. `options.compression` must select a compressed representation.
- *
- * @throw cudf::logic_error if `options.compression` is `pack_compression::none`
- * @throw cudf::logic_error if `input.metadata` does not describe the layout of `input.gpu_data`
- * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
- * @throw cudf::logic_error if an explicitly selected codec is disabled
- *
- * @param input Existing ordinary, uncompressed packed columns
- * @param options Compression options
- * @param stream Stream used for planning and subsequent `pack_into()` operations
- * @param mr Memory resources used by the returned plan. The output resource backs allocations that
- *           live as long as the plan; the temporary resource backs planning scratch
- * @return A move-only plan that borrows `input` and is bound to `stream`
- */
-pack_plan prepare_pack(cudf::packed_columns const& input,
                        pack_options const& options = {},
                        cuda::stream_ref stream     = cudf::get_default_stream(),
                        cudf::memory_resources mr   = cudf::get_current_device_resource_ref());
