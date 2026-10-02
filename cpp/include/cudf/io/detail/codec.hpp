@@ -117,7 +117,7 @@ void compress(compression_type compression,
               device_span<device_span<uint8_t> const> outputs,
               device_span<codec_exec_result> results,
               cuda::stream_ref stream,
-              cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+              cudf::memory_resources mr);
 
 /**
  * @brief Decompresses a host memory buffer.
@@ -160,7 +160,7 @@ void decompress(compression_type compression,
                 size_t max_uncomp_chunk_size,
                 size_t max_total_uncomp_size,
                 cuda::stream_ref stream,
-                cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+                cudf::memory_resources mr);
 
 /** @} */  // end of group
 }  // namespace io::detail

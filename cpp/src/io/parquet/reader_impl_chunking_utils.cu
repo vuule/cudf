@@ -615,7 +615,8 @@ decompress_page_data(host_span<ColumnChunkDesc const> chunks,
                                  d_comp_res_view,
                                  codec.max_decompressed_size,
                                  codec.total_decomp_size,
-                                 stream);
+                                 stream,
+                                 cudf::get_current_device_resource_ref());
 
     start_pos += codec.num_pages;
   }
