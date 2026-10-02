@@ -278,9 +278,11 @@ namespace experimental {
 enum class pack_compression : int32_t {
   none      = 0,  ///< Preserve the current uncompressed packed representation
   automatic = 1,  ///< Select a codec independently for each physical region
-  cascaded  = 2,  ///< nvCOMP Cascaded
-  zstd      = 3,  ///< Zstd
-  snappy    = 4,  ///< Snappy
+  cascaded  = 2,  ///< nvCOMP Cascaded, on values of each region's native width and signedness.
+                  ///< Values wider than 64 bits, such as `DECIMAL128`, and string characters are
+                  ///< treated as bytes.
+  zstd   = 3,     ///< Zstd
+  snappy = 4,     ///< Snappy
 };
 
 /**

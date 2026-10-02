@@ -1295,7 +1295,8 @@ std::unique_ptr<packed_src_and_dst_pointers> setup_src_and_dst_pointers(
  * @param num_src_bufs number of buffers for the source columns including children
  * @param num_bufs num_src_bufs times the number of partitions
  * @param stream Optional CUDA stream on which to execute kernels
- * @param temp_mr A memory resource for temporary and scratch space
+ * @param temp_mr A memory resource for the returned state
+ * @param scratch_mr A memory resource for allocations released before returning
  *
  * @returns new unique pointer to `packed_partition_buf_size_and_dst_buf_info`
  */
@@ -1306,7 +1307,8 @@ std::unique_ptr<packed_partition_buf_size_and_dst_buf_info> compute_splits(
   cudf::size_type num_src_bufs,
   std::size_t num_bufs,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref temp_mr)
+  rmm::device_async_resource_ref temp_mr,
+  rmm::device_async_resource_ref scratch_mr)
 {
   auto partition_buf_size_and_dst_buf_info =
     std::make_unique<packed_partition_buf_size_and_dst_buf_info>(
@@ -1316,7 +1318,7 @@ std::unique_ptr<packed_partition_buf_size_and_dst_buf_info> compute_splits(
   auto const d_buf_sizes    = partition_buf_size_and_dst_buf_info->d_buf_sizes;
 
   auto const split_indices_and_src_buf_info = packed_split_indices_and_src_buf_info(
-    input, splits, num_partitions, num_src_bufs, stream, temp_mr);
+    input, splits, num_partitions, num_src_bufs, stream, scratch_mr);
 
   auto const d_src_buf_info = split_indices_and_src_buf_info.d_src_buf_info;
   auto const offset_stack_partition_size =
@@ -1326,7 +1328,7 @@ std::unique_ptr<packed_partition_buf_size_and_dst_buf_info> compute_splits(
 
   // compute sizes of each column in each partition, including alignment.
   thrust::transform(
-    rmm::exec_policy_nosync(stream, temp_mr),
+    rmm::exec_policy_nosync(stream, scratch_mr),
     cuda::counting_iterator<std::size_t>{0},
     cuda::counting_iterator<std::size_t>{num_bufs},
     d_dst_buf_info,
@@ -1414,7 +1416,7 @@ std::unique_ptr<packed_partition_buf_size_and_dst_buf_info> compute_splits(
     auto values =
       cudf::detail::make_counting_transform_iterator(0, buf_size_functor{d_dst_buf_info});
 
-    thrust::reduce_by_key(rmm::exec_policy_nosync(stream, temp_mr),
+    thrust::reduce_by_key(rmm::exec_policy_nosync(stream, scratch_mr),
                           keys,
                           keys + num_bufs,
                           values,
@@ -1439,7 +1441,7 @@ std::unique_ptr<packed_partition_buf_size_and_dst_buf_info> compute_splits(
       cudf::detail::make_counting_transform_iterator(0, buf_size_functor{d_dst_buf_info});
 
     thrust::exclusive_scan_by_key(
-      rmm::exec_policy_nosync(stream, temp_mr),
+      rmm::exec_policy_nosync(stream, scratch_mr),
       keys,
       keys + num_bufs,
       values,
@@ -1460,14 +1462,16 @@ std::unique_ptr<packed_partition_buf_size_and_dst_buf_info> compute_splits(
  * @param input source table view
  * @param splits the numeric value (in rows) for each split, empty for 1 partition
  * @param stream Optional CUDA stream on which to execute kernels
- * @param temp_mr A memory resource for temporary and scratch space
+ * @param temp_mr A memory resource for the returned state
+ * @param scratch_mr A memory resource for allocations released before returning
  * @return A tuple containing (num_src_bufs, num_bufs, partition_buf_size_and_dst_buf_info)
  */
 std::tuple<size_type, std::size_t, std::unique_ptr<packed_partition_buf_size_and_dst_buf_info>>
 compute_num_bufs_and_splits(cudf::table_view const& input,
                             std::vector<size_type> const& splits,
                             cuda::stream_ref stream,
-                            rmm::device_async_resource_ref temp_mr)
+                            rmm::device_async_resource_ref temp_mr,
+                            rmm::device_async_resource_ref scratch_mr)
 {
   std::size_t const num_partitions = splits.size() + 1;
   auto num_src_bufs                = count_src_bufs(input.begin(), input.end());
@@ -1476,8 +1480,8 @@ compute_num_bufs_and_splits(cudf::table_view const& input,
   // First pass over the source tables to generate a `dst_buf_info` per split and column buffer
   // (`num_bufs`). After this, contiguous_split uses `dst_buf_info` to further subdivide the work
   // into 1MB batches in `compute_batches`
-  auto partition_buf_size_and_dst_buf_info =
-    compute_splits(input, splits, num_partitions, num_src_bufs, num_bufs, stream, temp_mr);
+  auto partition_buf_size_and_dst_buf_info = compute_splits(
+    input, splits, num_partitions, num_src_bufs, num_bufs, stream, temp_mr, scratch_mr);
 
   return std::make_tuple(num_src_bufs, num_bufs, std::move(partition_buf_size_and_dst_buf_info));
 }
@@ -1518,7 +1522,8 @@ struct chunk_iteration_state {
     std::size_t num_partitions,
     std::size_t user_buffer_size,
     cuda::stream_ref stream,
-    rmm::device_async_resource_ref temp_mr);
+    rmm::device_async_resource_ref temp_mr,
+    rmm::device_async_resource_ref scratch_mr);
 
   /**
    * @brief As of the time of the call, return the starting 1MB batch index, and the
@@ -1578,7 +1583,8 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
   std::size_t num_partitions,
   std::size_t user_buffer_size,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref temp_mr)
+  rmm::device_async_resource_ref temp_mr,
+  rmm::device_async_resource_ref scratch_mr)
 {
   rmm::device_uvector<size_type> d_batch_offsets(num_bufs + 1, stream, temp_mr);
 
@@ -1589,7 +1595,7 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
         return i == num_bufs ? 0 : num_batches(i);
       }));
 
-  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, temp_mr),
+  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, scratch_mr),
                          buf_count_iter,
                          buf_count_iter + num_bufs + 1,
                          d_batch_offsets.begin(),
@@ -1597,8 +1603,9 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
 
   auto const num_batches_iter =
     cudf::detail::make_counting_transform_iterator(0, num_batches_func{batches.begin()});
-  size_type const num_batches = thrust::reduce(
-    rmm::exec_policy_nosync(stream, temp_mr), num_batches_iter, num_batches_iter + batches.size());
+  size_type const num_batches = thrust::reduce(rmm::exec_policy_nosync(stream, scratch_mr),
+                                               num_batches_iter,
+                                               num_batches_iter + batches.size());
 
   auto out_to_in_index = out_to_in_index_function{d_batch_offsets.begin(), num_bufs};
 
@@ -1608,7 +1615,7 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
   rmm::device_uvector<dst_buf_info> d_batched_dst_buf_info(num_batches, stream, temp_mr);
 
   thrust::for_each(
-    rmm::exec_policy_nosync(stream, temp_mr),
+    rmm::exec_policy_nosync(stream, scratch_mr),
     iter,
     iter + num_batches,
     [d_orig_dst_buf_info,
@@ -1660,11 +1667,11 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
   if (user_buffer_size != 0) {
     // copy the batch offsets back to host
     auto const h_offsets = [&] {
-      rmm::device_uvector<std::size_t> offsets(num_batches + 1, stream, temp_mr);
+      rmm::device_uvector<std::size_t> offsets(num_batches + 1, stream, scratch_mr);
       auto const batch_byte_size_iter = cudf::detail::make_counting_transform_iterator(
         0, batch_byte_size_function{num_batches, d_batched_dst_buf_info.begin()});
 
-      thrust::exclusive_scan(rmm::exec_policy_nosync(stream, temp_mr),
+      thrust::exclusive_scan(rmm::exec_policy_nosync(stream, scratch_mr),
                              batch_byte_size_iter,
                              batch_byte_size_iter + offsets.size(),
                              offsets.begin());
@@ -1717,7 +1724,7 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
     // apply changed offset
     {
       auto d_accum_size_per_iteration =
-        cudf::detail::make_device_uvector_async(accum_size_per_iteration, stream, temp_mr);
+        cudf::detail::make_device_uvector_async(accum_size_per_iteration, stream, scratch_mr);
 
       // we want to update the offset of batches for every iteration, except the first one (because
       // offsets in the first iteration are all 0 based)
@@ -1725,7 +1732,7 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
       auto const iter                     = cuda::counting_iterator{num_batches_in_first_iteration};
       auto num_iterations                 = accum_size_per_iteration.size();
       thrust::for_each(
-        rmm::exec_policy_nosync(stream, temp_mr),
+        rmm::exec_policy_nosync(stream, scratch_mr),
         iter,
         iter + num_batches - num_batches_in_first_iteration,
         [num_iterations,
@@ -1777,7 +1784,8 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
  *        grouped in, as different iterations.
  * @param batch_size the maximum size in bytes of a batch, a power of two
  * @param stream Optional CUDA stream on which to execute kernels
- * @param temp_mr A memory resource for temporary and scratch space
+ * @param temp_mr A memory resource for the returned state
+ * @param scratch_mr A memory resource for allocations released before returning
  *
  * @returns new unique pointer to `chunk_iteration_state`
  */
@@ -1788,16 +1796,18 @@ std::unique_ptr<chunk_iteration_state> compute_batches(int num_bufs,
                                                        std::size_t user_buffer_size,
                                                        std::size_t batch_size,
                                                        cuda::stream_ref stream,
-                                                       rmm::device_async_resource_ref temp_mr)
+                                                       rmm::device_async_resource_ref temp_mr,
+                                                       rmm::device_async_resource_ref scratch_mr)
 {
   // Since we parallelize at one block per copy, performance is vulnerable to situations where we
   // have small numbers of copies to do (a combination of small numbers of splits and/or columns),
   // so we will take the actual set of outgoing source/destination buffers and further partition
   // them into much smaller batches in order to drive up the number of blocks and overall
   // occupancy.
-  rmm::device_uvector<cuda::std::pair<std::size_t, std::size_t>> batches(num_bufs, stream, temp_mr);
+  rmm::device_uvector<cuda::std::pair<std::size_t, std::size_t>> batches(
+    num_bufs, stream, scratch_mr);
   thrust::transform(
-    rmm::exec_policy_nosync(stream, temp_mr),
+    rmm::exec_policy_nosync(stream, scratch_mr),
     d_dst_buf_info,
     d_dst_buf_info + num_bufs,
     batches.begin(),
@@ -1828,7 +1838,8 @@ std::unique_ptr<chunk_iteration_state> compute_batches(int num_bufs,
                                        num_partitions,
                                        user_buffer_size,
                                        stream,
-                                       temp_mr);
+                                       temp_mr,
+                                       scratch_mr);
 }
 
 void copy_data(int num_batches_to_copy,
@@ -1914,8 +1925,10 @@ struct contiguous_split_state {
                          cuda::stream_ref stream,
                          std::optional<rmm::device_async_resource_ref> mr,
                          rmm::device_async_resource_ref temp_mr,
-                         std::size_t batch_size = desired_batch_size)
-    : contiguous_split_state(input, {}, user_buffer_size, batch_size, stream, mr, temp_mr)
+                         std::size_t batch_size = desired_batch_size,
+                         std::optional<rmm::device_async_resource_ref> scratch_mr = std::nullopt)
+    : contiguous_split_state(
+        input, {}, user_buffer_size, batch_size, stream, mr, temp_mr, scratch_mr.value_or(temp_mr))
   {
   }
 
@@ -1924,7 +1937,7 @@ struct contiguous_split_state {
                          cuda::stream_ref stream,
                          std::optional<rmm::device_async_resource_ref> mr,
                          rmm::device_async_resource_ref temp_mr)
-    : contiguous_split_state(input, splits, 0, desired_batch_size, stream, mr, temp_mr)
+    : contiguous_split_state(input, splits, 0, desired_batch_size, stream, mr, temp_mr, temp_mr)
   {
   }
 
@@ -2165,7 +2178,8 @@ struct contiguous_split_state {
                          std::size_t batch_size,
                          cuda::stream_ref stream,
                          std::optional<rmm::device_async_resource_ref> mr,
-                         rmm::device_async_resource_ref temp_mr)
+                         rmm::device_async_resource_ref temp_mr,
+                         rmm::device_async_resource_ref scratch_mr)
     : input(input),
       user_buffer_size(user_buffer_size),
       stream(stream),
@@ -2190,7 +2204,7 @@ struct contiguous_split_state {
     if (is_empty) { return; }
 
     std::tie(num_src_bufs, num_bufs, partition_buf_size_and_dst_buf_info) =
-      compute_num_bufs_and_splits(input, splits, stream, temp_mr);
+      compute_num_bufs_and_splits(input, splits, stream, temp_mr, scratch_mr);
 
     // Second pass: uses `dst_buf_info` to break down the work into 1MB batches.
     chunk_iter_state = compute_batches(num_bufs,
@@ -2200,7 +2214,8 @@ struct contiguous_split_state {
                                        user_buffer_size,
                                        batch_size,
                                        stream,
-                                       temp_mr);
+                                       temp_mr,
+                                       scratch_mr);
 
     // allocate output partition buffers, in the non-chunked case
     if (user_buffer_size == 0 && mr.has_value()) {
@@ -2425,7 +2440,7 @@ std::size_t packed_size(cudf::table_view const& input,
   // Handle empty table cases
   if (input.num_columns() == 0 || input.num_rows() == 0) { return 0; }
 
-  auto result = compute_num_bufs_and_splits(input, {}, stream, temp_mr);
+  auto result = compute_num_bufs_and_splits(input, {}, stream, temp_mr, temp_mr);
   auto const& partition_buf_size_and_dst_buf_info = std::get<2>(result);
 
   // Return the total size for the single partition
@@ -3077,13 +3092,18 @@ std::size_t copy_batch_bytes(pack_options const& options)
 plan_input make_plan_input(cudf::table_view const& input,
                            pack_options const& options,
                            cuda::stream_ref stream,
-                           rmm::device_async_resource_ref plan_mr)
+                           cudf::memory_resources mr)
 {
   // A zero user-buffer size selects the existing whole-table layout. std::nullopt suppresses the
   // output allocation while preserving the already-computed source buffers, destination offsets,
   // batching, and metadata state for pack_into().
-  auto state = std::make_unique<detail::contiguous_split_state>(
-    input, 0, stream, std::nullopt, plan_mr, copy_batch_bytes(options));
+  auto state    = std::make_unique<detail::contiguous_split_state>(input,
+                                                                0,
+                                                                stream,
+                                                                std::nullopt,
+                                                                mr.get_output_mr(),
+                                                                copy_batch_bytes(options),
+                                                                mr.get_temporary_mr());
   auto metadata = state->build_packed_column_metadata();
   return {
     std::move(state), metadata == nullptr ? std::vector<uint8_t>{} : std::move(*metadata), {}};
@@ -3092,12 +3112,17 @@ plan_input make_plan_input(cudf::table_view const& input,
 plan_input make_plan_input(cudf::packed_columns const& input,
                            pack_options const& options,
                            cuda::stream_ref stream,
-                           rmm::device_async_resource_ref plan_mr)
+                           cudf::memory_resources mr)
 {
   CUDF_EXPECTS(input.metadata != nullptr && input.gpu_data != nullptr,
                "Packed input must contain metadata and a device allocation");
-  auto state = std::make_unique<detail::contiguous_split_state>(
-    cudf::unpack(input), 0, stream, std::nullopt, plan_mr, copy_batch_bytes(options));
+  auto state = std::make_unique<detail::contiguous_split_state>(cudf::unpack(input),
+                                                                0,
+                                                                stream,
+                                                                std::nullopt,
+                                                                mr.get_output_mr(),
+                                                                copy_batch_bytes(options),
+                                                                mr.get_temporary_mr());
   // The metadata records every buffer offset, so equal metadata means the planned layout matches
   // the existing allocation. Empty columns may be described in several ways, but with no bytes
   // there is no layout to match.
@@ -3378,7 +3403,7 @@ pack_plan_builder make_pack_plan_builder(cudf::table_view const& input,
 {
   CUDF_FUNC_RANGE();
   return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
-    make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr())};
+    make_plan_input(input, options, stream, mr), options, mr.get_output_mr())};
 }
 
 pack_plan_builder make_pack_plan_builder(cudf::packed_columns const& input,
@@ -3388,7 +3413,7 @@ pack_plan_builder make_pack_plan_builder(cudf::packed_columns const& input,
 {
   CUDF_FUNC_RANGE();
   return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
-    make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr())};
+    make_plan_input(input, options, stream, mr), options, mr.get_output_mr())};
 }
 
 pack_plan prepare_pack(cudf::table_view const& input,
@@ -3398,7 +3423,7 @@ pack_plan prepare_pack(cudf::table_view const& input,
 {
   CUDF_FUNC_RANGE();
   return pack_plan{std::make_unique<pack_plan::impl>(make_prepared_pack_components(
-    make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr()))};
+    make_plan_input(input, options, stream, mr), options, mr.get_output_mr()))};
 }
 
 pack_result pack_into(pack_plan const& plan,

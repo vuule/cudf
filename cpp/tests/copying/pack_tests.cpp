@@ -316,7 +316,8 @@ TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
 
   {
     auto harness = cudf::test::memory_resource_test_harness{};
-    // Plan state is owned by the returned plan, so it comes from the output resource.
+    // Plan state is owned by the returned plan, so it comes from the output resource; planning
+    // scratch comes from the temporary resource.
     auto const plan = [&] {
       auto const scope = harness.fail_on_current_device_resource_use();
       auto result      = cx::prepare_pack(
@@ -325,6 +326,8 @@ TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
       return result;
     }();
     harness.expect_output_allocations_live(stream);
+    auto const temporary_before = harness.expect_temporary_allocation_activity(stream).total;
+    harness.expect_temporary_allocations_released(stream);
 
     auto pinned =
       cudf::detail::make_pinned_vector_async<uint8_t>(plan.sizes().payload_bytes, stream);
@@ -335,7 +338,7 @@ TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
       harness.synchronize(stream);
       return result;
     }();
-    harness.expect_temporary_allocation_activity(stream);
+    EXPECT_GT(harness.temporary_mr().get_bytes_counter().total, temporary_before);
     harness.expect_temporary_allocations_released(stream);
 
     auto const view = cx::packed_data_view{
