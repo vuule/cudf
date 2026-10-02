@@ -2673,9 +2673,9 @@ constexpr std::size_t automatic_min_region_bytes = 4 * 1024;
 // `automatic` stores a chunk raw unless compressing it saves at least this many bytes.
 constexpr std::size_t automatic_min_savings_bytes = 256;
 
+// Leads with a version, like legacy packed metadata, so the first field identifies the format.
 struct compressed_metadata_header {
-  uint64_t magic;
-  uint32_t version;
+  int32_t version;
   uint32_t num_regions;
   uint64_t num_chunks;
   uint64_t legacy_metadata_bytes;
@@ -2695,8 +2695,9 @@ struct compressed_metadata_entry {
   uint32_t reserved;
 };
 
-constexpr uint64_t compressed_metadata_magic   = 0x4355444650524547ULL;  // "CUDFPREG"
-constexpr uint32_t compressed_metadata_version = 1;
+// Shares the version sequence of legacy packed metadata and must not collide with it.
+constexpr int32_t compressed_metadata_version = 3;
+static_assert(compressed_metadata_version > cudf::detail::packed_metadata_version);
 
 struct prepared_compression_region {
   compression_region_layout layout;
@@ -2770,8 +2771,7 @@ std::vector<uint8_t> make_compressed_metadata(std::vector<uint8_t> const& legacy
   output.reserve(
     compressed_metadata_size(legacy_metadata.size(), entries.size(), chunk_offsets.size()));
   append_pod(output,
-             compressed_metadata_header{compressed_metadata_magic,
-                                        compressed_metadata_version,
+             compressed_metadata_header{compressed_metadata_version,
                                         static_cast<uint32_t>(entries.size()),
                                         chunk_offsets.size(),
                                         legacy_metadata.size(),
@@ -2796,10 +2796,8 @@ struct parsed_compressed_metadata {
 parsed_compressed_metadata parse_compressed_metadata(std::span<uint8_t const> metadata)
 {
   auto const header = read_pod<compressed_metadata_header>(metadata, 0);
-  CUDF_EXPECTS(header.magic == compressed_metadata_magic,
-               "Packed metadata is not a compressed-region envelope");
   CUDF_EXPECTS(header.version == compressed_metadata_version,
-               "Unsupported compressed-region metadata version");
+               "Packed metadata is not a supported compressed metadata version");
   auto const entries_offset = sizeof(compressed_metadata_header);
   auto const chunks_offset  = entries_offset + static_cast<std::size_t>(header.num_regions) *
                                                 sizeof(compressed_metadata_entry);
@@ -3083,7 +3081,7 @@ prepared_pack_components make_prepared_pack_components(
   auto const uncompressed_bytes       = input.state->get_total_contiguous_size();
   auto const stream                   = input.state->get_stream();
   auto const has_expert_configuration = !configured_regions.empty();
-  auto const uses_region_envelope =
+  auto const uses_compressed_metadata =
     has_expert_configuration ? std::any_of(configured_regions.begin(),
                                            configured_regions.end(),
                                            [](auto const& region) {
@@ -3094,7 +3092,7 @@ prepared_pack_components make_prepared_pack_components(
   prepared_pack_components result;
   result.compression =
     has_expert_configuration
-      ? (uses_region_envelope ? pack_compression::automatic : pack_compression::none)
+      ? (uses_compressed_metadata ? pack_compression::automatic : pack_compression::none)
       : options.compression;
   auto destination_bytes = uncompressed_bytes;
   CUDF_EXPECTS(options.staging_buffer_bytes >= 4 * split_align,
@@ -3103,14 +3101,14 @@ prepared_pack_components make_prepared_pack_components(
   auto const raw_chunk_bytes =
     std::min(max_raw_chunk_bytes, window_budget) / split_align * split_align;
 
-  if (uncompressed_bytes > 0 && !uses_region_envelope) {
+  if (uncompressed_bytes > 0 && !uses_compressed_metadata) {
     result.windows = input.state->get_pack_windows(options.staging_buffer_bytes);
     for (auto const& window : result.windows) {
       result.max_window_bytes = std::max(result.max_window_bytes, window.bytes);
     }
   }
 
-  if (uncompressed_bytes > 0 && uses_region_envelope) {
+  if (uncompressed_bytes > 0 && uses_compressed_metadata) {
     if (layouts.empty()) { layouts = input.state->get_compression_regions(); }
     CUDF_EXPECTS(!has_expert_configuration || configured_regions.size() == layouts.size(),
                  "Expert region configuration does not match the prepared layout");

@@ -31,8 +31,7 @@ namespace cx = cudf::experimental;
 namespace {
 
 struct compressed_region_header {
-  uint64_t magic;
-  uint32_t version;
+  int32_t version;
   uint32_t num_regions;
   uint64_t num_chunks;
   uint64_t legacy_metadata_bytes;
