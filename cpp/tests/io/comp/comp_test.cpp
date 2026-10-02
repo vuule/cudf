@@ -446,15 +446,17 @@ void roundtrip_test(cudf::io::compression_type compression,
     }
   }
 
-  auto const test_sizes     = std::array{size_t{1},
-                                     size_t{2},
-                                     size_t{4},
-                                     size_t{8},
-                                     size_t{22},
-                                     size_t{54},
-                                     size_t{1 << 10},
-                                     size_t{1 << 20},
-                                     expected.size()};
+  // Allocation routing does not depend on the input size.
+  auto const test_sizes     = harness != nullptr ? std::vector{size_t{1 << 20}}
+                                                 : std::vector{size_t{1},
+                                                           size_t{2},
+                                                           size_t{4},
+                                                           size_t{8},
+                                                           size_t{22},
+                                                           size_t{54},
+                                                           size_t{1 << 10},
+                                                           size_t{1 << 20},
+                                                           expected.size()};
   auto const max_input_size = cudf::io::detail::compress_max_allowed_chunk_size(compression)
                                 .value_or(std::numeric_limits<size_t>::max());
   for (auto const test_size : test_sizes) {
