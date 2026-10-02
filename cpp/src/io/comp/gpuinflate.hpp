@@ -12,6 +12,8 @@
 #include <cudf/utilities/export.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <rmm/resource_ref.hpp>
+
 #include <cuda/stream>
 
 #include <cstdint>
@@ -76,12 +78,14 @@ size_t get_gpu_debrotli_scratch_size(int max_num_inputs = 0);
  * @param[out] outputs List of output buffers
  * @param[out] results List of output status structures
  * @param[in] stream CUDA stream to use
+ * @param[in] temp_mr Memory resource for the decompression scratch memory
  */
 CUDF_EXPORT
 void gpu_debrotli(device_span<device_span<uint8_t const> const> inputs,
                   device_span<device_span<uint8_t> const> outputs,
                   device_span<codec_exec_result> results,
-                  cuda::stream_ref stream);
+                  cuda::stream_ref stream,
+                  rmm::device_async_resource_ref temp_mr);
 
 /**
  * @brief Interface for compressing data with Snappy

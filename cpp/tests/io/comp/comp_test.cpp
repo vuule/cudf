@@ -9,6 +9,7 @@
 #include "io/utilities/hostdevice_vector.hpp"
 
 #include <cudf_test/base_fixture.hpp>
+#include <cudf_test/memory_resource_utilities.hpp>
 #include <cudf_test/testing_main.hpp>
 
 #include <cudf/io/detail/codec.hpp>
@@ -240,7 +241,11 @@ struct BrotliDecompressTest : public DecompressTest<BrotliDecompressTest> {
                                              cudf::io::detail::get_gpu_debrotli_scratch_size(1),
                                              cuda::no_init};
 
-    cudf::io::detail::gpu_debrotli(d_inf_in, d_inf_out, d_inf_stat, cudf::get_default_stream());
+    cudf::io::detail::gpu_debrotli(d_inf_in,
+                                   d_inf_out,
+                                   d_inf_stat,
+                                   cudf::get_default_stream(),
+                                   cudf::get_current_device_resource_ref());
   }
 };
 
@@ -512,6 +517,96 @@ INSTANTIATE_TEST_CASE_P(HostDecompression,
                         ::testing::Values(cudf::io::compression_type::GZIP,
                                           cudf::io::compression_type::SNAPPY,
                                           cudf::io::compression_type::ZLIB,
+                                          cudf::io::compression_type::ZSTD));
+
+struct DeviceCodecMemoryResourceTest
+  : public cudf::test::BaseFixture,
+    public ::testing::WithParamInterface<cudf::io::compression_type> {};
+
+TEST_P(DeviceCodecMemoryResourceTest, TemporaryAllocationsUseTemporaryResource)
+{
+  auto const compression = GetParam();
+  if (not cudf::io::detail::is_device_compression_supported(compression) or
+      not cudf::io::detail::is_device_decompression_supported(compression)) {
+    GTEST_SKIP() << "Device codec is disabled";
+  }
+  auto const stream = cudf::get_default_stream();
+  auto harness      = cudf::test::memory_resource_test_harness{};
+
+  constexpr std::size_t num_chunks  = 4;
+  constexpr std::size_t chunk_bytes = 64 * 1024;
+  std::vector<uint8_t> expected(num_chunks * chunk_bytes);
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    expected[i] = static_cast<uint8_t>((i / 7) % 251);
+  }
+  auto const d_input = cudf::detail::make_device_uvector(expected, stream, harness.setup_mr());
+  auto const max_comp_bytes = cudf::io::detail::max_compressed_size(compression, chunk_bytes);
+  auto d_compressed =
+    rmm::device_uvector<uint8_t>(num_chunks * max_comp_bytes, stream, harness.setup_mr());
+  auto d_output = rmm::device_uvector<uint8_t>(expected.size(), stream, harness.setup_mr());
+
+  auto comp_in   = cudf::detail::hostdevice_vector<device_span<uint8_t const>>(num_chunks, stream);
+  auto comp_out  = cudf::detail::hostdevice_vector<device_span<uint8_t>>(num_chunks, stream);
+  auto comp_stat = cudf::detail::hostdevice_vector<codec_exec_result>(num_chunks, stream);
+  for (std::size_t i = 0; i < num_chunks; ++i) {
+    comp_in[i]   = {d_input.data() + i * chunk_bytes, chunk_bytes};
+    comp_out[i]  = {d_compressed.data() + i * max_comp_bytes, max_comp_bytes};
+    comp_stat[i] = codec_exec_result{0, codec_status::FAILURE};
+  }
+  comp_in.host_to_device_async(stream);
+  comp_out.host_to_device_async(stream);
+  comp_stat.host_to_device_async(stream);
+
+  {
+    auto const scope = harness.fail_on_current_device_resource_use();
+    cudf::io::detail::compress(
+      compression, comp_in, comp_out, comp_stat, stream, harness.temporary_mr());
+    harness.synchronize(stream);
+  }
+  harness.expect_temporary_allocation_activity(stream);
+  harness.expect_temporary_allocations_released(stream);
+  comp_stat.device_to_host(stream);
+
+  auto decomp_in  = cudf::detail::hostdevice_vector<device_span<uint8_t const>>(num_chunks, stream);
+  auto decomp_out = cudf::detail::hostdevice_vector<device_span<uint8_t>>(num_chunks, stream);
+  auto decomp_stat = cudf::detail::hostdevice_vector<codec_exec_result>(num_chunks, stream);
+  for (std::size_t i = 0; i < num_chunks; ++i) {
+    ASSERT_EQ(comp_stat[i].status, codec_status::SUCCESS);
+    decomp_in[i]   = {comp_out[i].data(), comp_stat[i].bytes_written};
+    decomp_out[i]  = {d_output.data() + i * chunk_bytes, chunk_bytes};
+    decomp_stat[i] = codec_exec_result{0, codec_status::FAILURE};
+  }
+  decomp_in.host_to_device_async(stream);
+  decomp_out.host_to_device_async(stream);
+  decomp_stat.host_to_device_async(stream);
+
+  auto const temporary_before = harness.temporary_mr().get_bytes_counter().total;
+  {
+    auto const scope = harness.fail_on_current_device_resource_use();
+    cudf::io::detail::decompress(compression,
+                                 decomp_in,
+                                 decomp_out,
+                                 decomp_stat,
+                                 chunk_bytes,
+                                 expected.size(),
+                                 stream,
+                                 harness.temporary_mr());
+    harness.synchronize(stream);
+  }
+  EXPECT_GT(harness.temporary_mr().get_bytes_counter().total, temporary_before);
+  harness.expect_temporary_allocations_released(stream);
+  decomp_stat.device_to_host(stream);
+  for (std::size_t i = 0; i < num_chunks; ++i) {
+    EXPECT_EQ(decomp_stat[i].status, codec_status::SUCCESS);
+  }
+  EXPECT_EQ(cudf::detail::make_std_vector(d_output, stream), expected);
+}
+
+INSTANTIATE_TEST_CASE_P(DeviceCodecMemoryResource,
+                        DeviceCodecMemoryResourceTest,
+                        ::testing::Values(cudf::io::compression_type::GZIP,
+                                          cudf::io::compression_type::LZ4,
+                                          cudf::io::compression_type::SNAPPY,
                                           cudf::io::compression_type::ZSTD));
 
 CUDF_TEST_PROGRAM_MAIN()

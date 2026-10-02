@@ -11,6 +11,8 @@
 #include <cudf/io/types.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <rmm/resource_ref.hpp>
+
 #include <cuda/stream>
 
 #include <optional>
@@ -26,6 +28,7 @@ namespace cudf::io::detail::nvcomp {
  * @param[in] max_uncomp_chunk_size Maximum size of any single uncompressed chunk
  * @param[in] max_total_uncomp_size Maximum total size of uncompressed data
  * @param[in] stream CUDA stream to use
+ * @param[in] temp_mr Memory resource for temporary allocations, including the nvCOMP scratch
  */
 void batched_decompress(compression_type compression,
                         device_span<device_span<uint8_t const> const> inputs,
@@ -33,7 +36,8 @@ void batched_decompress(compression_type compression,
                         device_span<codec_exec_result> results,
                         size_t max_uncomp_chunk_size,
                         size_t max_total_uncomp_size,
-                        cuda::stream_ref stream);
+                        cuda::stream_ref stream,
+                        rmm::device_async_resource_ref temp_mr);
 
 /**
  * @brief Return the amount of temporary space required in bytes for a given decompression
@@ -68,6 +72,7 @@ size_t batched_decompress_temp_size(compression_type compression,
  * @param[in] max_uncomp_chunk_size Maximum size of any single uncompressed chunk
  * @param[in] max_total_uncomp_size Maximum total size of uncompressed data
  * @param[in] stream CUDA stream to use
+ * @param[in] temp_mr Memory resource for temporary allocations
  * @returns The total required size in bytes
  */
 [[nodiscard]] size_t batched_decompress_temp_size_ex(
@@ -75,7 +80,8 @@ size_t batched_decompress_temp_size(compression_type compression,
   device_span<device_span<uint8_t const> const> inputs,
   size_t max_uncomp_chunk_size,
   size_t max_total_uncomp_size,
-  cuda::stream_ref stream);
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref temp_mr);
 
 [[nodiscard]] bool is_batched_decompress_temp_size_ex_supported(compression_type compression);
 
@@ -129,11 +135,13 @@ void load_nvcomp_library();
  * @param[out] outputs List of output buffers
  * @param[out] results List of output status structures
  * @param[in] stream CUDA stream to use
+ * @param[in] temp_mr Memory resource for temporary allocations, including the nvCOMP scratch
  */
 void batched_compress(compression_type compression,
                       device_span<device_span<uint8_t const> const> inputs,
                       device_span<device_span<uint8_t> const> outputs,
                       device_span<codec_exec_result> results,
-                      cuda::stream_ref stream);
+                      cuda::stream_ref stream,
+                      rmm::device_async_resource_ref temp_mr);
 
 }  // namespace cudf::io::detail::nvcomp
