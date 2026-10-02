@@ -347,9 +347,9 @@ class pack_plan_builder;
 /**
  * @brief Prepared state for repeatedly packing one table into caller-owned memory.
  *
- * Construction performs layout planning once. The input table and all referenced buffers must
- * remain alive and unchanged until every operation using the plan
- * has completed. A plan is bound to the stream passed to `prepare_pack()`.
+ * Construction performs layout planning once. The input table or packed columns and all referenced
+ * buffers must remain alive and unchanged until every operation using the plan has completed. A
+ * plan is bound to the stream passed to `prepare_pack()`.
  */
 class pack_plan {
  public:
@@ -376,6 +376,10 @@ class pack_plan {
                                 cuda::stream_ref,
                                 rmm::device_async_resource_ref);
   friend pack_plan prepare_pack(cudf::table_view const&,
+                                pack_options const&,
+                                cuda::stream_ref,
+                                rmm::device_async_resource_ref);
+  friend pack_plan prepare_pack(cudf::packed_columns const&,
                                 pack_options const&,
                                 cuda::stream_ref,
                                 rmm::device_async_resource_ref);
@@ -462,6 +466,24 @@ pack_plan prepare_pack(
  */
 pack_plan prepare_pack(
   cudf::table_view const& input,
+  pack_options const& options,
+  cuda::stream_ref stream                = cudf::get_default_stream(),
+  rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Prepare compression of an existing uncompressed `cudf::packed_columns` allocation.
+ *
+ * Compresses directly from `input.gpu_data` without repacking, for example each partition produced
+ * by `cudf::contiguous_split()`. `options.compression` must select a compressed representation.
+ *
+ * @param input Existing ordinary, uncompressed packed columns
+ * @param options Compression options
+ * @param stream Stream used for planning and subsequent `pack_into()` operations
+ * @param temp_mr Memory resource used for planning and compression staging allocations
+ * @return A move-only plan that borrows `input` and is bound to `stream`
+ */
+pack_plan prepare_pack(
+  cudf::packed_columns const& input,
   pack_options const& options,
   cuda::stream_ref stream                = cudf::get_default_stream(),
   rmm::device_async_resource_ref temp_mr = cudf::get_current_device_resource_ref());

@@ -20,6 +20,7 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <string>
 
 // Size of the serialized table header that precedes the column entries in the
 // packed metadata buffer: version + num_columns + num_rows + pad, four 4-byte fields.
@@ -368,6 +369,53 @@ TEST_F(PackUnpackTest, ExperimentalCompressedPackMaterialize)
       expect_materializes_to(input, packed.view());
     }
   }
+}
+
+TEST_F(PackUnpackTest, ExperimentalCompressExistingPackedColumns)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> numbers({31, 31, 31, 31, 31},
+                                                          {true, false, true, true, true});
+  cudf::test::strings_column_wrapper strings({"late", "compression", "after", "ordinary", "pack"});
+  auto const input  = cudf::table_view{{numbers, strings}};
+  auto const packed = cudf::pack(input);
+
+  for (auto const compression : compressed_codecs) {
+    SCOPED_TRACE(static_cast<int>(compression));
+    auto const plan = cx::prepare_pack(packed, make_options(compression));
+    EXPECT_EQ(plan.sizes().uncompressed_payload_bytes, packed.gpu_data->size());
+    expect_materializes_to(input, pack_to_device(plan).view());
+  }
+}
+
+TEST_F(PackUnpackTest, ExperimentalCompressContiguousSplitPartitions)
+{
+  constexpr cudf::size_type num_rows = 64 * 1024;
+  auto const values =
+    cudf::detail::make_counting_transform_iterator(0, [](int64_t i) { return (i / 16) % 1000; });
+  cudf::test::fixed_width_column_wrapper<int64_t> numbers(
+    values, values + num_rows, cudf::test::iterators::null_at(5));
+  auto const words = cudf::detail::make_counting_transform_iterator(
+    0, [](int32_t i) { return std::to_string(i % 100); });
+  cudf::test::strings_column_wrapper strings(words, words + num_rows);
+  auto const input = cudf::table_view{{numbers, strings}};
+
+  std::vector<cudf::size_type> const splits{0, 1000, 20000, 20001, 50000};
+  auto const partitions = cudf::contiguous_split(input, splits);
+  auto const expected   = cudf::split(input, splits);
+  ASSERT_EQ(partitions.size(), expected.size());
+  for (std::size_t i = 0; i < partitions.size(); ++i) {
+    SCOPED_TRACE(i);
+    auto const plan =
+      cx::prepare_pack(partitions[i].data, make_options(cx::pack_compression::cascaded));
+    expect_materializes_to(expected[i], pack_to_device(plan).view());
+  }
+}
+
+TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireCompression)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4});
+  auto const packed = cudf::pack(cudf::table_view{{numbers}});
+  EXPECT_THROW(cx::prepare_pack(packed, cx::pack_options{}), cudf::logic_error);
 }
 
 TEST_F(PackUnpackTest, ExperimentalCascadedUsesNativeTypedRegions)
