@@ -3052,8 +3052,11 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
 pack_compression select_automatic_compression(compression_region_layout const& layout)
 {
   if (layout.uncompressed_bytes < automatic_min_region_bytes) { return pack_compression::none; }
-  return layout.kind == pack_region_kind::string_characters ? pack_compression::snappy
-                                                            : pack_compression::cascaded;
+  if (layout.kind != pack_region_kind::string_characters) { return pack_compression::cascaded; }
+  // Unlike Cascaded, Snappy can be disabled by the nvCOMP policy.
+  return cudf::io::detail::is_compression_supported(to_io_compression(pack_compression::snappy))
+           ? pack_compression::snappy
+           : pack_compression::none;
 }
 
 struct plan_input {
@@ -3132,12 +3135,11 @@ prepared_pack_components make_prepared_pack_components(
   auto const stream                   = input.state->get_stream();
   auto const has_expert_configuration = !configured_regions.empty();
   auto const uses_compressed_metadata =
-    has_expert_configuration ? std::any_of(configured_regions.begin(),
-                                           configured_regions.end(),
-                                           [](auto const& region) {
-                                             return region.options.codec != pack_compression::none;
-                                           })
-                             : options.compression != pack_compression::none;
+    has_expert_configuration
+      ? std::any_of(configured_regions.begin(),
+                    configured_regions.end(),
+                    [](auto const& region) { return region.codec != pack_compression::none; })
+      : options.compression != pack_compression::none;
 
   prepared_pack_components result;
   auto destination_bytes   = uncompressed_bytes;
@@ -3177,8 +3179,8 @@ prepared_pack_components make_prepared_pack_components(
                    "Prepared compression regions do not cover a contiguous payload");
       uncompressed_end = layout.uncompressed_offset + layout.uncompressed_bytes;
 
-      auto const codec = has_expert_configuration ? configured_regions[region_index].options.codec
-                                                  : options.compression;
+      auto const codec =
+        has_expert_configuration ? configured_regions[region_index].codec : options.compression;
       auto const automatic = codec == pack_compression::automatic;
       auto const requested = automatic ? select_automatic_compression(layout) : codec;
       CUDF_EXPECTS(is_concrete_codec(requested),
@@ -3302,14 +3304,13 @@ struct pack_plan_builder::impl {
       plan_mr(plan_mr),
       layouts(this->input.state->get_compression_regions())
   {
-    auto const inherited = pack_region_options{options.compression};
     regions.reserve(layouts.size());
     for (std::size_t i = 0; i < layouts.size(); ++i) {
       auto const& layout = layouts[i];
       regions.push_back(
         pack_region{pack_region_info{
                       i, layout.column_index, layout.kind, layout.type, layout.uncompressed_bytes},
-                    inherited});
+                    options.compression});
     }
   }
 
@@ -3378,14 +3379,6 @@ pack_plan_builder make_pack_plan_builder(cudf::table_view const& input,
   CUDF_FUNC_RANGE();
   return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
     make_plan_input(input, options, stream, mr.get_output_mr()), options, mr.get_output_mr())};
-}
-
-pack_plan prepare_pack(cudf::table_view const& input,
-                       cuda::stream_ref stream,
-                       cudf::memory_resources mr)
-{
-  CUDF_FUNC_RANGE();
-  return prepare_pack(input, pack_options{}, stream, mr);
 }
 
 pack_plan prepare_pack(cudf::table_view const& input,

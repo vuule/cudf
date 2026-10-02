@@ -243,7 +243,7 @@ TEST_F(PackUnpackTest, ExperimentalPreparedPackInto)
   cudf::test::strings_column_wrapper strings({"alpha", "", "gamma", "delta", "epsilon"});
   auto const input = cudf::table_view{{numbers, strings}};
 
-  auto const plan = cx::prepare_pack(input);
+  auto const plan = cx::prepare_pack(input, make_options(cx::pack_compression::none));
   EXPECT_EQ(plan.sizes().payload_bytes, cudf::packed_size(input));
   EXPECT_GT(plan.sizes().metadata_bytes, 0);
 
@@ -319,7 +319,8 @@ TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
     // Plan state is owned by the returned plan, so it comes from the output resource.
     auto const plan = [&] {
       auto const scope = harness.fail_on_current_device_resource_use();
-      auto result      = cx::prepare_pack(input, cx::pack_options{}, stream, harness.resources());
+      auto result      = cx::prepare_pack(
+        input, make_options(cx::pack_compression::none), stream, harness.resources());
       harness.synchronize(stream);
       return result;
     }();
@@ -374,7 +375,8 @@ TEST_F(PackUnpackTest, ExperimentalUnpackViewPageablePayload)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3});
   auto const input  = cudf::table_view{{numbers}};
-  auto const packed = pack_to(cx::prepare_pack(input), destination_kind::pageable);
+  auto const packed = pack_to(cx::prepare_pack(input, make_options(cx::pack_compression::none)),
+                              destination_kind::pageable);
   int device        = 0;
   int access        = 0;
   CUDF_CUDA_TRY(cudaGetDevice(&device));
@@ -390,7 +392,7 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeOversizedUncompressedPayload)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4, 5});
   auto const input  = cudf::table_view{{numbers}};
-  auto const plan   = cx::prepare_pack(input);
+  auto const plan   = cx::prepare_pack(input, make_options(cx::pack_compression::none));
   auto const stream = cudf::get_default_stream();
   rmm::device_buffer buffer(plan.sizes().payload_bytes + 4096, stream);
   auto const result = cx::pack_into(plan, as_span(buffer));
@@ -568,7 +570,8 @@ TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireCompression)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4});
   auto const packed = cudf::pack(cudf::table_view{{numbers}});
-  EXPECT_THROW(cx::prepare_pack(packed, cx::pack_options{}), cudf::logic_error);
+  EXPECT_THROW(cx::prepare_pack(packed, make_options(cx::pack_compression::none)),
+               cudf::logic_error);
 }
 
 TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireMatchingLayout)
@@ -685,14 +688,12 @@ TEST_F(PackUnpackTest, ExperimentalExpertPerRegionCompression)
   for (auto& region : builder.regions()) {
     observed.push_back(region.info);
     switch (region.info.kind) {
-      case cx::pack_region_kind::validity: region.options.codec = cx::pack_compression::none; break;
-      case cx::pack_region_kind::offsets:
-        region.options.codec = cx::pack_compression::cascaded;
-        break;
+      case cx::pack_region_kind::validity: region.codec = cx::pack_compression::none; break;
+      case cx::pack_region_kind::offsets: region.codec = cx::pack_compression::cascaded; break;
       case cx::pack_region_kind::string_characters:
-        region.options.codec = cx::pack_compression::zstd;
+        region.codec = cx::pack_compression::zstd;
         break;
-      case cx::pack_region_kind::data: region.options.codec = cx::pack_compression::snappy; break;
+      case cx::pack_region_kind::data: region.codec = cx::pack_compression::snappy; break;
     }
   }
 

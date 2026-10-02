@@ -305,28 +305,21 @@ struct pack_region_info {
 };
 
 /**
- * @brief Expert codec configuration for one physical packed region.
+ * @brief Immutable region description and its mutable expert codec configuration.
  *
  * `automatic` applies libcudf's built-in codec policy and may store chunks raw when compression
  * saves too little. A concrete codec forces that codec.
  */
-struct pack_region_options {
-  pack_compression codec{pack_compression::none};  ///< Codec for this region
-};
-
-/**
- * @brief Immutable region description and its mutable expert codec configuration.
- */
 struct pack_region {
-  pack_region_info const info;  ///< Read-only region description
-  pack_region_options options;  ///< Codec configuration applied to this region
+  pack_region_info const info;                     ///< Read-only region description
+  pack_compression codec{pack_compression::none};  ///< Codec applied to this region
 };
 
 /**
  * @brief Options controlling a prepared pack operation.
  */
 struct pack_options {
-  pack_compression compression{pack_compression::none};  ///< Codec for every region
+  pack_compression compression{pack_compression::automatic};  ///< Codec for every region
   /// Device memory `pack_into()` uses to stage host output and to compact compressed output
   std::size_t staging_buffer_bytes{128 * 1024 * 1024};
 };
@@ -372,7 +365,6 @@ class pack_plan {
 
   explicit pack_plan(std::unique_ptr<impl>&& implementation);
 
-  friend pack_plan prepare_pack(cudf::table_view const&, cuda::stream_ref, cudf::memory_resources);
   friend pack_plan prepare_pack(cudf::table_view const&,
                                 pack_options const&,
                                 cuda::stream_ref,
@@ -388,7 +380,7 @@ class pack_plan {
 /**
  * @brief Two-stage expert configuration for a prepared pack operation.
  *
- * The builder discovers physical regions once. Callers may edit only `pack_region::options`; the
+ * The builder discovers physical regions once. Callers may edit only `pack_region::codec`; the
  * descriptions remain immutable. `build()` finalizes compressor state and destination capacity.
  */
 class pack_plan_builder {
@@ -437,20 +429,7 @@ pack_plan_builder make_pack_plan_builder(
   cudf::memory_resources mr   = cudf::get_current_device_resource_ref());
 
 /**
- * @brief Prepare an exact, reusable uncompressed pack plan for `input`.
- *
- * @param input View of the table to pack
- * @param stream Stream used for planning and subsequent `pack_into()` operations
- * @param mr Memory resources used by the returned plan. The output resource backs allocations that
- *           live as long as the plan; the temporary resource backs planning scratch
- * @return A move-only plan bound to `input` and `stream`
- */
-pack_plan prepare_pack(cudf::table_view const& input,
-                       cuda::stream_ref stream   = cudf::get_default_stream(),
-                       cudf::memory_resources mr = cudf::get_current_device_resource_ref());
-
-/**
- * @brief Prepare a reusable pack plan with explicit compression options.
+ * @brief Prepare a reusable pack plan for `input`.
  *
  * Compression first creates the normalized contiguous representation, then independently
  * compresses each physical column buffer (data, offsets, characters, or validity) in chunks. The
@@ -459,8 +438,11 @@ pack_plan prepare_pack(cudf::table_view const& input,
  * `sizes().payload_bytes` is the combined upper-bound capacity; `pack_into()` reports the actual
  * compressed size.
  *
+ * Payloads are compressed with `pack_compression::automatic` by default. Only
+ * `pack_compression::none` produces the exact uncompressed layout that `unpack_view()` accepts.
+ *
  * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
- * @throw cudf::logic_error if the selected codec is disabled
+ * @throw cudf::logic_error if an explicitly selected codec is disabled
  *
  * @param input View of the table to pack
  * @param options Compression and codec options
@@ -470,9 +452,9 @@ pack_plan prepare_pack(cudf::table_view const& input,
  * @return A move-only plan bound to `input` and `stream`
  */
 pack_plan prepare_pack(cudf::table_view const& input,
-                       pack_options const& options,
-                       cuda::stream_ref stream   = cudf::get_default_stream(),
-                       cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+                       pack_options const& options = {},
+                       cuda::stream_ref stream     = cudf::get_default_stream(),
+                       cudf::memory_resources mr   = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Prepare compression of an existing uncompressed `cudf::packed_columns` allocation.
@@ -483,7 +465,7 @@ pack_plan prepare_pack(cudf::table_view const& input,
  * @throw cudf::logic_error if `options.compression` is `pack_compression::none`
  * @throw cudf::logic_error if `input.metadata` does not describe the layout of `input.gpu_data`
  * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
- * @throw cudf::logic_error if the selected codec is disabled
+ * @throw cudf::logic_error if an explicitly selected codec is disabled
  *
  * @param input Existing ordinary, uncompressed packed columns
  * @param options Compression options
@@ -493,9 +475,9 @@ pack_plan prepare_pack(cudf::table_view const& input,
  * @return A move-only plan that borrows `input` and is bound to `stream`
  */
 pack_plan prepare_pack(cudf::packed_columns const& input,
-                       pack_options const& options,
-                       cuda::stream_ref stream   = cudf::get_default_stream(),
-                       cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+                       pack_options const& options = {},
+                       cuda::stream_ref stream     = cudf::get_default_stream(),
+                       cudf::memory_resources mr   = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Host metadata and payload size produced by `pack_into()`.
