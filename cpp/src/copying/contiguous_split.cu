@@ -2495,31 +2495,20 @@ cudaMemoryType memory_type(void const* ptr)
   return attributes.type;
 }
 
-nvcompBatchedCascadedCompressOpts_t make_cascaded_options(compression_region_layout const& layout,
-                                                          pack_region_options const& options)
+nvcompBatchedCascadedCompressOpts_t make_cascaded_options(compression_region_layout const& layout)
 {
   auto result = nvcompBatchedCascadedCompressDefaultOpts;
   result.type =
     cascaded_type(layout.type, layout.kind == pack_region_kind::validity, layout.data_bytes);
-  result.num_RLEs   = options.cascaded_num_RLEs;
-  result.num_deltas = options.cascaded_num_deltas;
-  result.use_bp     = options.cascaded_use_bitpacking ? 1 : 0;
   return result;
-}
-
-bool same_cascaded_options(nvcompBatchedCascadedCompressOpts_t const& lhs,
-                           nvcompBatchedCascadedCompressOpts_t const& rhs)
-{
-  return lhs.type == rhs.type && lhs.num_RLEs == rhs.num_RLEs && lhs.num_deltas == rhs.num_deltas &&
-         lhs.use_bp == rhs.use_bp;
 }
 
 /**
  * @brief A contiguous range of chunks processed by a single batched codec call.
  *
  * Zstd and Snappy go through the cuIO codec API. Cascaded uses the nvCOMP batched API directly
- * because cuIO does not provide it; its options are per call, so each distinct set of Cascaded
- * options is its own batch.
+ * because cuIO does not provide it; its options are per call, so each Cascaded data type is its
+ * own batch.
  */
 struct chunk_batch {
   pack_compression codec;
@@ -2675,9 +2664,14 @@ struct decompression_work {
 
 // A compressed payload starts with one uint64_t per chunk: the compressed size, or the raw size
 // with raw_chunk_flag set for a chunk stored uncompressed. Zero marks a chunk that failed to
-// compress. The sizes live in the payload so that reserved output never waits for compression.
-constexpr uint64_t raw_chunk_flag         = uint64_t{1} << 63;
-constexpr std::size_t max_raw_chunk_bytes = 1024 * 1024;
+// compress.
+constexpr uint64_t raw_chunk_flag             = uint64_t{1} << 63;
+constexpr std::size_t max_raw_chunk_bytes     = 1024 * 1024;
+constexpr std::size_t compression_chunk_bytes = 64 * 1024;
+// Smaller regions stay uncompressed under `automatic`.
+constexpr std::size_t automatic_min_region_bytes = 4 * 1024;
+// `automatic` stores a chunk raw unless compressing it saves at least this many bytes.
+constexpr std::size_t automatic_min_savings_bytes = 256;
 
 struct compressed_metadata_header {
   uint64_t magic;
@@ -2702,7 +2696,7 @@ struct compressed_metadata_entry {
 };
 
 constexpr uint64_t compressed_metadata_magic   = 0x4355444650524547ULL;  // "CUDFPREG"
-constexpr uint32_t compressed_metadata_version = 3;
+constexpr uint32_t compressed_metadata_version = 1;
 
 struct prepared_compression_region {
   compression_region_layout layout;
@@ -2710,7 +2704,6 @@ struct prepared_compression_region {
   pack_compression compression;
   nvcompBatchedCascadedCompressOpts_t cascaded_options;
   bool allow_uncompressed_fallback;
-  std::size_t minimum_savings_bytes;
   std::size_t chunk_bytes;
   std::size_t chunk_begin;
   std::size_t num_chunks;
@@ -2721,7 +2714,6 @@ struct chunk_descriptor {
   uint8_t const* input;
   std::size_t input_bytes;
   std::size_t output_bytes;   ///< Worst-case output size; equals `input_bytes` for raw chunks
-  std::size_t slot_offset;    ///< Payload offset of the chunk's slot in the reserved layout
   std::size_t window_offset;  ///< Offset of the slot within its window's staging buffer
   std::size_t region;
   bool raw;
@@ -3042,30 +3034,16 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
   return std::make_unique<table>(std::move(columns));
 }
 
-pack_compression select_automatic_compression(compression_region_layout const& layout,
-                                              pack_options const& options)
+pack_compression select_automatic_compression(compression_region_layout const& layout)
 {
-  if (layout.uncompressed_bytes < options.automatic_min_region_bytes) {
-    return pack_compression::none;
-  }
+  if (layout.uncompressed_bytes < automatic_min_region_bytes) { return pack_compression::none; }
   return layout.kind == pack_region_kind::string_characters ? pack_compression::snappy
                                                             : pack_compression::cascaded;
-}
-
-pack_region_options inherit_region_options(pack_options const& options)
-{
-  return pack_region_options{options.compression,
-                             options.compression_chunk_bytes,
-                             options.automatic_min_savings_bytes,
-                             options.cascaded_num_RLEs,
-                             options.cascaded_num_deltas,
-                             options.cascaded_use_bitpacking};
 }
 
 struct plan_input {
   std::unique_ptr<detail::contiguous_split_state> state;
   std::vector<uint8_t> metadata;
-  cudf::device_span<uint8_t const> packed_source;  ///< Borrowed allocation of packed_columns input
 };
 
 plan_input make_plan_input(cudf::table_view const& input,
@@ -3081,26 +3059,10 @@ plan_input make_plan_input(cudf::table_view const& input,
   return {std::move(state), metadata == nullptr ? std::vector<uint8_t>{} : std::move(*metadata)};
 }
 
-plan_input make_plan_input(cudf::packed_columns const& input,
-                           cuda::stream_ref stream,
-                           rmm::device_async_resource_ref temp_mr)
-{
-  CUDF_EXPECTS(input.metadata != nullptr && input.gpu_data != nullptr,
-               "Packed input must contain metadata and a device allocation");
-  auto state = std::make_unique<detail::contiguous_split_state>(
-    cudf::unpack(input), 0, stream, std::nullopt, temp_mr);
-  CUDF_EXPECTS(state->get_total_contiguous_size() == input.gpu_data->size(),
-               "Packed metadata does not describe the complete device allocation");
-  return {std::move(state),
-          *input.metadata,
-          {static_cast<uint8_t const*>(input.gpu_data->data()), input.gpu_data->size()}};
-}
-
 struct prepared_pack_components {
   plan_input input;
   pack_sizes storage_sizes;
   pack_compression compression;
-  compressed_output_mode output_mode;
   std::vector<prepared_compression_region> regions;
   std::vector<chunk_batch> batches;
   std::vector<chunk_descriptor> chunks;
@@ -3130,7 +3092,6 @@ prepared_pack_components make_prepared_pack_components(
                              : options.compression != pack_compression::none;
 
   prepared_pack_components result;
-  result.output_mode = options.output_mode;
   result.compression =
     has_expert_configuration
       ? (uses_region_envelope ? pack_compression::automatic : pack_compression::none)
@@ -3157,13 +3118,13 @@ prepared_pack_components make_prepared_pack_components(
       std::all_of(layouts.begin(), layouts.end(), [](auto const& layout) {
         return layout.direct_source != nullptr;
       });
-    if (input.packed_source.empty() && !all_regions_are_direct) {
+    if (!all_regions_are_direct) {
       result.staging_buffer =
         std::make_unique<rmm::device_buffer>(uncompressed_bytes, stream, temp_mr);
     }
     auto const* const packed_base = result.staging_buffer != nullptr
                                       ? static_cast<uint8_t const*>(result.staging_buffer->data())
-                                      : input.packed_source.data();
+                                      : nullptr;
 
     auto& regions                = result.regions;
     std::size_t uncompressed_end = 0;
@@ -3174,12 +3135,10 @@ prepared_pack_components make_prepared_pack_components(
                    "Prepared compression regions do not cover a contiguous payload");
       uncompressed_end = layout.uncompressed_offset + layout.uncompressed_bytes;
 
-      auto const region_options = has_expert_configuration
-                                    ? configured_regions[region_index].options
-                                    : inherit_region_options(options);
-      auto const automatic      = region_options.codec == pack_compression::automatic;
-      auto const requested =
-        automatic ? select_automatic_compression(layout, options) : region_options.codec;
+      auto const codec = has_expert_configuration ? configured_regions[region_index].options.codec
+                                                  : options.compression;
+      auto const automatic = codec == pack_compression::automatic;
+      auto const requested = automatic ? select_automatic_compression(layout) : codec;
       CUDF_EXPECTS(is_concrete_codec(requested),
                    "Expert region configuration selected an unsupported codec");
 
@@ -3189,17 +3148,14 @@ prepared_pack_components make_prepared_pack_components(
         CUDF_EXPECTS(requested == pack_compression::cascaded ||
                        cudf::io::detail::is_compression_supported(to_io_compression(requested)),
                      "The selected compression codec is disabled");
-        CUDF_EXPECTS(region_options.compression_chunk_bytes > 0,
-                     "Compression chunk size must be non-zero");
-        CUDF_EXPECTS(
-          region_options.cascaded_num_RLEs >= 0 && region_options.cascaded_num_deltas >= 0,
-          "Cascaded transform counts must be non-negative");
         // Region sizes are multiples of split_align, so every chunk is a whole number of values.
+        // Half the staging buffer leaves room for a chunk's worst-case compressed size.
         chunk_bytes = std::max(
           split_align,
-          std::min(region_options.compression_chunk_bytes, max_allowed_chunk_bytes(requested)) /
+          std::min(
+            {compression_chunk_bytes, max_allowed_chunk_bytes(requested), window_budget / 2}) /
             split_align * split_align);
-        cascaded_options = make_cascaded_options(layout, region_options);
+        cascaded_options = make_cascaded_options(layout);
       }
       regions.push_back(prepared_compression_region{
         layout,
@@ -3207,7 +3163,6 @@ prepared_pack_components make_prepared_pack_components(
         requested,
         cascaded_options,
         automatic,
-        region_options.minimum_savings_bytes,
         chunk_bytes,
         0,
         cudf::util::div_rounding_up_safe(layout.data_bytes, chunk_bytes),
@@ -3223,7 +3178,7 @@ prepared_pack_components make_prepared_pack_components(
       auto const batch = std::find_if(batches.begin(), batches.end(), [&](auto const& item) {
         return item.codec == region.compression &&
                (item.codec != pack_compression::cascaded ||
-                same_cascaded_options(item.cascaded_options, region.cascaded_options));
+                item.cascaded_options.type == region.cascaded_options.type);
       });
       region_batch.push_back(batch - batches.begin());
       if (batch == batches.end()) {
@@ -3247,16 +3202,16 @@ prepared_pack_components make_prepared_pack_components(
         for (std::size_t offset = 0; offset < region.layout.data_bytes;
              offset += region.chunk_bytes) {
           auto const bytes = std::min(region.chunk_bytes, region.layout.data_bytes - offset);
-          chunks.push_back(chunk_descriptor{
-            region.source + offset, bytes, raw ? bytes : slot_bytes, 0, 0, i, raw});
+          chunks.push_back(
+            chunk_descriptor{region.source + offset, bytes, raw ? bytes : slot_bytes, 0, i, raw});
         }
       }
       batches[b].chunk_end = chunks.size();
     }
     auto const num_chunks = chunks.size();
 
-    // Reserved layout: the chunk size table, then a slot per chunk in chunk order. A slot also
-    // fits the raw chunk, which bounds compact output with uncompressed fallback.
+    // The capacity bound: the chunk size table, then a worst-case slot per chunk in chunk order. A
+    // slot also fits the raw chunk, which bounds output with uncompressed fallback.
     destination_bytes = cudf::util::round_up_safe(num_chunks * sizeof(uint64_t), split_align);
     for (std::size_t c = 0; c < num_chunks; ++c) {
       auto& chunk = chunks[c];
@@ -3269,7 +3224,6 @@ prepared_pack_components make_prepared_pack_components(
         result.windows.push_back(pack_window{c, c, destination_bytes, 0});
       }
       auto& window        = result.windows.back();
-      chunk.slot_offset   = destination_bytes;
       chunk.window_offset = destination_bytes - window.offset;
       destination_bytes += extent;
       window.end               = c + 1;
@@ -3306,7 +3260,7 @@ struct pack_plan_builder::impl {
       temp_mr(temp_mr),
       layouts(this->input.state->get_compression_regions())
   {
-    auto const inherited = inherit_region_options(options);
+    auto const inherited = pack_region_options{options.compression};
     regions.reserve(layouts.size());
     for (std::size_t i = 0; i < layouts.size(); ++i) {
       auto const& layout = layouts[i];
@@ -3384,16 +3338,6 @@ pack_plan_builder make_pack_plan_builder(cudf::table_view const& input,
     make_plan_input(input, stream, temp_mr), options, temp_mr)};
 }
 
-pack_plan_builder make_pack_plan_builder(cudf::packed_columns const& input,
-                                         pack_options const& options,
-                                         cuda::stream_ref stream,
-                                         rmm::device_async_resource_ref temp_mr)
-{
-  CUDF_FUNC_RANGE();
-  return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
-    make_plan_input(input, stream, temp_mr), options, temp_mr)};
-}
-
 pack_plan prepare_pack(cudf::table_view const& input,
                        cuda::stream_ref stream,
                        rmm::device_async_resource_ref temp_mr)
@@ -3408,18 +3352,6 @@ pack_plan prepare_pack(cudf::table_view const& input,
                        rmm::device_async_resource_ref temp_mr)
 {
   CUDF_FUNC_RANGE();
-  return pack_plan{std::make_unique<pack_plan::impl>(
-    make_prepared_pack_components(make_plan_input(input, stream, temp_mr), options, temp_mr))};
-}
-
-pack_plan prepare_pack(cudf::packed_columns const& input,
-                       pack_options const& options,
-                       cuda::stream_ref stream,
-                       rmm::device_async_resource_ref temp_mr)
-{
-  CUDF_FUNC_RANGE();
-  CUDF_EXPECTS(options.compression != pack_compression::none,
-               "The packed_columns overload requires a compressed output representation");
   return pack_plan{std::make_unique<pack_plan::impl>(
     make_prepared_pack_components(make_plan_input(input, stream, temp_mr), options, temp_mr))};
 }
@@ -3458,8 +3390,7 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
     } else {
       state.pack_into(destination);
     }
-    return pack_result{
-      impl.input.metadata, sizes.uncompressed_payload_bytes, impl.compression, impl.output_mode};
+    return pack_result{impl.input.metadata, sizes.uncompressed_payload_bytes, impl.compression};
   }
 
   if (impl.staging_buffer != nullptr) {
@@ -3467,16 +3398,14 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
                                                sizes.uncompressed_payload_bytes});
   }
 
-  // Reserved output to device memory is compressed in place. Otherwise each window of chunks is
-  // compressed into staging memory, followed in compact mode to host memory by its compacted copy.
-  auto const reserved    = impl.output_mode == compressed_output_mode::reserved;
-  auto const in_place    = reserved && !to_host;
+  // Each window of chunks is compressed into staging memory and compacted into the destination,
+  // through a second staging buffer for host destinations.
   auto const num_chunks  = impl.chunks.size();
   auto const table_bytes = num_chunks * sizeof(uint64_t);
   auto const compacted_bytes =
-    to_host && !reserved ? impl.max_window_bytes + impl.max_window_chunks * split_align : 0;
-  rmm::device_buffer staging(in_place ? 0 : impl.max_window_bytes + compacted_bytes, stream);
-  auto* const slots     = in_place ? destination.data() : static_cast<uint8_t*>(staging.data());
+    to_host ? impl.max_window_bytes + impl.max_window_chunks * split_align : 0;
+  rmm::device_buffer staging(impl.max_window_bytes + compacted_bytes, stream);
+  auto* const slots     = static_cast<uint8_t*>(staging.data());
   auto* const compacted = slots + impl.max_window_bytes;
 
   rmm::device_uvector<device_span<uint8_t const>> inputs(num_chunks, stream);
@@ -3489,19 +3418,18 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
                       inputs  = inputs.data(),
                       outputs = outputs.data(),
                       results = results.data(),
-                      slots,
-                      in_place] __device__(std::size_t i) {
+                      slots] __device__(std::size_t i) {
                        auto const& chunk = chunks[i];
                        inputs[i]         = {chunk.input, chunk.input_bytes};
-                       outputs[i] = {slots + (in_place ? chunk.slot_offset : chunk.window_offset),
-                                     chunk.output_bytes};
-                       results[i] = {0, codec_status::FAILURE};
+                       outputs[i]        = {slots + chunk.window_offset, chunk.output_bytes};
+                       results[i]        = {0, codec_status::FAILURE};
                      });
-  auto const compress_window = [&](pack_window const& window, bool copy_raw) {
+  // Raw chunks are copied straight from their input during compaction.
+  auto const compress_window = [&](pack_window const& window) {
     for (auto const& batch : impl.batches) {
       auto const begin = std::max(batch.chunk_begin, window.begin);
       auto const end   = std::min(batch.chunk_end, window.end);
-      if (begin >= end || (batch.codec == pack_compression::none && !copy_raw)) { continue; }
+      if (begin >= end || batch.codec == pack_compression::none) { continue; }
       compress_batch(
         batch,
         device_span<device_span<uint8_t const> const>{inputs}.subspan(begin, end - begin),
@@ -3511,102 +3439,72 @@ pack_result pack_into(pack_plan const& plan, cudf::device_span<uint8_t> destinat
     }
   };
 
-  std::vector<uint64_t> table(reserved ? 0 : num_chunks, 0);
+  std::vector<uint64_t> table(num_chunks, 0);
   std::vector<uint64_t> chunk_offsets(num_chunks, 0);
-  auto payload_bytes = sizes.payload_bytes;
-  if (reserved) {
-    auto const whole   = pack_window{0, num_chunks, 0, 0};
-    auto const windows = in_place ? std::span<pack_window const>{&whole, 1}
-                                  : std::span<pack_window const>{impl.windows};
-    for (auto const& window : windows) {
-      compress_window(window, true);
-      if (!in_place) { copy_to_host(window.offset, slots, window.bytes); }
-    }
-    rmm::device_uvector<uint64_t> host_table(to_host ? num_chunks : 0, stream);
-    thrust::transform(
-      rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-      impl.d_chunks->begin(),
-      impl.d_chunks->end(),
-      results.begin(),
-      to_host ? host_table.data() : reinterpret_cast<uint64_t*>(destination.data()),
-      cuda::proclaim_return_type<uint64_t>(
-        [] __device__(chunk_descriptor const& chunk, codec_exec_result const& result) -> uint64_t {
-          if (chunk.raw) { return raw_chunk_flag | chunk.input_bytes; }
-          return result.status == codec_status::SUCCESS ? result.bytes_written : 0;
-        }));
-    if (to_host) { copy_to_host(0, host_table.data(), table_bytes); }
-    std::transform(
-      impl.chunks.begin(), impl.chunks.end(), chunk_offsets.begin(), [](auto const& chunk) {
-        return chunk.slot_offset;
-      });
-  } else {
-    payload_bytes = table_bytes;
-    for (auto const& window : impl.windows) {
-      compress_window(window, false);
-      auto const h_results =
-        cudf::detail::make_std_vector(device_span<codec_exec_result const>{results}.subspan(
-                                        window.begin, window.end - window.begin),
-                                      stream);
-      auto const window_begin = payload_bytes;
-      std::vector<uint8_t const*> sources;
-      std::vector<uint8_t*> targets;
-      std::vector<std::size_t> copy_bytes;
-      for (auto c = window.begin; c < window.end; ++c) {
-        auto const& chunk  = impl.chunks[c];
-        auto const& region = impl.regions[chunk.region];
-        auto const& result = h_results[c - window.begin];
-        auto raw           = chunk.raw;
-        if (!raw) {
-          auto const failed = result.status != codec_status::SUCCESS;
-          CUDF_EXPECTS(!failed || region.allow_uncompressed_fallback, "Compression failed");
-          raw = region.allow_uncompressed_fallback &&
-                (failed || result.bytes_written >= chunk.input_bytes ||
-                 chunk.input_bytes - result.bytes_written < region.minimum_savings_bytes);
-        }
-        auto const bytes = raw ? chunk.input_bytes : result.bytes_written;
-        payload_bytes =
-          cudf::util::round_up_safe(payload_bytes, raw ? sizeof(uint64_t) : region.alignment);
-        chunk_offsets[c] = payload_bytes;
-        table[c]         = raw ? (raw_chunk_flag | bytes) : bytes;
-        sources.push_back(raw ? chunk.input : slots + chunk.window_offset);
-        targets.push_back(to_host ? compacted + (payload_bytes - window_begin)
-                                  : destination.data() + payload_bytes);
-        copy_bytes.push_back(bytes);
-        payload_bytes += bytes;
+  auto payload_bytes = table_bytes;
+  for (auto const& window : impl.windows) {
+    compress_window(window);
+    auto const h_results =
+      cudf::detail::make_std_vector(device_span<codec_exec_result const>{results}.subspan(
+                                      window.begin, window.end - window.begin),
+                                    stream);
+    auto const window_begin = payload_bytes;
+    std::vector<uint8_t const*> sources;
+    std::vector<uint8_t*> targets;
+    std::vector<std::size_t> copy_bytes;
+    for (auto c = window.begin; c < window.end; ++c) {
+      auto const& chunk  = impl.chunks[c];
+      auto const& region = impl.regions[chunk.region];
+      auto const& result = h_results[c - window.begin];
+      auto raw           = chunk.raw;
+      if (!raw) {
+        auto const failed = result.status != codec_status::SUCCESS;
+        CUDF_EXPECTS(!failed || region.allow_uncompressed_fallback, "Compression failed");
+        raw = region.allow_uncompressed_fallback &&
+              (failed || result.bytes_written >= chunk.input_bytes ||
+               chunk.input_bytes - result.bytes_written < automatic_min_savings_bytes);
       }
-      auto const temp_mr      = cudf::get_current_device_resource_ref();
-      auto const d_sources    = cudf::detail::make_device_uvector(sources, stream, temp_mr);
-      auto const d_targets    = cudf::detail::make_device_uvector(targets, stream, temp_mr);
-      auto const d_copy_bytes = cudf::detail::make_device_uvector(copy_bytes, stream, temp_mr);
-      cudf::detail::batched_memcpy_async(
-        d_sources.begin(), d_targets.begin(), d_copy_bytes.begin(), d_sources.size(), stream);
-      if (to_host) { copy_to_host(window_begin, compacted, payload_bytes - window_begin); }
+      auto const bytes = raw ? chunk.input_bytes : result.bytes_written;
+      payload_bytes =
+        cudf::util::round_up_safe(payload_bytes, raw ? sizeof(uint64_t) : region.alignment);
+      chunk_offsets[c] = payload_bytes;
+      table[c]         = raw ? (raw_chunk_flag | bytes) : bytes;
+      sources.push_back(raw ? chunk.input : slots + chunk.window_offset);
+      targets.push_back(to_host ? compacted + (payload_bytes - window_begin)
+                                : destination.data() + payload_bytes);
+      copy_bytes.push_back(bytes);
+      payload_bytes += bytes;
     }
-    if (to_host) {
-      std::memcpy(destination.data(), table.data(), table_bytes);
-    } else {
-      cudf::detail::cuda_memcpy<uint64_t>(
-        device_span<uint64_t>{reinterpret_cast<uint64_t*>(destination.data()), num_chunks},
-        table,
-        stream);
-    }
+    auto const temp_mr      = cudf::get_current_device_resource_ref();
+    auto const d_sources    = cudf::detail::make_device_uvector(sources, stream, temp_mr);
+    auto const d_targets    = cudf::detail::make_device_uvector(targets, stream, temp_mr);
+    auto const d_copy_bytes = cudf::detail::make_device_uvector(copy_bytes, stream, temp_mr);
+    cudf::detail::batched_memcpy_async(
+      d_sources.begin(), d_targets.begin(), d_copy_bytes.begin(), d_sources.size(), stream);
+    if (to_host) { copy_to_host(window_begin, compacted, payload_bytes - window_begin); }
+  }
+  if (to_host) {
+    std::memcpy(destination.data(), table.data(), table_bytes);
+  } else {
+    cudf::detail::cuda_memcpy<uint64_t>(
+      device_span<uint64_t>{reinterpret_cast<uint64_t*>(destination.data()), num_chunks},
+      table,
+      stream);
   }
 
   std::vector<compressed_metadata_entry> entries;
   entries.reserve(impl.regions.size());
   for (auto const& region : impl.regions) {
-    auto const all_raw =
-      !reserved && std::all_of(table.begin() + region.chunk_begin,
-                               table.begin() + region.chunk_begin + region.num_chunks,
-                               [](auto entry) { return entry & raw_chunk_flag; });
+    auto const all_raw = std::all_of(table.begin() + region.chunk_begin,
+                                     table.begin() + region.chunk_begin + region.num_chunks,
+                                     [](auto entry) { return entry & raw_chunk_flag; });
     entries.push_back(make_entry(region, all_raw ? pack_compression::none : region.compression));
   }
   return pack_result{
     make_compressed_metadata(
       impl.input.metadata, sizes.uncompressed_payload_bytes, entries, chunk_offsets),
     payload_bytes,
-    impl.compression,
-    impl.output_mode};
+    impl.compression};
 }
 
 table_view unpack_view(packed_data_view input)
