@@ -77,7 +77,7 @@ size_t get_gpu_debrotli_scratch_size(int max_num_inputs = 0);
  * @param[out] outputs List of output buffers
  * @param[out] results List of output status structures
  * @param[in] stream CUDA stream to use
- * @param[in] mr Memory resources; only the temporary resource is used, for the scratch memory
+ * @param[in] mr Memory resources; only the temporary resource is used
  */
 CUDF_EXPORT
 void gpu_debrotli(device_span<device_span<uint8_t const> const> inputs,

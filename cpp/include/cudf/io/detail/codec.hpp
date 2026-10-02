@@ -110,7 +110,7 @@ std::vector<uint8_t> compress(compression_type compression, host_span<uint8_t co
  * @param outputs Device memory buffers to store the compressed output
  * @param results Compression results
  * @param stream CUDA stream used for device memory operations and kernel launches
- * @param mr Memory resources; only the temporary resource is used, including for scratch
+ * @param mr Memory resources; only the temporary resource is used
  */
 void compress(compression_type compression,
               device_span<device_span<uint8_t const> const> inputs,
@@ -151,7 +151,7 @@ size_t decompress(compression_type compression,
  * @param max_uncomp_chunk_size Maximum size of any single uncompressed chunk
  * @param max_total_uncomp_size Maximum size of the total uncompressed data
  * @param stream CUDA stream used for device memory operations and kernel launches
- * @param mr Memory resources; only the temporary resource is used, including for scratch
+ * @param mr Memory resources; only the temporary resource is used
  */
 void decompress(compression_type compression,
                 device_span<device_span<uint8_t const> const> inputs,

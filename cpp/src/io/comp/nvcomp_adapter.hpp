@@ -27,7 +27,7 @@ namespace cudf::io::detail::nvcomp {
  * @param[in] max_uncomp_chunk_size Maximum size of any single uncompressed chunk
  * @param[in] max_total_uncomp_size Maximum total size of uncompressed data
  * @param[in] stream CUDA stream to use
- * @param[in] mr Memory resources; only the temporary resource is used, including for scratch
+ * @param[in] mr Memory resources; only the temporary resource is used
  */
 void batched_decompress(compression_type compression,
                         device_span<device_span<uint8_t const> const> inputs,
@@ -134,7 +134,7 @@ void load_nvcomp_library();
  * @param[out] outputs List of output buffers
  * @param[out] results List of output status structures
  * @param[in] stream CUDA stream to use
- * @param[in] mr Memory resources; only the temporary resource is used, including for scratch
+ * @param[in] mr Memory resources; only the temporary resource is used
  */
 void batched_compress(compression_type compression,
                       device_span<device_span<uint8_t const> const> inputs,
