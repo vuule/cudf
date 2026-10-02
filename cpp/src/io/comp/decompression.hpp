@@ -48,14 +48,6 @@ struct decompression_info {
  *
  * Might launch a kernel. Should be used only if is_decompression_scratch_size_ex_supported returns
  * true.
- *
- * @param compression Type of compression of the input data
- * @param inputs Compressed device memory buffers
- * @param max_uncomp_chunk_size Maximum size of any single uncompressed chunk
- * @param max_total_uncomp_size Maximum total size of uncompressed data
- * @param stream CUDA stream to use
- * @param temp_mr Memory resource for temporary allocations
- * @return Total required scratch size in bytes
  */
 [[nodiscard]] size_t get_decompression_scratch_size_ex(
   compression_type compression,
