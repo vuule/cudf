@@ -2801,6 +2801,12 @@ struct parsed_compressed_metadata {
   std::span<uint8_t const> legacy_metadata;
 };
 
+bool is_compressed_metadata(std::span<uint8_t const> metadata)
+{
+  return metadata.size() >= sizeof(int32_t) &&
+         read_pod<int32_t>(metadata, 0) == compressed_metadata_version;
+}
+
 parsed_compressed_metadata parse_compressed_metadata(std::span<uint8_t const> metadata)
 {
   auto const header = read_pod<compressed_metadata_header>(metadata, 0);
@@ -3105,7 +3111,6 @@ plan_input make_plan_input(cudf::packed_columns const& input,
 struct prepared_pack_components {
   plan_input input;
   pack_sizes storage_sizes;
-  pack_compression compression;
   std::vector<prepared_compression_region> regions;
   std::vector<chunk_batch> batches;
   std::vector<chunk_descriptor> chunks;
@@ -3135,10 +3140,6 @@ prepared_pack_components make_prepared_pack_components(
                              : options.compression != pack_compression::none;
 
   prepared_pack_components result;
-  result.compression =
-    has_expert_configuration
-      ? (uses_compressed_metadata ? pack_compression::automatic : pack_compression::none)
-      : options.compression;
   auto destination_bytes   = uncompressed_bytes;
   auto const window_budget = options.staging_buffer_bytes;
   auto const raw_chunk_bytes =
@@ -3446,7 +3447,7 @@ pack_result pack_into(pack_plan const& plan,
     } else {
       state.pack_into(destination);
     }
-    return pack_result{impl.input.metadata, sizes.uncompressed_payload_bytes, impl.compression};
+    return pack_result{impl.input.metadata, sizes.uncompressed_payload_bytes};
   }
 
   if (impl.staging_buffer != nullptr) {
@@ -3559,14 +3560,13 @@ pack_result pack_into(pack_plan const& plan,
   return pack_result{
     make_compressed_metadata(
       impl.input.metadata, sizes.uncompressed_payload_bytes, entries, chunk_offsets),
-    payload_bytes,
-    impl.compression};
+    payload_bytes};
 }
 
 table_view unpack_view(packed_data_view input)
 {
   CUDF_FUNC_RANGE();
-  CUDF_EXPECTS(input.compression == pack_compression::none,
+  CUDF_EXPECTS(!is_compressed_metadata(input.metadata),
                "Compressed packed data cannot be exposed as a zero-copy table view");
   if (input.metadata.empty()) { return table_view{}; }
   CUDF_EXPECTS(
@@ -3593,13 +3593,10 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
 {
   payload_reader reader{input.payload};
   if (!selection.has_value()) { reader.request(input.payload.data(), input.payload.size()); }
-  if (input.compression == pack_compression::none || input.payload.empty()) {
+  if (!is_compressed_metadata(input.metadata)) {
     return materialize_uncompressed(input, selection, reader, stream, mr);
   }
 
-  CUDF_EXPECTS(
-    is_concrete_codec(input.compression) || input.compression == pack_compression::automatic,
-    "Unsupported prepared-pack compression codec");
   auto const parsed = parse_compressed_metadata(input.metadata);
   CUDF_EXPECTS(!parsed.entries.empty(), "Compressed payload has no region directory");
   auto const num_chunks = parsed.chunk_offsets.size();
@@ -3618,9 +3615,6 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     uncompressed_end += entry.uncompressed_bytes;
     auto const compression = static_cast<pack_compression>(entry.compression);
     CUDF_EXPECTS(is_concrete_codec(compression), "Compressed region declares an unsupported codec");
-    CUDF_EXPECTS(
-      input.compression == pack_compression::automatic || compression == input.compression,
-      "Packed payload codec does not match its declared representation");
     CUDF_EXPECTS(compression == pack_compression::none ||
                    compression == pack_compression::cascaded ||
                    cudf::io::detail::is_decompression_supported(to_io_compression(compression)),

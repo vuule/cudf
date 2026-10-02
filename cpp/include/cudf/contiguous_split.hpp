@@ -505,7 +505,6 @@ pack_plan prepare_pack(cudf::packed_columns const& input,
 struct pack_result {
   std::vector<uint8_t> metadata;  ///< Metadata describing the packed payload
   std::size_t payload_bytes;      ///< Number of payload bytes written
-  pack_compression compression;   ///< Representation used by the payload
 };
 
 /**
@@ -538,11 +537,12 @@ pack_result pack_into(pack_plan const& plan,
 
 /**
  * @brief Non-owning view of packed host metadata and device-accessible payload bytes.
+ *
+ * The metadata identifies whether the payload is compressed and which codec each region uses.
  */
 struct packed_data_view {
-  std::span<uint8_t const> metadata;                     ///< Host metadata from `pack_into()`
-  cudf::device_span<uint8_t const> payload;              ///< Device, pinned, or pageable bytes
-  pack_compression compression{pack_compression::none};  ///< Representation of `payload`
+  std::span<uint8_t const> metadata;         ///< Host metadata from `pack_into()`
+  cudf::device_span<uint8_t const> payload;  ///< Device, pinned, or pageable bytes
 };
 
 /**
@@ -551,7 +551,7 @@ struct packed_data_view {
  * The returned view must not outlive either buffer in `input`.
  * Compressed inputs must be passed to `materialize()` instead.
  *
- * @throw cudf::logic_error if `input.compression` is not `pack_compression::none`
+ * @throw cudf::logic_error if `input.metadata` describes a compressed payload
  * @throw cudf::logic_error if the payload is pageable host memory and the device cannot access
  * pageable memory
  * @throw cudf::logic_error if `input.metadata` is truncated or malformed
@@ -567,7 +567,7 @@ table_view unpack_view(packed_data_view input);
  * A pageable host payload is first copied to temporary device memory.
  *
  * @throw cudf::logic_error if `input.metadata` or `input.payload` is truncated or malformed
- * @throw cudf::logic_error if the payload codec does not match `input.compression` or is disabled
+ * @throw cudf::logic_error if a codec used by the payload is disabled
  *
  * @param input Packed metadata and payload
  * @param stream Stream used for the deep copy
@@ -588,7 +588,7 @@ std::unique_ptr<table> materialize(
  *
  * @throw std::out_of_range if an index is not in `[0, num_columns)`
  * @throw cudf::logic_error if `input.metadata` or `input.payload` is truncated or malformed
- * @throw cudf::logic_error if the payload codec does not match `input.compression` or is disabled
+ * @throw cudf::logic_error if a codec used by the payload is disabled
  *
  * @param input Packed metadata and payload
  * @param column_indices Indices of the top-level columns to materialize, in output order

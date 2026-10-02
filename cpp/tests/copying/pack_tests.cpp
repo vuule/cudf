@@ -118,9 +118,7 @@ struct packed_output {
 
   [[nodiscard]] cx::packed_data_view view() const
   {
-    return {result.metadata,
-            cudf::device_span<uint8_t const>{data, result.payload_bytes},
-            result.compression};
+    return {result.metadata, cudf::device_span<uint8_t const>{data, result.payload_bytes}};
   }
 };
 
@@ -205,7 +203,6 @@ struct PackUnpackTest : public cudf::test::BaseFixture {
           windowed ? make_windowed_options(compression) : make_options(compression);
         auto const plan   = cx::prepare_pack(input, options);
         auto const packed = pack_to(plan, kind);
-        EXPECT_EQ(packed.result.compression, compression);
         EXPECT_LE(packed.result.payload_bytes, plan.sizes().payload_bytes);
         expect_materializes_to(input, packed.view());
       }
@@ -340,10 +337,8 @@ TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
     harness.expect_temporary_allocation_activity(stream);
     harness.expect_temporary_allocations_released(stream);
 
-    auto const view =
-      cx::packed_data_view{packed.metadata,
-                           cudf::device_span<uint8_t const>{pinned.data(), packed.payload_bytes},
-                           packed.compression};
+    auto const view = cx::packed_data_view{
+      packed.metadata, cudf::device_span<uint8_t const>{pinned.data(), packed.payload_bytes}};
     auto materialized = [&] {
       auto const scope = harness.fail_on_current_device_resource_use();
       auto result      = cx::materialize(view, stream, harness.resources());
@@ -368,8 +363,7 @@ TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
     auto const view =
       cx::packed_data_view{packed.metadata,
                            cudf::device_span<uint8_t const>{
-                             static_cast<uint8_t const*>(output.data()), packed.payload_bytes},
-                           packed.compression};
+                             static_cast<uint8_t const*>(output.data()), packed.payload_bytes}};
     auto materialized = cx::materialize(view, stream, harness.resources());
     harness.expect_temporary_allocations_released(stream);
     EXPECT_GT(harness.temporary_mr().get_bytes_counter().total, temporary_before);
@@ -403,8 +397,7 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeOversizedUncompressedPayload)
   auto const result = cx::pack_into(plan, as_span(buffer));
   auto const view   = cx::packed_data_view{
     result.metadata,
-    cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(buffer.data()), buffer.size()},
-    result.compression};
+    cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(buffer.data()), buffer.size()}};
   auto materialized = cx::materialize(view);
   CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
   auto columns = materialized->release();
@@ -501,7 +494,6 @@ TEST_F(PackUnpackTest, ExperimentalCompressedPackMaterialize)
     // Compressed plans are reusable as well.
     for (int execution = 0; execution < 2; ++execution) {
       auto const packed = pack_to_device(plan);
-      EXPECT_EQ(packed.result.compression, compression);
       EXPECT_GT(packed.result.payload_bytes, 0);
       EXPECT_LE(packed.result.payload_bytes, packed.buffer.size());
       EXPECT_LT(packed.result.payload_bytes, plan.sizes().uncompressed_payload_bytes);
@@ -644,7 +636,6 @@ TEST_F(PackUnpackTest, ExperimentalAutomaticPerRegionCompression)
 
   auto const plan   = cx::prepare_pack(input, make_options(cx::pack_compression::automatic));
   auto const packed = pack_to_device(plan);
-  EXPECT_EQ(packed.result.compression, cx::pack_compression::automatic);
 
   auto const entries = read_region_directory(packed.result.metadata).entries;
   auto const uses    = [&](cx::pack_compression compression) {
@@ -717,7 +708,6 @@ TEST_F(PackUnpackTest, ExperimentalExpertPerRegionCompression)
   }));
 
   auto const packed = pack_to_device(plan);
-  EXPECT_EQ(packed.result.compression, cx::pack_compression::automatic);
   expect_materializes_to(input, packed.view());
 }
 
@@ -729,10 +719,6 @@ TEST_F(PackUnpackTest, ExperimentalCompressedInputValidation)
 
   auto const plan   = cx::prepare_pack(input, make_options(cx::pack_compression::zstd));
   auto const packed = pack_to_device(plan);
-
-  auto wrong_codec        = packed.view();
-  wrong_codec.compression = cx::pack_compression::snappy;
-  EXPECT_THROW(cx::materialize(wrong_codec), cudf::logic_error);
 
   ASSERT_GT(packed.result.payload_bytes, 1);
   auto truncated    = packed.view();
