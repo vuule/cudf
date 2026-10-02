@@ -104,7 +104,7 @@ cx::pack_options make_windowed_options(cx::pack_compression compression)
 
 enum class destination_kind { device, pinned, pageable };
 
-cudf::device_span<uint8_t> as_span(rmm::device_buffer& buffer)
+std::span<uint8_t> as_span(rmm::device_buffer& buffer)
 {
   return {static_cast<uint8_t*>(buffer.data()), buffer.size()};
 }
@@ -118,7 +118,7 @@ struct packed_output {
 
   [[nodiscard]] cx::packed_data_view view() const
   {
-    return {result.metadata, cudf::device_span<uint8_t const>{data, result.payload_bytes}};
+    return {result.metadata, std::span<uint8_t const>{data, result.payload_bytes}};
   }
 };
 
@@ -133,7 +133,7 @@ packed_output pack_to(cx::pack_plan const& plan, destination_kind kind)
                        std::vector<uint8_t>(kind == destination_kind::pageable ? bytes + align : 0),
                        {},
                        nullptr};
-  cudf::device_span<uint8_t> destination;
+  std::span<uint8_t> destination;
   switch (kind) {
     case destination_kind::device: destination = as_span(output.buffer); break;
     case destination_kind::pinned:
@@ -329,8 +329,8 @@ TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
       cudf::detail::make_pinned_vector_async<uint8_t>(plan.sizes().payload_bytes, stream);
     auto const packed = [&] {
       auto const scope = harness.fail_on_current_device_resource_use();
-      auto result      = cx::pack_into(
-        plan, cudf::device_span<uint8_t>{pinned.data(), pinned.size()}, harness.resources());
+      auto result =
+        cx::pack_into(plan, std::span<uint8_t>{pinned.data(), pinned.size()}, harness.resources());
       harness.synchronize(stream);
       return result;
     }();
@@ -338,7 +338,7 @@ TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
     harness.expect_temporary_allocations_released(stream);
 
     auto const view = cx::packed_data_view{
-      packed.metadata, cudf::device_span<uint8_t const>{pinned.data(), packed.payload_bytes}};
+      packed.metadata, std::span<uint8_t const>{pinned.data(), packed.payload_bytes}};
     auto materialized = [&] {
       auto const scope = harness.fail_on_current_device_resource_use();
       auto result      = cx::materialize(view, stream, harness.resources());
@@ -360,10 +360,9 @@ TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
     harness.expect_temporary_allocations_released(stream);
 
     auto const temporary_before = harness.temporary_mr().get_bytes_counter().total;
-    auto const view =
-      cx::packed_data_view{packed.metadata,
-                           cudf::device_span<uint8_t const>{
-                             static_cast<uint8_t const*>(output.data()), packed.payload_bytes}};
+    auto const view             = cx::packed_data_view{
+      packed.metadata,
+      std::span<uint8_t const>{static_cast<uint8_t const*>(output.data()), packed.payload_bytes}};
     auto materialized = cx::materialize(view, stream, harness.resources());
     harness.expect_temporary_allocations_released(stream);
     EXPECT_GT(harness.temporary_mr().get_bytes_counter().total, temporary_before);
@@ -397,7 +396,7 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeOversizedUncompressedPayload)
   auto const result = cx::pack_into(plan, as_span(buffer));
   auto const view   = cx::packed_data_view{
     result.metadata,
-    cudf::device_span<uint8_t const>{static_cast<uint8_t const*>(buffer.data()), buffer.size()}};
+    std::span<uint8_t const>{static_cast<uint8_t const*>(buffer.data()), buffer.size()}};
   auto materialized = cx::materialize(view);
   CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
   auto columns = materialized->release();

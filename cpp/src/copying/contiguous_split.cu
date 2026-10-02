@@ -2892,7 +2892,7 @@ void collect_buffer_offsets(packed_metadata_view::column_view const& metadata,
  */
 class payload_reader {
  public:
-  explicit payload_reader(cudf::device_span<uint8_t const> payload)
+  explicit payload_reader(std::span<uint8_t const> payload)
     : _payload{payload},
       _pageable{!payload.empty() && memory_type(payload.data()) == cudaMemoryTypeUnregistered}
   {
@@ -2959,7 +2959,7 @@ class payload_reader {
     std::size_t staged_offset;
   };
 
-  cudf::device_span<uint8_t const> _payload;
+  std::span<uint8_t const> _payload;
   bool _pageable;
   std::vector<range> _ranges;
   rmm::device_buffer _staged;
@@ -3411,7 +3411,7 @@ pack_plan prepare_pack(cudf::packed_columns const& input,
 }
 
 pack_result pack_into(pack_plan const& plan,
-                      cudf::device_span<uint8_t> destination,
+                      std::span<uint8_t> destination,
                       cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
@@ -3445,7 +3445,7 @@ pack_result pack_into(pack_plan const& plan,
         copy_to_host(window.offset, staging.data(), window.bytes);
       }
     } else {
-      state.pack_into(destination);
+      state.pack_into(cudf::device_span<uint8_t>{destination.data(), destination.size()});
     }
     return pack_result{impl.input.metadata, sizes.uncompressed_payload_bytes};
   }

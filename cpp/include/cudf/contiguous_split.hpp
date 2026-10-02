@@ -382,9 +382,7 @@ class pack_plan {
                                 cuda::stream_ref,
                                 cudf::memory_resources);
   friend class pack_plan_builder;
-  friend pack_result pack_into(pack_plan const&,
-                               cudf::device_span<uint8_t>,
-                               cudf::memory_resources);
+  friend pack_result pack_into(pack_plan const&, std::span<uint8_t>, cudf::memory_resources);
 };
 
 /**
@@ -532,7 +530,7 @@ struct pack_result {
  * @return Host metadata and the number of payload bytes written
  */
 pack_result pack_into(pack_plan const& plan,
-                      cudf::device_span<uint8_t> destination,
+                      std::span<uint8_t> destination,
                       cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 /**
@@ -541,8 +539,8 @@ pack_result pack_into(pack_plan const& plan,
  * The metadata identifies whether the payload is compressed and which codec each region uses.
  */
 struct packed_data_view {
-  std::span<uint8_t const> metadata;         ///< Host metadata from `pack_into()`
-  cudf::device_span<uint8_t const> payload;  ///< Device, pinned, or pageable bytes
+  std::span<uint8_t const> metadata;  ///< Host metadata from `pack_into()`
+  std::span<uint8_t const> payload;   ///< Device, pinned, or pageable bytes
 };
 
 /**
