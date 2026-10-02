@@ -656,7 +656,8 @@ size_t get_uncompressed_size(compression_type compression, host_span<uint8_t con
   device_span<device_span<uint8_t const> const> inputs,
   size_t max_uncomp_chunk_size,
   size_t max_total_uncomp_size,
-  cuda::stream_ref stream)
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref temp_mr)
 {
   if (compression == compression_type::NONE or
       get_host_engine_state(compression) == host_engine_state::ON) {
@@ -670,12 +671,8 @@ size_t get_uncompressed_size(compression_type compression, host_span<uint8_t con
   CUDF_EXPECTS(
     !nvcomp_disabled,
     "Cannot compute decompression scratch size for " + compression_type_name(compression));
-  return nvcomp::batched_decompress_temp_size_ex(nvcomp_type.value(),
-                                                 inputs,
-                                                 max_uncomp_chunk_size,
-                                                 max_total_uncomp_size,
-                                                 stream,
-                                                 cudf::get_current_device_resource_ref());
+  return nvcomp::batched_decompress_temp_size_ex(
+    nvcomp_type.value(), inputs, max_uncomp_chunk_size, max_total_uncomp_size, stream, temp_mr);
 }
 
 [[nodiscard]] bool is_decompression_scratch_size_ex_supported(compression_type compression)

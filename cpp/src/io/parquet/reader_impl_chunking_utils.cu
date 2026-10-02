@@ -792,7 +792,8 @@ rmm::device_uvector<size_t> compute_decompression_scratch_sizes(
         page_spans,
         total_decomp_info.max_page_decompressed_size,
         total_decomp_info.total_decompressed_size,
-        stream);
+        stream,
+        cudf::get_current_device_resource_ref());
 
       // Make use of the extended API if it provides a more accurate estimate
       if (total_temp_size_ex < total_temp_size) {
