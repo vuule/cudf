@@ -16,6 +16,7 @@
 #include <cudf/detail/utilities/host_vector.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/io/detail/codec.hpp>
+#include <cudf/null_mask.hpp>
 
 #include <algorithm>
 #include <array>
@@ -581,7 +582,7 @@ TEST_F(PackUnpackTest, ExperimentalCompressContiguousSplitPartitions)
     cudf::test::fixed_width_column_wrapper<int32_t>(elements, elements + list_offsets.back())
       .release(),
     0,
-    {});
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
   auto const members = cudf::detail::make_counting_transform_iterator(
     0, [](int32_t i) { return static_cast<int16_t>(i % 300); });
   cudf::test::fixed_width_column_wrapper<int16_t> member(members, members + num_rows);

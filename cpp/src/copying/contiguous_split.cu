@@ -60,6 +60,7 @@
 #include <optional>
 #include <stdexcept>
 #include <tuple>
+#include <type_traits>
 
 namespace cudf {
 namespace {
@@ -2855,16 +2856,42 @@ parsed_compressed_metadata parse_compressed_metadata(std::span<uint8_t const> me
   return result;
 }
 
-/// `allocate_buffer(offset, is_validity, required_bytes)` returns an owning buffer for the packed
-/// column buffer at `offset` and schedules filling it.
+using null_mask_buffer = cuda::device_buffer<std::byte>;
+
+template <typename Buffer>
+constexpr bool is_validity_buffer = std::is_same_v<Buffer, null_mask_buffer>;
+
+template <typename Buffer>
+Buffer allocate_output_buffer(std::size_t bytes,
+                              cuda::stream_ref stream,
+                              rmm::device_async_resource_ref mr)
+{
+  if constexpr (is_validity_buffer<Buffer>) {
+    auto const env = cuda::std::execution::prop{cuda::allocation_alignment, alignof(bitmask_type)};
+    return Buffer(stream, mr, bytes, cuda::no_init, env);
+  } else {
+    return Buffer(bytes, stream, mr);
+  }
+}
+
+template <typename Buffer>
+uint8_t* buffer_data(Buffer& buffer)
+{
+  return reinterpret_cast<uint8_t*>(buffer.data());
+}
+
+/// `allocate_buffer(std::type_identity<Buffer>{}, offset, required_bytes)` returns an owning
+/// `Buffer` for the packed column buffer at `offset` and schedules filling it. `Buffer` is
+/// `null_mask_buffer` for validity and `rmm::device_buffer` for data.
 template <typename AllocateBuffer>
 std::unique_ptr<column> allocate_materialized_column(
   packed_metadata_view::column_view const& metadata, AllocateBuffer& allocate_buffer)
 {
-  rmm::device_buffer null_mask;
+  null_mask_buffer null_mask = cudf::create_null_mask(0, mask_state::UNALLOCATED);
   if (metadata.null_mask_offset() != -1) {
-    null_mask = allocate_buffer(
-      metadata.null_mask_offset(), true, bitmask_allocation_size_bytes(metadata.num_rows()));
+    null_mask = allocate_buffer(std::type_identity<null_mask_buffer>{},
+                                metadata.null_mask_offset(),
+                                bitmask_allocation_size_bytes(metadata.num_rows()));
   } else {
     CUDF_EXPECTS(metadata.null_count() == 0, "Packed column with nulls has no validity buffer");
   }
@@ -2875,7 +2902,8 @@ std::unique_ptr<column> allocate_materialized_column(
       is_fixed_width(metadata.type())
         ? static_cast<std::size_t>(metadata.num_rows()) * size_of(metadata.type())
         : std::size_t{0};
-    data = allocate_buffer(metadata.data_offset(), false, required_bytes);
+    data = allocate_buffer(
+      std::type_identity<rmm::device_buffer>{}, metadata.data_offset(), required_bytes);
   }
 
   std::vector<std::unique_ptr<column>> children;
@@ -3029,7 +3057,8 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
   std::vector<uint8_t const*> sources;
   std::vector<uint8_t*> destinations;
   std::vector<std::size_t> sizes;
-  auto allocate_buffer = [&](int64_t offset, bool, std::size_t required_bytes) {
+  auto allocate_buffer = [&]<typename Buffer>(
+                           std::type_identity<Buffer>, int64_t offset, std::size_t required_bytes) {
     auto const next = std::upper_bound(offsets.begin(), offsets.end(), offset);
     auto const end = next == offsets.end() ? input.payload.size() : static_cast<std::size_t>(*next);
     // A payload span longer than the packed data would otherwise oversize its last buffer.
@@ -3037,9 +3066,9 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
                          ? std::min(required_bytes, end - static_cast<std::size_t>(offset))
                          : end - static_cast<std::size_t>(offset);
     CUDF_EXPECTS(bytes >= required_bytes, "Packed column buffer is smaller than its column");
-    rmm::device_buffer buffer(bytes, stream, mr.get_output_mr());
+    auto buffer = allocate_output_buffer<Buffer>(bytes, stream, mr.get_output_mr());
     sources.push_back(input.payload.data() + offset);
-    destinations.push_back(static_cast<uint8_t*>(buffer.data()));
+    destinations.push_back(buffer_data(buffer));
     sizes.push_back(bytes);
     reader.request(sources.back(), bytes);
     return buffer;
@@ -3692,7 +3721,9 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     }
   };
 
-  auto allocate_buffer = [&](int64_t offset, bool is_validity, std::size_t required_bytes) {
+  auto allocate_buffer = [&]<typename Buffer>(
+                           std::type_identity<Buffer>, int64_t offset, std::size_t required_bytes) {
+    constexpr bool is_validity = is_validity_buffer<Buffer>;
     CUDF_EXPECTS(offset >= 0, "Compressed column buffer has no packed offset");
     auto const target = static_cast<uint64_t>(offset);
     auto const entry  = std::lower_bound(
@@ -3705,8 +3736,9 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                    std::to_string(target));
     CUDF_EXPECTS(entry->uncompressed_bytes >= required_bytes,
                  "Compressed region is smaller than its column buffer");
-    rmm::device_buffer buffer(entry->uncompressed_bytes, stream, mr.get_output_mr());
-    submit_decompression(*entry, buffer.data());
+    auto buffer =
+      allocate_output_buffer<Buffer>(entry->uncompressed_bytes, stream, mr.get_output_mr());
+    submit_decompression(*entry, buffer_data(buffer));
     return buffer;
   };
   auto columns =
