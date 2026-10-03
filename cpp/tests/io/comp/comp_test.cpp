@@ -541,7 +541,10 @@ INSTANTIATE_TEST_CASE_P(HostDecompression,
 
 struct DeviceCodecMemoryResourceTest
   : public cudf::test::BaseFixture,
-    public ::testing::WithParamInterface<cudf::io::compression_type> {};
+    public ::testing::WithParamInterface<cudf::io::compression_type> {
+  DeviceCodecMemoryResourceTest() { setenv("LIBCUDF_NVCOMP_POLICY", "ALWAYS", 1); }
+  ~DeviceCodecMemoryResourceTest() override { unsetenv("LIBCUDF_NVCOMP_POLICY"); }
+};
 
 TEST_P(DeviceCodecMemoryResourceTest, TemporaryAllocations)
 {

@@ -586,7 +586,7 @@ size_t batched_decompress_temp_size_ex(compression_type compression,
 {
   auto const temp_mr = mr.get_temporary_mr();
   auto const [d_input_ptrs, d_input_sizes] =
-    create_get_temp_size_args(inputs, stream, cudf::memory_resources{temp_mr, temp_mr});
+    create_get_temp_size_args(inputs, stream, {temp_mr, temp_mr});
 
   return batched_decompress_temp_size_ex(compression,
                                          d_input_ptrs,
@@ -616,8 +616,7 @@ void batched_decompress(compression_type compression,
   auto const num_chunks = inputs.size();
 
   // cuDF inflate inputs converted to nvcomp inputs
-  auto const nvcomp_args =
-    create_batched_nvcomp_args(inputs, outputs, stream, cudf::memory_resources{temp_mr, temp_mr});
+  auto const nvcomp_args = create_batched_nvcomp_args(inputs, outputs, stream, {temp_mr, temp_mr});
   rmm::device_uvector<size_t> actual_uncompressed_data_sizes(num_chunks, stream, temp_mr);
   rmm::device_uvector<nvcompStatus_t> nvcomp_statuses(num_chunks, stream, temp_mr);
 
@@ -708,8 +707,7 @@ void batched_compress(compression_type compression,
 
   auto const num_chunks = inputs.size();
 
-  auto nvcomp_args =
-    create_batched_nvcomp_args(inputs, outputs, stream, cudf::memory_resources{temp_mr, temp_mr});
+  auto nvcomp_args = create_batched_nvcomp_args(inputs, outputs, stream, {temp_mr, temp_mr});
 
   skip_unsupported_inputs(nvcomp_args.input_data_sizes,
                           results,

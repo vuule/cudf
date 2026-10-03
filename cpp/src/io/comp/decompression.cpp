@@ -787,7 +787,7 @@ void decompress(compression_type compression,
 
   // sort inputs by size, largest first
   auto const [sorted_inputs, sorted_outputs, order] =
-    sort_decompression_tasks(inputs, outputs, stream, cudf::memory_resources{temp_mr, temp_mr});
+    sort_decompression_tasks(inputs, outputs, stream, {temp_mr, temp_mr});
   device_span<device_span<uint8_t const> const> inputs_view = sorted_inputs;
   device_span<device_span<uint8_t> const> outputs_view      = sorted_outputs;
 
