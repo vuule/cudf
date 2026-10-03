@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "../compression_common.hpp"
 #include "io/comp/compression.hpp"
 #include "io/comp/decompression.hpp"
 #include "io/comp/gpuinflate.hpp"
@@ -423,8 +424,40 @@ TEST_F(NvcompConfigTest, Decompression)
   EXPECT_TRUE(decomp_disabled(compression_type::SNAPPY, {false, false}));
 }
 
+std::vector<uint8_t> const& roundtrip_input()
+{
+  static auto const input = [] {
+    std::vector<uint8_t> data;
+    data.reserve(8 * (8 << 20));
+    for (size_t size = 1; size < 8 << 20; size *= 2) {
+      // Using number strings to generate data that is compressible, but not trivially so
+      for (size_t i = size / 2; i < size; ++i) {
+        auto const num_string = std::to_string(i);
+        // Keep adding to the test data
+        data.insert(data.end(), num_string.begin(), num_string.end());
+      }
+    }
+    return data;
+  }();
+  return input;
+}
+
+std::vector<size_t> all_roundtrip_sizes()
+{
+  return {size_t{1},
+          size_t{2},
+          size_t{4},
+          size_t{8},
+          size_t{22},
+          size_t{54},
+          size_t{1 << 10},
+          size_t{1 << 20},
+          roundtrip_input().size()};
+}
+
 // With a harness, the codec calls must allocate only from its temporary resource.
 void roundtrip_test(cudf::io::compression_type compression,
+                    std::vector<size_t> const& test_sizes,
                     cudf::test::memory_resource_test_harness* harness = nullptr)
 {
   auto const stream    = cudf::get_default_stream();
@@ -435,28 +468,8 @@ void roundtrip_test(cudf::io::compression_type compression,
     codec_call(harness->resources());
     harness->synchronize(stream);
   };
-  std::vector<uint8_t> expected;
-  expected.reserve(8 * (8 << 20));
-  for (size_t size = 1; size < 8 << 20; size *= 2) {
-    // Using number strings to generate data that is compressible, but not trivially so
-    for (size_t i = size / 2; i < size; ++i) {
-      auto const num_string = std::to_string(i);
-      // Keep adding to the test data
-      expected.insert(expected.end(), num_string.begin(), num_string.end());
-    }
-  }
+  auto const& expected = roundtrip_input();
 
-  // Allocation routing does not depend on the input size.
-  auto const test_sizes     = harness != nullptr ? std::vector{size_t{1 << 20}}
-                                                 : std::vector{size_t{1},
-                                                           size_t{2},
-                                                           size_t{4},
-                                                           size_t{8},
-                                                           size_t{22},
-                                                           size_t{54},
-                                                           size_t{1 << 10},
-                                                           size_t{1 << 20},
-                                                           expected.size()};
   auto const max_input_size = cudf::io::detail::compress_max_allowed_chunk_size(compression)
                                 .value_or(std::numeric_limits<size_t>::max());
   for (auto const test_size : test_sizes) {
@@ -522,7 +535,7 @@ void roundtrip_test(cudf::io::compression_type compression,
   }
 }
 
-TEST_P(HostCompressTest, HostCompression) { roundtrip_test(GetParam()); }
+TEST_P(HostCompressTest, HostCompression) { roundtrip_test(GetParam(), all_roundtrip_sizes()); }
 
 INSTANTIATE_TEST_CASE_P(HostCompression,
                         HostCompressTest,
@@ -530,7 +543,7 @@ INSTANTIATE_TEST_CASE_P(HostCompression,
                                           cudf::io::compression_type::SNAPPY,
                                           cudf::io::compression_type::ZSTD));
 
-TEST_P(HostDecompressTest, HostDecompression) { roundtrip_test(GetParam()); }
+TEST_P(HostDecompressTest, HostDecompression) { roundtrip_test(GetParam(), all_roundtrip_sizes()); }
 
 INSTANTIATE_TEST_CASE_P(HostDecompression,
                         HostDecompressTest,
@@ -542,8 +555,9 @@ INSTANTIATE_TEST_CASE_P(HostDecompression,
 struct DeviceCodecMemoryResourceTest
   : public cudf::test::BaseFixture,
     public ::testing::WithParamInterface<cudf::io::compression_type> {
-  DeviceCodecMemoryResourceTest() { setenv("LIBCUDF_NVCOMP_POLICY", "ALWAYS", 1); }
-  ~DeviceCodecMemoryResourceTest() override { unsetenv("LIBCUDF_NVCOMP_POLICY"); }
+  tmp_env_var host_comp{host_comp_env_var, "OFF"};
+  tmp_env_var host_decomp{host_decomp_env_var, "OFF"};
+  tmp_env_var nvcomp_policy{nvcomp_policy_env_var, "ALWAYS"};
 };
 
 TEST_P(DeviceCodecMemoryResourceTest, TemporaryAllocations)
@@ -553,7 +567,7 @@ TEST_P(DeviceCodecMemoryResourceTest, TemporaryAllocations)
     GTEST_SKIP() << "Device codec is disabled";
   }
   auto harness = cudf::test::memory_resource_test_harness{};
-  roundtrip_test(GetParam(), &harness);
+  roundtrip_test(GetParam(), {size_t{1} << 20}, &harness);
   harness.expect_resource_usage(0,
                                 {.temporary = cudf::test::temporary_allocation_expectation::SOME},
                                 cudf::get_default_stream());
