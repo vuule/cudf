@@ -2105,6 +2105,24 @@ struct contiguous_split_state {
   }
 
   /**
+   * @brief Recompute the copy batches so that none exceeds `batch_size` bytes.
+   */
+  void rebatch(std::size_t batch_size, rmm::device_async_resource_ref scratch_mr)
+  {
+    CUDF_EXPECTS(num_partitions == 1, "rebatch does not support partitioned input");
+    if (is_empty) { return; }
+    chunk_iter_state = compute_batches(num_bufs,
+                                       partition_buf_size_and_dst_buf_info->d_dst_buf_info.data(),
+                                       partition_buf_size_and_dst_buf_info->h_buf_sizes,
+                                       num_partitions,
+                                       user_buffer_size,
+                                       batch_size,
+                                       stream,
+                                       temp_mr,
+                                       scratch_mr);
+  }
+
+  /**
    * @brief Group the copy batches into windows whose output spans at most `max_bytes`.
    */
   std::vector<pack_window> get_pack_windows(std::size_t max_bytes) const
@@ -3118,8 +3136,11 @@ pack_compression select_automatic_compression(compression_region_layout const& l
 {
   if (layout.uncompressed_bytes < automatic_min_region_bytes) { return pack_compression::none; }
   if (layout.kind != pack_region_kind::string_characters) { return pack_compression::cascaded; }
-  // Unlike Cascaded, Snappy can be disabled by the nvCOMP policy.
-  return cudf::io::detail::is_compression_supported(to_io_compression(pack_compression::snappy))
+  // Unlike Cascaded, Snappy can be disabled by the nvCOMP policy. Requiring decompression support
+  // as well keeps automatic output readable by materialize() in the same process.
+  auto const snappy = to_io_compression(pack_compression::snappy);
+  return cudf::io::detail::is_compression_supported(snappy) &&
+             cudf::io::detail::is_decompression_supported(snappy)
            ? pack_compression::snappy
            : pack_compression::none;
 }
@@ -3130,12 +3151,16 @@ struct plan_input {
   cudf::device_span<uint8_t const> packed_source;  ///< Borrowed allocation of packed_columns input
 };
 
+void validate_staging_buffer(pack_options const& options)
+{
+  CUDF_EXPECTS(options.staging_buffer_bytes >= 4 * split_align,
+               "The staging buffer must hold at least 256 bytes");
+}
+
 // Uncompressed host output is staged one window of copy batches at a time, so a batch must fit in
 // the staging buffer.
 std::size_t copy_batch_bytes(pack_options const& options)
 {
-  CUDF_EXPECTS(options.staging_buffer_bytes >= 4 * split_align,
-               "The staging buffer must hold at least 256 bytes");
   return std::min(desired_batch_size, std::bit_floor(options.staging_buffer_bytes));
 }
 
@@ -3144,16 +3169,12 @@ plan_input make_plan_input(cudf::table_view const& input,
                            cuda::stream_ref stream,
                            cudf::memory_resources mr)
 {
+  validate_staging_buffer(options);
   // A zero user-buffer size selects the existing whole-table layout. std::nullopt suppresses the
   // output allocation while preserving the already-computed source buffers, destination offsets,
   // batching, and metadata state for pack_into().
-  auto state    = std::make_unique<detail::contiguous_split_state>(input,
-                                                                0,
-                                                                stream,
-                                                                std::nullopt,
-                                                                mr.get_output_mr(),
-                                                                copy_batch_bytes(options),
-                                                                mr.get_temporary_mr());
+  auto state = std::make_unique<detail::contiguous_split_state>(
+    input, 0, stream, std::nullopt, mr.get_output_mr(), desired_batch_size, mr.get_temporary_mr());
   auto metadata = state->build_packed_column_metadata();
   return {
     std::move(state), metadata == nullptr ? std::vector<uint8_t>{} : std::move(*metadata), {}};
@@ -3166,12 +3187,13 @@ plan_input make_plan_input(cudf::packed_columns const& input,
 {
   CUDF_EXPECTS(input.metadata != nullptr && input.gpu_data != nullptr,
                "Packed input must contain metadata and a device allocation");
+  validate_staging_buffer(options);
   auto state = std::make_unique<detail::contiguous_split_state>(cudf::unpack(input),
                                                                 0,
                                                                 stream,
                                                                 std::nullopt,
                                                                 mr.get_output_mr(),
-                                                                copy_batch_bytes(options),
+                                                                desired_batch_size,
                                                                 mr.get_temporary_mr());
   // The metadata records every buffer offset, so equal metadata means the planned layout matches
   // the existing allocation. Empty columns may be described in several ways, but with no bytes
@@ -3202,10 +3224,11 @@ struct prepared_pack_components {
 prepared_pack_components make_prepared_pack_components(
   plan_input&& input,
   pack_options const& options,
-  rmm::device_async_resource_ref plan_mr,
+  cudf::memory_resources mr,
   std::vector<compression_region_layout> layouts  = {},
   std::span<pack_region const> configured_regions = {})
 {
+  auto const plan_mr                  = mr.get_output_mr();
   auto const uncompressed_bytes       = input.state->get_total_contiguous_size();
   auto const stream                   = input.state->get_stream();
   auto const has_expert_configuration = !configured_regions.empty();
@@ -3223,6 +3246,11 @@ prepared_pack_components make_prepared_pack_components(
     std::min(max_raw_chunk_bytes, window_budget) / split_align * split_align;
 
   if (uncompressed_bytes > 0 && !uses_compressed_metadata) {
+    // The destination kind is known only in pack_into(), so any uncompressed plan must be able to
+    // stage host output. Compressed plans stage chunks instead and keep the default batches.
+    if (auto const batch_bytes = copy_batch_bytes(options); batch_bytes < desired_batch_size) {
+      input.state->rebatch(batch_bytes, mr.get_temporary_mr());
+    }
     result.windows = input.state->get_pack_windows(options.staging_buffer_bytes);
     for (auto const& window : result.windows) {
       result.max_window_bytes = std::max(result.max_window_bytes, window.bytes);
@@ -3373,10 +3401,10 @@ struct pack_plan::impl : prepared_pack_components {
 };
 
 struct pack_plan_builder::impl {
-  impl(plan_input&& input, pack_options const& options, rmm::device_async_resource_ref plan_mr)
+  impl(plan_input&& input, pack_options const& options, cudf::memory_resources mr)
     : input(std::move(input)),
       options(options),
-      plan_mr(plan_mr),
+      mr(mr),
       layouts(this->input.state->get_compression_regions())
   {
     regions.reserve(layouts.size());
@@ -3391,7 +3419,7 @@ struct pack_plan_builder::impl {
 
   plan_input input;
   pack_options options;
-  rmm::device_async_resource_ref plan_mr;
+  cudf::memory_resources mr;
   std::vector<compression_region_layout> layouts;
   std::vector<pack_region> regions;
 };
@@ -3435,7 +3463,7 @@ pack_plan pack_plan_builder::build() &&
   return pack_plan{
     std::make_unique<pack_plan::impl>(make_prepared_pack_components(std::move(builder->input),
                                                                     builder->options,
-                                                                    builder->plan_mr,
+                                                                    builder->mr,
                                                                     std::move(builder->layouts),
                                                                     builder->regions))};
 }
@@ -3453,7 +3481,7 @@ pack_plan_builder make_pack_plan_builder(cudf::table_view const& input,
 {
   CUDF_FUNC_RANGE();
   return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
-    make_plan_input(input, options, stream, mr), options, mr.get_output_mr())};
+    make_plan_input(input, options, stream, mr), options, mr)};
 }
 
 pack_plan_builder make_pack_plan_builder(cudf::packed_columns const& input,
@@ -3463,7 +3491,7 @@ pack_plan_builder make_pack_plan_builder(cudf::packed_columns const& input,
 {
   CUDF_FUNC_RANGE();
   return pack_plan_builder{std::make_unique<pack_plan_builder::impl>(
-    make_plan_input(input, options, stream, mr), options, mr.get_output_mr())};
+    make_plan_input(input, options, stream, mr), options, mr)};
 }
 
 pack_plan prepare_pack(cudf::table_view const& input,
@@ -3472,8 +3500,8 @@ pack_plan prepare_pack(cudf::table_view const& input,
                        cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
-  return pack_plan{std::make_unique<pack_plan::impl>(make_prepared_pack_components(
-    make_plan_input(input, options, stream, mr), options, mr.get_output_mr()))};
+  return pack_plan{std::make_unique<pack_plan::impl>(
+    make_prepared_pack_components(make_plan_input(input, options, stream, mr), options, mr))};
 }
 
 pack_result pack_into(pack_plan const& plan,
@@ -3645,9 +3673,7 @@ table_view unpack_view(packed_data_view input)
         return access != 0;
       }(),
     "A zero-copy view requires a device-accessible payload");
-  // Validate the self-sized metadata before using the legacy pointer-based unpack implementation.
-  [[maybe_unused]] auto const metadata = cudf::packed_metadata_view{input.metadata};
-  return cudf::unpack(input.metadata.data(), input.payload.data());
+  return cudf::unpack(input.metadata, input.payload.data());
 }
 
 namespace {

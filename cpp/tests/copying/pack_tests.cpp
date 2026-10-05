@@ -269,6 +269,7 @@ TEST_F(PackUnpackTest, ExperimentalPackIntoHost)
                                  cx::pack_compression::cascaded,
                                  cx::pack_compression::zstd,
                                  cx::pack_compression::snappy}) {
+    if (!is_codec_enabled(compression)) { continue; }
     for (auto const windowed : {false, true}) {
       auto const options =
         windowed ? make_windowed_options(compression) : make_options(compression);
@@ -303,6 +304,18 @@ TEST_F(PackUnpackTest, ExperimentalPackIntoHostBufferLargerThanStaging)
   for (auto const kind : {destination_kind::pinned, destination_kind::pageable}) {
     SCOPED_TRACE(static_cast<int>(kind));
     expect_materializes_to(input, pack_to(plan, kind).view());
+  }
+
+  // A builder whose regions all end up uncompressed is batched for staging only in build().
+  options.compression = cx::pack_compression::automatic;
+  auto builder        = cx::make_pack_plan_builder(input, options);
+  for (auto& region : builder.regions()) {
+    region.codec = cx::pack_compression::none;
+  }
+  auto const built = std::move(builder).build();
+  for (auto const kind : {destination_kind::pinned, destination_kind::pageable}) {
+    SCOPED_TRACE(static_cast<int>(kind));
+    expect_materializes_to(input, pack_to(built, kind).view());
   }
 }
 
@@ -426,6 +439,7 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeColumnSubset)
                                  cx::pack_compression::cascaded,
                                  cx::pack_compression::zstd,
                                  cx::pack_compression::snappy}) {
+    if (!is_codec_enabled(compression)) { continue; }
     auto const plan = cx::prepare_pack(input, make_options(compression));
     for (auto const kind :
          {destination_kind::device, destination_kind::pinned, destination_kind::pageable}) {
@@ -464,6 +478,7 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeSparseColumnSubset)
 
   for (auto const compression :
        {cx::pack_compression::none, cx::pack_compression::cascaded, cx::pack_compression::snappy}) {
+    if (!is_codec_enabled(compression)) { continue; }
     SCOPED_TRACE(static_cast<int>(compression));
     auto const packed =
       pack_to(cx::prepare_pack(input, make_options(compression)), destination_kind::pageable);
@@ -492,6 +507,7 @@ TEST_F(PackUnpackTest, ExperimentalCompressedPackMaterialize)
   auto const input = cudf::table_view{{numbers}};
 
   for (auto const compression : compressed_codecs) {
+    if (!is_codec_enabled(compression)) { continue; }
     SCOPED_TRACE(static_cast<int>(compression));
     auto const plan = cx::prepare_pack(input, make_options(compression));
     EXPECT_EQ(plan.sizes().uncompressed_payload_bytes, cudf::packed_size(input));
@@ -686,7 +702,7 @@ TEST_F(PackUnpackTest, ExperimentalAutomaticPerRegionCompression)
     });
   };
   EXPECT_TRUE(uses(cx::pack_compression::cascaded));
-  EXPECT_TRUE(uses(cx::pack_compression::snappy));
+  EXPECT_EQ(uses(cx::pack_compression::snappy), is_codec_enabled(cx::pack_compression::snappy));
   expect_materializes_to(input, packed.view());
 }
 
@@ -714,6 +730,10 @@ TEST_F(PackUnpackTest, ExperimentalAutomaticFallsBackToUncompressedRegions)
 
 TEST_F(PackUnpackTest, ExperimentalExpertPerRegionCompression)
 {
+  if (!is_codec_enabled(cx::pack_compression::zstd) ||
+      !is_codec_enabled(cx::pack_compression::snappy)) {
+    GTEST_SKIP() << "Zstd or Snappy is disabled";
+  }
   std::vector<int32_t> values(4096, 17);
   std::vector<bool> validity(4096, true);
   validity[3] = false;
@@ -753,6 +773,7 @@ TEST_F(PackUnpackTest, ExperimentalExpertPerRegionCompression)
 
 TEST_F(PackUnpackTest, ExperimentalCompressedInputValidation)
 {
+  if (!is_codec_enabled(cx::pack_compression::zstd)) { GTEST_SKIP() << "Zstd is disabled"; }
   std::vector<int32_t> values(32 * 1024, 23);
   cudf::test::fixed_width_column_wrapper<int32_t> numbers(values.begin(), values.end());
   auto const input = cudf::table_view{{numbers}};
