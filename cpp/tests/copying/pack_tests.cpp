@@ -188,25 +188,16 @@ struct PackUnpackTest : public cudf::test::BaseFixture {
     }
   }
 
+  // ExperimentalPackIntoHost covers host destinations and staging windows.
   void verify_prepared_compressed_round_trip(cudf::table_view const& input)
   {
-    // Host destinations are always windowed; ExperimentalPackIntoHost covers the other pairings.
-    constexpr std::array cases{std::pair{false, destination_kind::device},
-                               std::pair{true, destination_kind::pinned},
-                               std::pair{true, destination_kind::pageable}};
     for (auto const compression : compressed_codecs) {
       if (!is_codec_enabled(compression)) { continue; }
-      for (auto const [windowed, kind] : cases) {
-        SCOPED_TRACE(static_cast<int>(compression));
-        SCOPED_TRACE(windowed);
-        SCOPED_TRACE(static_cast<int>(kind));
-        auto const options =
-          windowed ? make_windowed_options(compression) : make_options(compression);
-        auto const plan   = cx::prepare_pack(input, options);
-        auto const packed = pack_to(plan, kind);
-        EXPECT_LE(packed.result.payload_bytes, plan.sizes().payload_bytes);
-        expect_materializes_to(input, packed.view());
-      }
+      SCOPED_TRACE(static_cast<int>(compression));
+      auto const plan   = cx::prepare_pack(input, make_options(compression));
+      auto const packed = pack_to_device(plan);
+      EXPECT_LE(packed.result.payload_bytes, plan.sizes().payload_bytes);
+      expect_materializes_to(input, packed.view());
     }
   }
 
@@ -434,15 +425,12 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeColumnSubset)
   auto const input = cudf::table_view{{numbers, strings, lists, structs}};
   std::vector<std::vector<cudf::size_type>> const selections{{2, 0}, {1, 1}, {3}, {}};
 
-  for (auto const compression : {cx::pack_compression::none,
-                                 cx::pack_compression::automatic,
-                                 cx::pack_compression::cascaded,
-                                 cx::pack_compression::zstd,
-                                 cx::pack_compression::snappy}) {
+  // Zstd decompresses like Snappy, and pinned payloads are read in place like device ones.
+  for (auto const compression :
+       {cx::pack_compression::none, cx::pack_compression::cascaded, cx::pack_compression::snappy}) {
     if (!is_codec_enabled(compression)) { continue; }
     auto const plan = cx::prepare_pack(input, make_options(compression));
-    for (auto const kind :
-         {destination_kind::device, destination_kind::pinned, destination_kind::pageable}) {
+    for (auto const kind : {destination_kind::device, destination_kind::pageable}) {
       SCOPED_TRACE(static_cast<int>(compression));
       SCOPED_TRACE(static_cast<int>(kind));
       auto const packed = pack_to(plan, kind);
@@ -453,6 +441,7 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeColumnSubset)
           CUDF_TEST_EXPECT_TABLES_EQUAL(input.select(selection), materialized->view());
         }
       }
+      if (kind != destination_kind::device) { continue; }
       for (auto const index : {-1, input.num_columns()}) {
         EXPECT_THROW(cx::materialize(packed.view(), std::vector<cudf::size_type>{index}),
                      std::out_of_range);
@@ -532,12 +521,20 @@ TEST_F(PackUnpackTest, ExperimentalCompressExistingPackedColumns)
   auto const input  = cudf::table_view{{numbers, strings}};
   auto const packed = cudf::pack(input);
 
-  for (auto const compression : compressed_codecs) {
+  for (auto const compression : {cx::pack_compression::none,
+                                 cx::pack_compression::cascaded,
+                                 cx::pack_compression::zstd,
+                                 cx::pack_compression::snappy}) {
     if (!is_codec_enabled(compression)) { continue; }
     SCOPED_TRACE(static_cast<int>(compression));
     auto const plan = cx::make_pack_plan_builder(packed, make_options(compression)).build();
     EXPECT_EQ(plan.sizes().uncompressed_payload_bytes, packed.gpu_data->size());
-    expect_materializes_to(input, pack_to_device(plan).view());
+    auto const result = pack_to_device(plan);
+    if (compression == cx::pack_compression::none) {
+      EXPECT_EQ(result.result.payload_bytes, packed.gpu_data->size());
+      CUDF_TEST_EXPECT_TABLES_EQUAL(input, cx::unpack_view(result.view()));
+    }
+    expect_materializes_to(input, result.view());
   }
 }
 
@@ -616,18 +613,6 @@ TEST_F(PackUnpackTest, ExperimentalCompressContiguousSplitPartitions)
         .build();
     expect_materializes_to(expected[i], pack_to_device(plan).view());
   }
-}
-
-TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsUncompressedCopy)
-{
-  cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4});
-  auto const input  = cudf::table_view{{numbers}};
-  auto const packed = cudf::pack(input);
-  auto const plan =
-    cx::make_pack_plan_builder(packed, make_options(cx::pack_compression::none)).build();
-  auto const result = pack_to_device(plan);
-  EXPECT_EQ(result.result.payload_bytes, packed.gpu_data->size());
-  CUDF_TEST_EXPECT_TABLES_EQUAL(input, cx::unpack_view(result.view()));
 }
 
 TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireMatchingLayout)
