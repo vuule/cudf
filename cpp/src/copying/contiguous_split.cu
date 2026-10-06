@@ -3231,9 +3231,9 @@ prepared_pack_components make_prepared_pack_components(
   auto const plan_mr                  = mr.get_output_mr();
   auto const uncompressed_bytes       = input.state->get_total_contiguous_size();
   auto const stream                   = input.state->get_stream();
-  auto const has_expert_configuration = !configured_regions.empty();
+  auto const has_region_configuration = !configured_regions.empty();
   auto const uses_compressed_metadata =
-    has_expert_configuration
+    has_region_configuration
       ? std::any_of(configured_regions.begin(),
                     configured_regions.end(),
                     [](auto const& region) { return region.codec != pack_compression::none; })
@@ -3259,8 +3259,8 @@ prepared_pack_components make_prepared_pack_components(
 
   if (uncompressed_bytes > 0 && uses_compressed_metadata) {
     if (layouts.empty()) { layouts = input.state->get_compression_regions(); }
-    CUDF_EXPECTS(!has_expert_configuration || configured_regions.size() == layouts.size(),
-                 "Expert region configuration does not match the prepared layout");
+    CUDF_EXPECTS(!has_region_configuration || configured_regions.size() == layouts.size(),
+                 "Region configuration does not match the prepared layout");
     auto const all_regions_are_direct =
       std::all_of(layouts.begin(), layouts.end(), [](auto const& layout) {
         return layout.direct_source != nullptr;
@@ -3283,11 +3283,10 @@ prepared_pack_components make_prepared_pack_components(
       uncompressed_end = layout.uncompressed_offset + layout.uncompressed_bytes;
 
       auto const codec =
-        has_expert_configuration ? configured_regions[region_index].codec : options.compression;
+        has_region_configuration ? configured_regions[region_index].codec : options.compression;
       auto const automatic = codec == pack_compression::automatic;
       auto const requested = automatic ? select_automatic_compression(layout) : codec;
-      CUDF_EXPECTS(is_concrete_codec(requested),
-                   "Expert region configuration selected an unsupported codec");
+      CUDF_EXPECTS(is_concrete_codec(requested), "Unsupported pack compression codec");
 
       auto chunk_bytes      = raw_chunk_bytes;
       auto cascaded_options = nvcompBatchedCascadedCompressDefaultOpts;

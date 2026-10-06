@@ -713,7 +713,7 @@ TEST_F(PackUnpackTest, ExperimentalAutomaticFallsBackToUncompressedRegions)
   expect_materializes_to(input, packed.view());
 }
 
-TEST_F(PackUnpackTest, ExperimentalExpertPerRegionCompression)
+TEST_F(PackUnpackTest, ExperimentalPerRegionCompression)
 {
   if (!is_codec_enabled(cx::pack_compression::zstd) ||
       !is_codec_enabled(cx::pack_compression::snappy)) {
@@ -722,7 +722,7 @@ TEST_F(PackUnpackTest, ExperimentalExpertPerRegionCompression)
   std::vector<int32_t> values(4096, 17);
   std::vector<bool> validity(4096, true);
   validity[3] = false;
-  std::vector<std::string> words(4096, "expert-region-selection");
+  std::vector<std::string> words(4096, "per-region-selection");
   cudf::test::fixed_width_column_wrapper<int32_t> numbers(
     values.begin(), values.end(), validity.begin());
   cudf::test::strings_column_wrapper strings(words.begin(), words.end());

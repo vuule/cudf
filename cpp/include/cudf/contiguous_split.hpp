@@ -271,22 +271,24 @@ std::size_t packed_size(
 namespace experimental {
 
 /**
- * @brief Compression algorithms supported by the prepared pack prototype.
+ * @brief Compression algorithms supported by prepared pack operations.
  *
+ * A concrete codec is applied to every chunk of a region, even when that expands the chunk.
  * Values are recorded in packed metadata and must not change.
  */
 enum class pack_compression : int32_t {
   none      = 0,  ///< Preserve the current uncompressed packed representation
-  automatic = 1,  ///< Select a codec independently for each physical region
-  cascaded  = 2,  ///< nvCOMP Cascaded, on values of each region's native width and signedness.
+  automatic = 1,  ///< Select a codec for each physical region based on its kind and size, and
+                  ///< store chunks uncompressed when compression saves too little
+  cascaded = 2,   ///< nvCOMP Cascaded, on values of each region's native width and signedness.
                   ///< Values wider than 64 bits, such as `DECIMAL128`, and string characters are
                   ///< treated as bytes.
-  zstd   = 3,     ///< Zstd
+  zstd   = 3,     ///< Zstandard
   snappy = 4,     ///< Snappy
 };
 
 /**
- * @brief Physical role of a region presented to an expert codec selector.
+ * @brief Physical role of a region in a prepared pack operation.
  */
 enum class pack_region_kind {
   data,              ///< Fixed-width or other ordinary column data
@@ -296,7 +298,7 @@ enum class pack_region_kind {
 };
 
 /**
- * @brief Read-only description passed to an expert per-region codec selector.
+ * @brief Read-only description passed to a per-region codec selector.
  */
 struct pack_region_info {
   std::size_t region_index;        ///< Stable index within this prepared pack operation
@@ -307,10 +309,7 @@ struct pack_region_info {
 };
 
 /**
- * @brief Immutable region description and its mutable expert codec configuration.
- *
- * `automatic` applies libcudf's built-in codec policy and may store chunks raw when compression
- * saves too little. A concrete codec forces that codec.
+ * @brief Immutable region description and its mutable codec.
  */
 struct pack_region {
   pack_region_info const info;                     ///< Read-only region description
@@ -376,7 +375,7 @@ class pack_plan {
 };
 
 /**
- * @brief Two-stage expert configuration for a prepared pack operation.
+ * @brief Two-stage configuration for a prepared pack operation.
  *
  * The builder discovers physical regions once. Callers may edit only `pack_region::codec`; the
  * descriptions remain immutable. `build()` finalizes compressor state and destination capacity.
@@ -410,7 +409,7 @@ class pack_plan_builder {
 };
 
 /**
- * @brief Discover configurable physical regions for expert per-region codec selection.
+ * @brief Discover configurable physical regions for per-region codec selection.
  *
  * Each region initially inherits the codec in `options`. Callers may edit the
  * returned regions before consuming the builder with `build()`.
