@@ -344,7 +344,8 @@ class pack_region {
  * @brief Options controlling a prepared pack operation.
  */
 struct pack_options {
-  pack_compression compression{pack_compression::automatic};  ///< Codec for every region
+  /// Codec for every region; with `make_pack_plan_builder()`, each region's initial codec
+  pack_compression compression{pack_compression::automatic};
   /// Device memory `pack_into()` uses to stage host output and to compact compressed output
   std::size_t staging_buffer_bytes{128 * 1024 * 1024};
 };
@@ -441,7 +442,7 @@ class pack_plan_builder {
  * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
  *
  * @param input View of the table to pack
- * @param options Default codec options for every region
+ * @param options Pack options; `options.compression` is each region's initial codec
  * @param stream Stream used for planning and subsequent `pack_into()` operations
  * @param mr Memory resources used by the returned plan. The output resource backs allocations that
  *           live as long as the plan; the temporary resource backs planning scratch
@@ -464,7 +465,7 @@ pack_plan_builder make_pack_plan_builder(
  * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
  *
  * @param input Existing ordinary, uncompressed packed columns
- * @param options Default codec options for every region
+ * @param options Pack options; `options.compression` is each region's initial codec
  * @param stream Stream used for planning and subsequent `pack_into()` operations
  * @param mr Memory resources used by the returned plan. The output resource backs allocations that
  *           live as long as the plan; the temporary resource backs planning scratch
