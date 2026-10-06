@@ -157,7 +157,7 @@ struct compression_region_layout {
   std::size_t data_bytes;          ///< Leading bytes that hold column data
   cudf::type_id type;
   cudf::experimental::pack_region_kind kind;
-  cudf::size_type column_index;
+  int source_buffer_index;
   uint8_t const* direct_source;
 };
 
@@ -486,6 +486,47 @@ size_type count_src_bufs(InputIter begin, InputIter end)
     return 1 + (col.nullable() ? 1 : 0) + children_counts;
   });
   return std::accumulate(buf_iter, buf_iter + std::distance(begin, end), 0);
+}
+
+/**
+ * @brief Appends the child path of the column owning each source buffer of `col`.
+ *
+ * Buffers are visited in the order `setup_source_buf_info()` lists them. Validity and offsets
+ * buffers belong to the column they describe.
+ */
+void append_source_column_paths(column_view const& col,
+                                std::vector<size_type>& path,
+                                std::vector<std::vector<size_type>>& paths)
+{
+  auto const add_child = [&](column_view const& child, size_type child_index) {
+    path.push_back(child_index);
+    append_source_column_paths(child, path, paths);
+    path.pop_back();
+  };
+  if (col.nullable()) { paths.push_back(path); }
+  paths.push_back(path);
+  switch (col.type().id()) {
+    case type_id::STRING:
+      if (col.num_children() > 0) { paths.push_back(path); }
+      break;
+    case type_id::LIST:
+      paths.push_back(path);
+      add_child(col.child(lists_column_view::child_column_index),
+                lists_column_view::child_column_index);
+      break;
+    case type_id::STRUCT:
+      for (size_type i = 0; i < col.num_children(); ++i) {
+        add_child(col.child(i), i);
+      }
+      break;
+    case type_id::DICTIONARY32:
+      if (col.num_children() == 0) { break; }
+      add_child(dictionary_column_view{col}.indices(),
+                dictionary_column_view::indices_column_index);
+      add_child(dictionary_column_view{col}.keys(), dictionary_column_view::keys_column_index);
+      break;
+    default: break;
+  }
 }
 
 /**
@@ -1966,17 +2007,6 @@ struct contiguous_split_state {
     setup_source_buf_info(
       input.begin(), input.end(), source_info.data(), source_info.data(), stream);
 
-    std::vector<size_type> source_column_indices(num_src_bufs);
-    std::size_t source_index = 0;
-    for (size_type column_index = 0; column_index < input.num_columns(); ++column_index) {
-      auto const column_buffer_count =
-        count_src_bufs(input.begin() + column_index, input.begin() + column_index + 1);
-      std::fill_n(source_column_indices.begin() + source_index, column_buffer_count, column_index);
-      source_index += column_buffer_count;
-    }
-    CUDF_EXPECTS(source_index == source_column_indices.size(),
-                 "Compression region column mapping does not match source buffers");
-
     std::vector<compression_region_layout> regions;
     regions.reserve(num_bufs);
     for (auto const& destination_info : partition_buf_size_and_dst_buf_info->h_dst_buf_info) {
@@ -2006,13 +2036,28 @@ struct contiguous_split_state {
         direct_source != nullptr ? source_bytes : destination_info.buf_size,
         source.type,
         kind,
-        source_column_indices[destination_info.src_buf_index],
+        destination_info.src_buf_index,
         direct_source});
     }
     std::sort(regions.begin(), regions.end(), [](auto const& lhs, auto const& rhs) {
       return lhs.uncompressed_offset < rhs.uncompressed_offset;
     });
     return regions;
+  }
+
+  /// Child path of the column owning each source buffer, indexed by source buffer.
+  std::vector<std::vector<size_type>> get_source_column_paths() const
+  {
+    std::vector<std::vector<size_type>> paths;
+    paths.reserve(num_src_bufs);
+    std::vector<size_type> path;
+    for (size_type i = 0; i < input.num_columns(); ++i) {
+      path.assign(1, i);
+      append_source_column_paths(input.column(i), path, paths);
+    }
+    CUDF_EXPECTS(paths.size() == static_cast<std::size_t>(num_src_bufs),
+                 "Column paths do not match the source buffers");
+    return paths;
   }
 
   std::vector<packed_table> contiguous_split()
@@ -3406,13 +3451,17 @@ struct pack_plan_builder::impl {
       mr(mr),
       layouts(this->input.state->get_compression_regions())
   {
+    if (layouts.empty()) { return; }
+    auto const paths = this->input.state->get_source_column_paths();
     regions.reserve(layouts.size());
     for (std::size_t i = 0; i < layouts.size(); ++i) {
       auto const& layout = layouts[i];
-      regions.push_back(
-        pack_region{pack_region_info{
-                      i, layout.column_index, layout.kind, layout.type, layout.uncompressed_bytes},
-                    options.compression});
+      regions.emplace_back(pack_region_info{i,
+                                            paths[layout.source_buffer_index],
+                                            layout.kind,
+                                            layout.type,
+                                            layout.uncompressed_bytes},
+                           options.compression);
     }
   }
 

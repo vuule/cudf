@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 /**
@@ -301,19 +302,42 @@ enum class pack_region_kind {
  * @brief Read-only description passed to a per-region codec selector.
  */
 struct pack_region_info {
-  std::size_t region_index;        ///< Stable index within this prepared pack operation
-  size_type column_index;          ///< Top-level input column owning this region
+  std::size_t region_index;  ///< Stable index within this prepared pack operation
+  /// Path to the column owning this region: the top-level input column index, followed by a
+  /// `column_view::child()` index per nesting level. Validity and offsets regions belong to the
+  /// column they describe, so a list's offsets region has the list's path.
+  std::vector<size_type> column_path;
   pack_region_kind kind;           ///< Physical role of the region
   type_id type;                    ///< Logical/native type used to configure the codec
   std::size_t uncompressed_bytes;  ///< Bytes presented to the selected codec
 };
 
 /**
- * @brief Immutable region description and its mutable codec.
+ * @brief A region's description and the codec applied to it.
  */
-struct pack_region {
-  pack_region_info const info;                     ///< Read-only region description
-  pack_compression codec{pack_compression::none};  ///< Codec applied to this region
+class pack_region {
+ public:
+  /**
+   * @brief Construct a region.
+   *
+   * @param info Region description
+   * @param codec Codec applied to the region
+   */
+  pack_region(pack_region_info info, pack_compression codec) : codec{codec}, _info{std::move(info)}
+  {
+  }
+
+  /**
+   * @brief Return the region description.
+   *
+   * @return Region description
+   */
+  [[nodiscard]] pack_region_info const& info() const noexcept { return _info; }
+
+  pack_compression codec;  ///< Codec applied to this region
+
+ private:
+  pack_region_info _info;
 };
 
 /**
@@ -377,8 +401,8 @@ class pack_plan {
 /**
  * @brief Two-stage configuration for a prepared pack operation.
  *
- * The builder discovers physical regions once. Callers may edit only `pack_region::codec`; the
- * descriptions remain immutable. `build()` finalizes compressor state and destination capacity.
+ * The builder discovers physical regions once. Callers may edit each `pack_region::codec`.
+ * `build()` finalizes compressor state and destination capacity.
  */
 class pack_plan_builder {
  public:

@@ -550,7 +550,7 @@ TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsPerRegionCompression)
 
   auto builder = cx::make_pack_plan_builder(packed, make_options(cx::pack_compression::none));
   for (auto& region : builder.regions()) {
-    if (region.info.kind == cx::pack_region_kind::string_characters) {
+    if (region.info().kind == cx::pack_region_kind::string_characters) {
       region.codec = cx::pack_compression::zstd;
     }
   }
@@ -731,8 +731,8 @@ TEST_F(PackUnpackTest, ExperimentalPerRegionCompression)
   auto builder = cx::make_pack_plan_builder(input, make_options(cx::pack_compression::automatic));
   std::vector<cx::pack_region_info> observed;
   for (auto& region : builder.regions()) {
-    observed.push_back(region.info);
-    switch (region.info.kind) {
+    observed.push_back(region.info());
+    switch (region.info().kind) {
       case cx::pack_region_kind::validity: region.codec = cx::pack_compression::none; break;
       case cx::pack_region_kind::offsets: region.codec = cx::pack_compression::cascaded; break;
       case cx::pack_region_kind::string_characters:
@@ -745,15 +745,45 @@ TEST_F(PackUnpackTest, ExperimentalPerRegionCompression)
   auto const plan = std::move(builder).build();
   ASSERT_GE(observed.size(), 4);
   EXPECT_TRUE(std::any_of(observed.begin(), observed.end(), [](auto const& region) {
-    return region.column_index == 0 && region.kind == cx::pack_region_kind::data &&
-           region.type == cudf::type_id::INT32;
+    return region.column_path == std::vector<cudf::size_type>{0} &&
+           region.kind == cx::pack_region_kind::data && region.type == cudf::type_id::INT32;
   }));
   EXPECT_TRUE(std::any_of(observed.begin(), observed.end(), [](auto const& region) {
-    return region.column_index == 1 && region.kind == cx::pack_region_kind::string_characters;
+    return region.column_path == std::vector<cudf::size_type>{1} &&
+           region.kind == cx::pack_region_kind::string_characters;
   }));
 
   auto const packed = pack_to_device(plan);
   expect_materializes_to(input, packed.view());
+}
+
+TEST_F(PackUnpackTest, ExperimentalRegionColumnPaths)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> first({1, 2, 3});
+  cudf::test::fixed_width_column_wrapper<int32_t> second({4, 5, 6});
+  cudf::test::structs_column_wrapper structs({first, second}, {true, false, true});
+  using lcw = cudf::test::lists_column_wrapper<int32_t>;
+  lcw lists{lcw{lcw{1, 2}, lcw{3}}, lcw{lcw{4}}, lcw{lcw{5, 6}}};
+  cudf::test::dictionary_column_wrapper<std::string> dictionary({"a", "bb", "a"});
+  auto const input = cudf::table_view{{structs, lists, dictionary}};
+
+  auto builder = cx::make_pack_plan_builder(input, make_options(cx::pack_compression::none));
+  auto const has_region = [&](std::vector<cudf::size_type> const& path, cx::pack_region_kind kind) {
+    return std::any_of(builder.regions().begin(), builder.regions().end(), [&](auto const& region) {
+      return region.info().column_path == path && region.info().kind == kind;
+    });
+  };
+  EXPECT_TRUE(has_region({0}, cx::pack_region_kind::validity));
+  EXPECT_TRUE(has_region({0, 0}, cx::pack_region_kind::data));
+  EXPECT_TRUE(has_region({0, 1}, cx::pack_region_kind::data));
+  EXPECT_TRUE(has_region({1}, cx::pack_region_kind::offsets));
+  EXPECT_TRUE(has_region({1, 1}, cx::pack_region_kind::offsets));
+  EXPECT_TRUE(has_region({1, 1, 1}, cx::pack_region_kind::data));
+  EXPECT_TRUE(has_region({2, 0}, cx::pack_region_kind::data));
+  EXPECT_TRUE(has_region({2, 1}, cx::pack_region_kind::offsets));
+  EXPECT_TRUE(has_region({2, 1}, cx::pack_region_kind::string_characters));
+
+  expect_materializes_to(input, pack_to_device(std::move(builder).build()).view());
 }
 
 TEST_F(PackUnpackTest, ExperimentalCompressedInputValidation)
