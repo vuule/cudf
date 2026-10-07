@@ -154,7 +154,7 @@ struct dst_buf_info {
 struct compression_region_layout {
   std::size_t uncompressed_offset;
   std::size_t uncompressed_bytes;  ///< Packed buffer size, including trailing padding
-  std::size_t data_bytes;          ///< Leading bytes that hold column data
+  std::size_t data_bytes;  ///< Number of bytes, from the region start, that hold column data
   cudf::type_id type;
   cudf::experimental::pack_region_kind kind;
   int source_buffer_index;
@@ -165,10 +165,10 @@ struct compression_region_layout {
  * @brief A range of copy batches or compression chunks whose output fits a bounded staging buffer.
  */
 struct pack_window {
-  std::size_t begin;
-  std::size_t end;
-  std::size_t offset;  ///< Payload offset of the window's first byte
-  std::size_t bytes;
+  std::size_t first_item;      ///< Index of the first copy batch or compression chunk
+  std::size_t end_item;        ///< One past the index of the last item
+  std::size_t payload_offset;  ///< Payload offset of the window's first byte
+  std::size_t bytes;           ///< Payload bytes the window spans
 };
 
 /**
@@ -2184,13 +2184,13 @@ struct contiguous_split_state {
       auto const begin = batches[i].dst_offset;
       CUDF_EXPECTS(begin >= end, "Copy batches are not ordered by destination offset");
       CUDF_EXPECTS(bytes <= max_bytes, "The staging buffer is smaller than a copy batch");
-      if (windows.empty() || begin + bytes - windows.back().offset > max_bytes) {
+      if (windows.empty() || begin + bytes - windows.back().payload_offset > max_bytes) {
         windows.push_back({i, i, begin, 0});
       }
-      auto& window = windows.back();
-      window.end   = i + 1;
-      window.bytes = begin + bytes - window.offset;
-      end          = begin + bytes;
+      auto& window    = windows.back();
+      window.end_item = i + 1;
+      window.bytes    = begin + bytes - window.payload_offset;
+      end             = begin + bytes;
     }
     return windows;
   }
@@ -2202,9 +2202,9 @@ struct contiguous_split_state {
   {
     // copy_data writes each batch at its payload offset relative to the base pointer.
     auto* const base =
-      reinterpret_cast<uint8_t*>(reinterpret_cast<std::uintptr_t>(buffer) - window.offset);
-    copy_data(window.end - window.begin,
-              window.begin,
+      reinterpret_cast<uint8_t*>(reinterpret_cast<std::uintptr_t>(buffer) - window.payload_offset);
+    copy_data(window.end_item - window.first_item,
+              window.first_item,
               src_and_dst_pointers->d_src_bufs,
               src_and_dst_pointers->d_dst_bufs,
               chunk_iter_state->d_batched_dst_buf_info,
@@ -2796,7 +2796,7 @@ struct compressed_metadata_header {
 struct compressed_metadata_entry {
   uint64_t uncompressed_offset;
   uint64_t uncompressed_bytes;
-  uint64_t data_bytes;   ///< Leading bytes stored in chunks; the remainder is padding
+  uint64_t data_bytes;   ///< Size of the leading data stored in chunks; the rest is padding
   uint64_t chunk_bytes;  ///< Uncompressed size of every chunk except possibly the last
   uint64_t chunk_begin;  ///< Index of the region's first chunk
   uint64_t num_chunks;
@@ -3370,16 +3370,17 @@ struct pack_plan::impl {
           cudf::util::round_up_safe(std::max(chunk.output_bytes, chunk.input_bytes), split_align);
         CUDF_EXPECTS(extent <= window_budget,
                      "The staging buffer is too small for the compression chunk size");
-        if (windows.empty() || destination_bytes + extent - windows.back().offset > window_budget) {
+        if (windows.empty() ||
+            destination_bytes + extent - windows.back().payload_offset > window_budget) {
           windows.push_back(pack_window{c, c, destination_bytes, 0});
         }
         auto& window        = windows.back();
-        chunk.window_offset = destination_bytes - window.offset;
+        chunk.window_offset = destination_bytes - window.payload_offset;
         destination_bytes += extent;
-        window.end        = c + 1;
-        window.bytes      = destination_bytes - window.offset;
+        window.end_item   = c + 1;
+        window.bytes      = destination_bytes - window.payload_offset;
         max_window_bytes  = std::max(max_window_bytes, window.bytes);
-        max_window_chunks = std::max(max_window_chunks, window.end - window.begin);
+        max_window_chunks = std::max(max_window_chunks, window.end_item - window.first_item);
       }
       d_chunks = cudf::detail::make_device_uvector(chunks, stream, plan_mr);
     }
@@ -3542,7 +3543,7 @@ pack_result pack_into(pack_plan const& plan,
       rmm::device_buffer staging(impl.max_window_bytes, stream, temp_mr);
       for (auto const& window : impl.windows) {
         state.pack_window_into(window, static_cast<uint8_t*>(staging.data()));
-        copy_to_host(window.offset, staging.data(), window.bytes);
+        copy_to_host(window.payload_offset, staging.data(), window.bytes);
       }
     } else {
       state.pack_into(cudf::device_span<uint8_t>{destination.data(), destination.size()});
@@ -3584,8 +3585,8 @@ pack_result pack_into(pack_plan const& plan,
   // Raw chunks are copied straight from their input during compaction.
   auto const compress_window = [&](pack_window const& window) {
     for (auto const& batch : impl.batches) {
-      auto const begin = std::max(batch.chunk_begin, window.begin);
-      auto const end   = std::min(batch.chunk_end, window.end);
+      auto const begin = std::max(batch.chunk_begin, window.first_item);
+      auto const end   = std::min(batch.chunk_end, window.end_item);
       if (begin >= end || batch.codec == pack_compression::none) { continue; }
       compress_batch(
         batch,
@@ -3604,16 +3605,16 @@ pack_result pack_into(pack_plan const& plan,
     compress_window(window);
     auto const h_results =
       cudf::detail::make_std_vector(device_span<codec_exec_result const>{results}.subspan(
-                                      window.begin, window.end - window.begin),
+                                      window.first_item, window.end_item - window.first_item),
                                     stream);
     auto const window_begin = payload_bytes;
     std::vector<uint8_t const*> sources;
     std::vector<uint8_t*> targets;
     std::vector<std::size_t> copy_bytes;
-    for (auto c = window.begin; c < window.end; ++c) {
+    for (auto c = window.first_item; c < window.end_item; ++c) {
       auto const& chunk  = impl.chunks[c];
       auto const& region = impl.regions[chunk.region];
-      auto const& result = h_results[c - window.begin];
+      auto const& result = h_results[c - window.first_item];
       auto raw           = chunk.raw;
       if (!raw) {
         auto const failed = result.status != codec_status::SUCCESS;
