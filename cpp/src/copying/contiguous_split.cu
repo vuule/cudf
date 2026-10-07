@@ -51,7 +51,6 @@
 #include <nvcomp/cascaded.h>
 
 #include <algorithm>
-#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstring>
@@ -1994,9 +1993,9 @@ struct contiguous_split_state {
     return is_empty ? 0 : chunk_iter_state->total_size;
   }
 
-  cuda::stream_ref get_stream() const { return stream; }
+  [[nodiscard]] cuda::stream_ref get_stream() const { return stream; }
 
-  std::vector<compression_region_layout> get_compression_regions() const
+  [[nodiscard]] std::vector<compression_region_layout> get_compression_regions() const
   {
     if (is_empty || num_src_bufs == 0) { return {}; }
 
@@ -2039,14 +2038,12 @@ struct contiguous_split_state {
         destination_info.src_buf_index,
         direct_source});
     }
-    std::sort(regions.begin(), regions.end(), [](auto const& lhs, auto const& rhs) {
-      return lhs.uncompressed_offset < rhs.uncompressed_offset;
-    });
+    std::ranges::sort(regions, {}, &compression_region_layout::uncompressed_offset);
     return regions;
   }
 
   /// Child path of the column owning each source buffer, indexed by source buffer.
-  std::vector<std::vector<size_type>> get_source_column_paths() const
+  [[nodiscard]] std::vector<std::vector<size_type>> get_source_column_paths() const
   {
     std::vector<std::vector<size_type>> paths;
     paths.reserve(num_src_bufs);
@@ -2170,7 +2167,7 @@ struct contiguous_split_state {
   /**
    * @brief Group the copy batches into windows whose output spans at most `max_bytes`.
    */
-  std::vector<pack_window> get_pack_windows(std::size_t max_bytes) const
+  [[nodiscard]] std::vector<pack_window> get_pack_windows(std::size_t max_bytes) const
   {
     if (is_empty || input.num_columns() == 0) { return {}; }
     auto const batches = cudf::detail::make_std_vector(
@@ -3023,9 +3020,7 @@ class payload_reader {
     if (_ranges.empty()) { return; }
     // Gaps this small cost less to copy than a separate transfer.
     constexpr std::size_t max_gap_bytes = 256 * 1024;
-    std::sort(_ranges.begin(), _ranges.end(), [](auto const& lhs, auto const& rhs) {
-      return lhs.begin < rhs.begin;
-    });
+    std::ranges::sort(_ranges, {}, &range::begin);
     std::vector<range> merged{_ranges.front()};
     for (auto const& next : _ranges) {
       if (next.begin <= merged.back().end + max_gap_bytes) {
@@ -3055,10 +3050,7 @@ class payload_reader {
   {
     if (!_pageable) { return data; }
     auto const offset = static_cast<std::size_t>(data - _payload.data());
-    auto const item   = std::prev(std::upper_bound(
-      _ranges.begin(), _ranges.end(), offset, [](std::size_t value, auto const& candidate) {
-        return value < candidate.begin;
-      }));
+    auto const item   = std::prev(std::ranges::upper_bound(_ranges, offset, {}, &range::begin));
     return static_cast<uint8_t const*>(_staged.data()) + item->staged_offset +
            (offset - item->begin);
   }
@@ -3112,8 +3104,8 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
   for (size_type i = 0; i < metadata.num_columns(); ++i) {
     collect_buffer_offsets(metadata.column(i), offsets);
   }
-  std::sort(offsets.begin(), offsets.end());
-  offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+  std::ranges::sort(offsets);
+  offsets.erase(std::ranges::unique(offsets).begin(), offsets.end());
   CUDF_EXPECTS(offsets.empty() || (offsets.front() >= 0 &&
                                    static_cast<std::size_t>(offsets.back()) < input.payload.size()),
                "Packed column buffer lies outside the payload");
@@ -3123,7 +3115,7 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
   std::vector<std::size_t> sizes;
   auto allocate_buffer = [&]<typename Buffer>(
                            std::type_identity<Buffer>, int64_t offset, std::size_t required_bytes) {
-    auto const next = std::upper_bound(offsets.begin(), offsets.end(), offset);
+    auto const next = std::ranges::upper_bound(offsets, offset);
     auto const end = next == offsets.end() ? input.payload.size() : static_cast<std::size_t>(*next);
     // A payload span longer than the packed data would otherwise oversize its last buffer.
     auto const bytes = next == offsets.end() && required_bytes > 0
@@ -3242,9 +3234,9 @@ struct pack_plan::impl {
     auto const has_region_configuration = !configured_regions.empty();
     auto const uses_compressed_metadata =
       has_region_configuration
-        ? std::any_of(configured_regions.begin(),
-                      configured_regions.end(),
-                      [](auto const& region) { return region.codec != pack_compression::none; })
+        ? std::ranges::any_of(
+            configured_regions,
+            [](auto const& region) { return region.codec != pack_compression::none; })
         : options.compression != pack_compression::none;
 
     auto destination_bytes   = uncompressed_bytes;
@@ -3270,10 +3262,8 @@ struct pack_plan::impl {
       if (layouts.empty()) { layouts = input.state->get_compression_regions(); }
       CUDF_EXPECTS(!has_region_configuration || configured_regions.size() == layouts.size(),
                    "Region configuration does not match the prepared layout");
-      auto const all_regions_are_direct =
-        std::all_of(layouts.begin(), layouts.end(), [](auto const& layout) {
-          return layout.direct_source != nullptr;
-        });
+      auto const all_regions_are_direct = std::ranges::all_of(
+        layouts, [](auto const& layout) { return layout.direct_source != nullptr; });
       if (input.packed_source.empty() && !all_regions_are_direct) {
         staging_buffer = std::make_unique<rmm::device_buffer>(uncompressed_bytes, stream, plan_mr);
       }
@@ -3327,7 +3317,7 @@ struct pack_plan::impl {
       // Chunks of all regions that share a codec, and for Cascaded its options, form one batch.
       std::vector<std::size_t> region_batch;
       for (auto const& region : regions) {
-        auto const batch = std::find_if(batches.begin(), batches.end(), [&](auto const& item) {
+        auto const batch = std::ranges::find_if(batches, [&](auto const& item) {
           return item.codec == region.compression &&
                  (item.codec != pack_compression::cascaded ||
                   item.cascaded_options.type == region.cascaded_options.type);
@@ -3405,10 +3395,10 @@ struct pack_plan::impl {
 };
 
 struct pack_plan_builder::impl {
-  impl(plan_input&& input, pack_options const& options, cudf::memory_resources mr)
+  impl(plan_input&& input, pack_options options, cudf::memory_resources mr)
     : input(std::move(input)),
-      options(options),
-      mr(mr),
+      options(std::move(options)),
+      mr(std::move(mr)),
       layouts(this->input.state->get_compression_regions())
   {
     if (layouts.empty()) { return; }
@@ -3657,9 +3647,9 @@ pack_result pack_into(pack_plan const& plan,
   std::vector<compressed_metadata_entry> entries;
   entries.reserve(impl.regions.size());
   for (auto const& region : impl.regions) {
-    auto const all_raw = std::all_of(table.begin() + region.chunk_begin,
-                                     table.begin() + region.chunk_begin + region.num_chunks,
-                                     [](auto entry) { return entry & raw_chunk_flag; });
+    auto const all_raw =
+      std::ranges::all_of(std::span{table}.subspan(region.chunk_begin, region.num_chunks),
+                          [](auto entry) { return (entry & raw_chunk_flag) != 0; });
     entries.push_back({region.layout.uncompressed_offset,
                        region.layout.uncompressed_bytes,
                        region.layout.data_bytes,
@@ -3750,7 +3740,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
 
   std::vector<decompression_work> work;
   auto const work_for = [&](pack_compression codec, nvcompType_t cascaded_type) -> auto& {
-    auto iter = std::find_if(work.begin(), work.end(), [&](auto const& item) {
+    auto iter = std::ranges::find_if(work, [&](auto const& item) {
       return item.codec == codec && item.cascaded_type == cascaded_type;
     });
     if (iter == work.end()) {
@@ -3789,10 +3779,8 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     constexpr bool is_validity = is_validity_buffer<Buffer>;
     CUDF_EXPECTS(offset >= 0, "Compressed column buffer has no packed offset");
     auto const target = static_cast<uint64_t>(offset);
-    auto const entry  = std::lower_bound(
-      parsed.entries.begin(), parsed.entries.end(), target, [](auto const& item, uint64_t value) {
-        return item.uncompressed_offset < value;
-      });
+    auto const entry  = std::ranges::lower_bound(
+      parsed.entries, target, {}, &compressed_metadata_entry::uncompressed_offset);
     CUDF_EXPECTS(entry != parsed.entries.end() && entry->uncompressed_offset == target &&
                    static_cast<bool>(entry->is_validity) == is_validity,
                  "Compressed regions do not match the packed column schema at offset " +
