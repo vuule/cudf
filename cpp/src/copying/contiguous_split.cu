@@ -156,7 +156,7 @@ struct compression_region_layout {
   std::size_t data_bytes;  ///< Number of bytes, from the region start, that hold column data
   cudf::type_id type;
   cudf::experimental::pack_region_kind kind;
-  int source_buffer_index;
+  std::vector<size_type> column_path;  ///< See `pack_region_info::column_path`
   uint8_t const* direct_source;
 };
 
@@ -490,31 +490,38 @@ size_type count_src_bufs(InputIter begin, InputIter end)
 /**
  * @brief Appends the child path of the column owning each source buffer of `col`.
  *
- * Buffers are visited in the order `setup_source_buf_info()` lists them. Validity and offsets
- * buffers belong to the column they describe.
+ * Buffers are visited in the order `setup_source_buf_info()` lists them, and each is checked
+ * against its entry in `sources`. Validity and offsets buffers belong to the column they describe.
  *
  * @param col Column to visit
  * @param path Child path of `col`
+ * @param sources Source buffers of the table, as listed by `setup_source_buf_info()`
  * @param paths Output; receives one path per source buffer
  */
 void append_source_column_paths(column_view const& col,
                                 std::span<size_type const> path,
+                                std::span<src_buf_info const> sources,
                                 std::vector<std::vector<size_type>>& paths)
 {
   auto const add_child = [&](size_type child_index) {
     std::vector<size_type> child_path(path.begin(), path.end());
     child_path.push_back(child_index);
-    append_source_column_paths(col.child(child_index), child_path, paths);
+    append_source_column_paths(col.child(child_index), child_path, sources, paths);
   };
-  auto const add_path = [&] { paths.emplace_back(path.begin(), path.end()); };
-  if (col.nullable()) { add_path(); }
-  add_path();
+  auto const add_buffer = [&](type_id type, bool is_validity = false) {
+    CUDF_EXPECTS(paths.size() < sources.size() && sources[paths.size()].type == type &&
+                   sources[paths.size()].is_validity == is_validity,
+                 "Column paths do not match the source buffers");
+    paths.emplace_back(path.begin(), path.end());
+  };
+  if (col.nullable()) { add_buffer(type_id::INT32, true); }
+  add_buffer(col.type().id());
   switch (col.type().id()) {
     case type_id::STRING:
-      if (col.num_children() > 0) { add_path(); }
+      if (col.num_children() > 0) { add_buffer(col.child(0).type().id()); }
       break;
     case type_id::LIST:
-      add_path();
+      add_buffer(type_id::INT32);
       add_child(lists_column_view::child_column_index);
       break;
     case type_id::STRUCT:
@@ -2006,6 +2013,14 @@ struct contiguous_split_state {
     setup_source_buf_info(
       input.begin(), input.end(), source_info.data(), source_info.data(), stream);
 
+    std::vector<std::vector<size_type>> paths;
+    paths.reserve(num_src_bufs);
+    for (size_type i = 0; i < input.num_columns(); ++i) {
+      append_source_column_paths(input.column(i), {&i, 1}, source_info, paths);
+    }
+    CUDF_EXPECTS(paths.size() == source_info.size(),
+                 "Column paths do not match the source buffers");
+
     std::vector<compression_region_layout> regions;
     regions.reserve(num_bufs);
     for (auto const& destination_info : partition_buf_size_and_dst_buf_info->h_dst_buf_info) {
@@ -2035,24 +2050,11 @@ struct contiguous_split_state {
         direct_source != nullptr ? source_bytes : destination_info.buf_size,
         source.type,
         kind,
-        destination_info.src_buf_index,
+        paths[destination_info.src_buf_index],
         direct_source});
     }
     std::ranges::sort(regions, {}, &compression_region_layout::uncompressed_offset);
     return regions;
-  }
-
-  /// Child path of the column owning each source buffer, indexed by source buffer.
-  [[nodiscard]] std::vector<std::vector<size_type>> get_source_column_paths() const
-  {
-    std::vector<std::vector<size_type>> paths;
-    paths.reserve(num_src_bufs);
-    for (size_type i = 0; i < input.num_columns(); ++i) {
-      append_source_column_paths(input.column(i), {&i, 1}, paths);
-    }
-    CUDF_EXPECTS(paths.size() == static_cast<std::size_t>(num_src_bufs),
-                 "Column paths do not match the source buffers");
-    return paths;
   }
 
   std::vector<packed_table> contiguous_split()
@@ -3394,17 +3396,13 @@ struct pack_plan_builder::impl {
       mr(std::move(mr)),
       layouts(this->input.state->get_compression_regions())
   {
-    if (layouts.empty()) { return; }
-    auto const paths = this->input.state->get_source_column_paths();
     regions.reserve(layouts.size());
     for (std::size_t i = 0; i < layouts.size(); ++i) {
       auto const& layout = layouts[i];
-      regions.emplace_back(pack_region_info{i,
-                                            paths[layout.source_buffer_index],
-                                            layout.kind,
-                                            layout.type,
-                                            layout.uncompressed_bytes},
-                           options.compression);
+      regions.emplace_back(
+        pack_region_info{
+          i, layout.column_path, layout.kind, layout.type, layout.uncompressed_bytes},
+        options.compression);
     }
   }
 
