@@ -30,19 +30,22 @@ namespace detail {
  * @param size_iter Device-accessible iterator to the buffer sizes (in bytes)
  * @param num_buffs Number of buffers to be copied
  * @param stream CUDA stream to use
+ * @param mr Device memory resource used to allocate temporary storage
  */
 template <typename SrcIterator, typename DstIterator, typename SizeIterator>
-void batched_memcpy_async(SrcIterator src_iter,
-                          DstIterator dst_iter,
-                          SizeIterator size_iter,
-                          size_t num_buffs,
-                          cuda::stream_ref stream)
+void batched_memcpy_async(
+  SrcIterator src_iter,
+  DstIterator dst_iter,
+  SizeIterator size_iter,
+  size_t num_buffs,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref())
 {
   size_t temp_storage_bytes = 0;
   cub::DeviceMemcpy::Batched(
     nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, num_buffs, stream.get());
 
-  rmm::device_buffer d_temp_storage{temp_storage_bytes, stream.get()};
+  rmm::device_buffer d_temp_storage{temp_storage_bytes, stream.get(), mr};
 
   cub::DeviceMemcpy::Batched(d_temp_storage.data(),
                              temp_storage_bytes,

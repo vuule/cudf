@@ -2637,7 +2637,8 @@ std::size_t max_compressed_chunk_bytes(chunk_batch const& batch)
 
 void copy_chunks(device_span<device_span<uint8_t const> const> inputs,
                  device_span<device_span<uint8_t> const> outputs,
-                 cuda::stream_ref stream)
+                 cuda::stream_ref stream,
+                 rmm::device_async_resource_ref temp_mr)
 {
   if (inputs.empty()) { return; }
   auto const sources = cuda::make_transform_iterator(
@@ -2652,7 +2653,7 @@ void copy_chunks(device_span<device_span<uint8_t const> const> inputs,
     inputs.begin(),
     cuda::proclaim_return_type<std::size_t>(
       [] __device__(device_span<uint8_t const> const& span) { return span.size(); }));
-  cudf::detail::batched_memcpy_async(sources, destinations, sizes, inputs.size(), stream);
+  cudf::detail::batched_memcpy_async(sources, destinations, sizes, inputs.size(), stream, temp_mr);
 }
 
 /// Codec helpers allocate only scratch here, so the temporary resource backs both roles.
@@ -2668,7 +2669,9 @@ void compress_batch(chunk_batch const& batch,
                     cuda::stream_ref stream,
                     rmm::device_async_resource_ref temp_mr)
 {
-  if (batch.codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream); }
+  if (batch.codec == pack_compression::none) {
+    return copy_chunks(inputs, outputs, stream, temp_mr);
+  }
   if (batch.codec != pack_compression::cascaded) {
     return cudf::io::detail::compress(
       to_io_compression(batch.codec), inputs, outputs, results, stream, scratch_resources(temp_mr));
@@ -2701,7 +2704,7 @@ void decompress_batch(pack_compression codec,
                       cuda::stream_ref stream,
                       rmm::device_async_resource_ref temp_mr)
 {
-  if (codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream); }
+  if (codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream, temp_mr); }
   cudf::io::detail::decompress(to_io_compression(codec),
                                inputs,
                                outputs,
@@ -2828,26 +2831,11 @@ struct chunk_descriptor {
   bool raw;
 };
 
-compressed_metadata_entry make_entry(prepared_compression_region const& region,
-                                     pack_compression compression)
-{
-  return {region.layout.uncompressed_offset,
-          region.layout.uncompressed_bytes,
-          region.layout.data_bytes,
-          region.chunk_bytes,
-          region.chunk_begin,
-          region.num_chunks,
-          static_cast<int32_t>(region.layout.type),
-          region.layout.kind == pack_region_kind::validity ? 1U : 0U,
-          static_cast<int32_t>(compression),
-          0U};
-}
-
 template <typename T>
-void append_pod(std::vector<uint8_t>& output, T const& value)
+void append_pod(std::vector<uint8_t>& output, T const* values, std::size_t count = 1)
 {
-  auto const begin = reinterpret_cast<uint8_t const*>(&value);
-  output.insert(output.end(), begin, begin + sizeof(T));
+  auto const begin = reinterpret_cast<uint8_t const*>(values);
+  output.insert(output.end(), begin, begin + count * sizeof(T));
 }
 
 template <typename T>
@@ -2878,19 +2866,15 @@ std::vector<uint8_t> make_compressed_metadata(std::vector<uint8_t> const& legacy
   std::vector<uint8_t> output;
   output.reserve(
     compressed_metadata_size(legacy_metadata.size(), entries.size(), chunk_offsets.size()));
-  append_pod(output,
-             compressed_metadata_header{compressed_metadata_version,
-                                        static_cast<uint32_t>(entries.size()),
-                                        chunk_offsets.size(),
-                                        legacy_metadata.size(),
-                                        uncompressed_payload_bytes});
-  for (auto const& entry : entries) {
-    append_pod(output, entry);
-  }
-  for (auto const offset : chunk_offsets) {
-    append_pod(output, offset);
-  }
-  output.insert(output.end(), legacy_metadata.begin(), legacy_metadata.end());
+  compressed_metadata_header const header{compressed_metadata_version,
+                                          static_cast<uint32_t>(entries.size()),
+                                          chunk_offsets.size(),
+                                          legacy_metadata.size(),
+                                          uncompressed_payload_bytes};
+  append_pod(output, &header);
+  append_pod(output, entries.data(), entries.size());
+  append_pod(output, chunk_offsets.data(), chunk_offsets.size());
+  append_pod(output, legacy_metadata.data(), legacy_metadata.size());
   return output;
 }
 
@@ -3172,7 +3156,7 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
       cudf::detail::make_device_uvector_async(destinations, stream, temp_mr);
     auto const d_sizes = cudf::detail::make_device_uvector_async(sizes, stream, temp_mr);
     cudf::detail::batched_memcpy_async(
-      d_sources.begin(), d_destinations.begin(), d_sizes.begin(), sources.size(), stream);
+      d_sources.begin(), d_destinations.begin(), d_sizes.begin(), sources.size(), stream, temp_mr);
   }
   return std::make_unique<table>(std::move(columns));
 }
@@ -3678,8 +3662,12 @@ pack_result pack_into(pack_plan const& plan,
     auto const d_sources    = cudf::detail::make_device_uvector(sources, stream, temp_mr);
     auto const d_targets    = cudf::detail::make_device_uvector(targets, stream, temp_mr);
     auto const d_copy_bytes = cudf::detail::make_device_uvector(copy_bytes, stream, temp_mr);
-    cudf::detail::batched_memcpy_async(
-      d_sources.begin(), d_targets.begin(), d_copy_bytes.begin(), d_sources.size(), stream);
+    cudf::detail::batched_memcpy_async(d_sources.begin(),
+                                       d_targets.begin(),
+                                       d_copy_bytes.begin(),
+                                       d_sources.size(),
+                                       stream,
+                                       temp_mr);
     if (to_host) { copy_to_host(window_begin, compacted, payload_bytes - window_begin); }
   }
   if (to_host) {
@@ -3697,7 +3685,16 @@ pack_result pack_into(pack_plan const& plan,
     auto const all_raw = std::all_of(table.begin() + region.chunk_begin,
                                      table.begin() + region.chunk_begin + region.num_chunks,
                                      [](auto entry) { return entry & raw_chunk_flag; });
-    entries.push_back(make_entry(region, all_raw ? pack_compression::none : region.compression));
+    entries.push_back({region.layout.uncompressed_offset,
+                       region.layout.uncompressed_bytes,
+                       region.layout.data_bytes,
+                       region.chunk_bytes,
+                       region.chunk_begin,
+                       region.num_chunks,
+                       static_cast<int32_t>(region.layout.type),
+                       region.layout.kind == pack_region_kind::validity ? 1U : 0U,
+                       static_cast<int32_t>(all_raw ? pack_compression::none : region.compression),
+                       0U});
   }
   return pack_result{
     make_compressed_metadata(
