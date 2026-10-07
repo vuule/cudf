@@ -6,12 +6,12 @@
 #pragma once
 
 #include <cudf/detail/iterator.cuh>
+#include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
-
-#include <rmm/device_buffer.hpp>
 
 #include <cub/device/device_memcpy.cuh>
 #include <cuda/functional>
+#include <cuda/std/execution>
 #include <cuda/stream>
 
 namespace CUDF_EXPORT cudf {
@@ -41,19 +41,10 @@ void batched_memcpy_async(
   cuda::stream_ref stream,
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref())
 {
-  size_t temp_storage_bytes = 0;
-  cub::DeviceMemcpy::Batched(
-    nullptr, temp_storage_bytes, src_iter, dst_iter, size_iter, num_buffs, stream.get());
-
-  rmm::device_buffer d_temp_storage{temp_storage_bytes, stream.get(), mr};
-
-  cub::DeviceMemcpy::Batched(d_temp_storage.data(),
-                             temp_storage_bytes,
-                             src_iter,
-                             dst_iter,
-                             size_iter,
-                             num_buffs,
-                             stream.get());
+  auto env =
+    cuda::std::execution::env{cuda::std::execution::prop{cuda::get_stream_t{}, stream},
+                              cuda::std::execution::prop{cuda::mr::get_memory_resource_t{}, mr}};
+  CUDF_CUDA_TRY(cub::DeviceMemcpy::Batched(src_iter, dst_iter, size_iter, num_buffs, env));
 }
 
 }  // namespace detail
