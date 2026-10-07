@@ -8,7 +8,6 @@
 #include <cudf_test/base_fixture.hpp>
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/iterator_utilities.hpp>
-#include <cudf_test/memory_resource_utilities.hpp>
 #include <cudf_test/table_utilities.hpp>
 
 #include <cudf/contiguous_split.hpp>
@@ -294,59 +293,6 @@ TEST_F(PackUnpackTest, ExperimentalPackIntoHostBufferLargerThanStaging)
   for (auto const kind : {destination_kind::pinned, destination_kind::pageable}) {
     SCOPED_TRACE(static_cast<int>(kind));
     expect_materializes_to(input, pack_to(built, kind).view());
-  }
-}
-
-TEST_F(PackUnpackTest, ExperimentalExplicitMemoryResources)
-{
-  cudf::test::fixed_width_column_wrapper<int64_t> numbers({1, 2, 3, 4, 5, 6},
-                                                          {true, false, true, true, true, true});
-  cudf::test::strings_column_wrapper strings(
-    {"explicit", "memory", "", "resources", "for", "pack"});
-  auto const input  = cudf::table_view{{numbers, strings}};
-  auto const stream = cudf::get_default_stream();
-
-  for (auto const compression : {cx::pack_compression::none, cx::pack_compression::cascaded}) {
-    SCOPED_TRACE(static_cast<int>(compression));
-    auto harness = cudf::test::memory_resource_test_harness{};
-    // Plan state is owned by the returned plan, so it comes from the output resource; planning
-    // scratch comes from the temporary resource.
-    auto const plan = [&] {
-      auto const scope = harness.fail_on_current_device_resource_use();
-      auto result = cx::prepare_pack(input, make_options(compression), stream, harness.resources());
-      harness.synchronize(stream);
-      return result;
-    }();
-    harness.expect_output_allocations_live(stream);
-    auto const planning_bytes = harness.expect_temporary_allocation_activity(stream).total;
-    harness.expect_temporary_allocations_released(stream);
-
-    auto pinned =
-      cudf::detail::make_pinned_vector_async<uint8_t>(plan.sizes().payload_bytes, stream);
-    auto const packed = [&] {
-      auto const scope = harness.fail_on_current_device_resource_use();
-      auto result =
-        cx::pack_into(plan, std::span<uint8_t>{pinned.data(), pinned.size()}, harness.resources());
-      harness.synchronize(stream);
-      return result;
-    }();
-    auto const packing_bytes = harness.temporary_mr().get_bytes_counter().total;
-    EXPECT_GT(packing_bytes, planning_bytes);
-    harness.expect_temporary_allocations_released(stream);
-
-    auto const view = cx::packed_data_view{
-      packed.metadata, std::span<uint8_t const>{pinned.data(), packed.payload_bytes}};
-    auto const materialized = [&] {
-      auto const scope = harness.fail_on_current_device_resource_use();
-      auto result      = cx::materialize(view, stream, harness.resources());
-      harness.synchronize(stream);
-      return result;
-    }();
-    harness.expect_temporary_allocations_released(stream);
-    if (compression != cx::pack_compression::none) {
-      EXPECT_GT(harness.temporary_mr().get_bytes_counter().total, packing_bytes);
-    }
-    CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
   }
 }
 

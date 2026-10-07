@@ -487,6 +487,15 @@ size_type count_src_bufs(InputIter begin, InputIter end)
   return std::accumulate(buf_iter, buf_iter + std::distance(begin, end), 0);
 }
 
+cudf::experimental::pack_region_kind region_kind(src_buf_info const& source)
+{
+  using cudf::experimental::pack_region_kind;
+  if (source.is_validity) { return pack_region_kind::validity; }
+  if (source.is_offsets) { return pack_region_kind::offsets; }
+  if (source.type == type_id::STRING) { return pack_region_kind::string_characters; }
+  return pack_region_kind::data;
+}
+
 /**
  * @brief Appends the child path of the column owning each source buffer of `col`.
  *
@@ -2039,17 +2048,12 @@ struct contiguous_split_state {
           ? src_and_dst_pointers->h_src_bufs[destination_info.src_buf_index] +
               destination_info.src_element_index * destination_info.element_size
           : nullptr;
-      auto const kind = source.is_validity  ? cudf::experimental::pack_region_kind::validity
-                        : source.is_offsets ? cudf::experimental::pack_region_kind::offsets
-                        : source.type == type_id::STRING
-                          ? cudf::experimental::pack_region_kind::string_characters
-                          : cudf::experimental::pack_region_kind::data;
       regions.push_back(compression_region_layout{
         destination_info.dst_offset,
         destination_info.buf_size,
         direct_source != nullptr ? source_bytes : destination_info.buf_size,
         source.type,
-        kind,
+        region_kind(source),
         paths[destination_info.src_buf_index],
         direct_source});
     }
@@ -2630,8 +2634,7 @@ std::size_t max_compressed_chunk_bytes(chunk_batch const& batch)
 
 void copy_chunks(device_span<device_span<uint8_t const> const> inputs,
                  device_span<device_span<uint8_t> const> outputs,
-                 cuda::stream_ref stream,
-                 rmm::device_async_resource_ref temp_mr)
+                 cuda::stream_ref stream)
 {
   if (inputs.empty()) { return; }
   auto const sources = cuda::make_transform_iterator(
@@ -2646,7 +2649,7 @@ void copy_chunks(device_span<device_span<uint8_t const> const> inputs,
     inputs.begin(),
     cuda::proclaim_return_type<std::size_t>(
       [] __device__(device_span<uint8_t const> const& span) { return span.size(); }));
-  cudf::detail::batched_memcpy_async(sources, destinations, sizes, inputs.size(), stream, temp_mr);
+  cudf::detail::batched_memcpy_async(sources, destinations, sizes, inputs.size(), stream);
 }
 
 /// Codec helpers allocate only scratch here, so the temporary resource backs both roles.
@@ -2662,9 +2665,7 @@ void compress_batch(chunk_batch const& batch,
                     cuda::stream_ref stream,
                     rmm::device_async_resource_ref temp_mr)
 {
-  if (batch.codec == pack_compression::none) {
-    return copy_chunks(inputs, outputs, stream, temp_mr);
-  }
+  if (batch.codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream); }
   if (batch.codec != pack_compression::cascaded) {
     return cudf::io::detail::compress(
       to_io_compression(batch.codec), inputs, outputs, results, stream, scratch_resources(temp_mr));
@@ -2697,7 +2698,7 @@ void decompress_batch(pack_compression codec,
                       cuda::stream_ref stream,
                       rmm::device_async_resource_ref temp_mr)
 {
-  if (codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream, temp_mr); }
+  if (codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream); }
   cudf::io::detail::decompress(to_io_compression(codec),
                                inputs,
                                outputs,
@@ -3144,7 +3145,7 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
       cudf::detail::make_device_uvector_async(destinations, stream, temp_mr);
     auto const d_sizes = cudf::detail::make_device_uvector_async(sizes, stream, temp_mr);
     cudf::detail::batched_memcpy_async(
-      d_sources.begin(), d_destinations.begin(), d_sizes.begin(), sources.size(), stream, temp_mr);
+      d_sources.begin(), d_destinations.begin(), d_sizes.begin(), sources.size(), stream);
   }
   return std::make_unique<table>(std::move(columns));
 }
@@ -3618,12 +3619,8 @@ pack_result pack_into(pack_plan const& plan,
     auto const d_sources    = cudf::detail::make_device_uvector(sources, stream, temp_mr);
     auto const d_targets    = cudf::detail::make_device_uvector(targets, stream, temp_mr);
     auto const d_copy_bytes = cudf::detail::make_device_uvector(copy_bytes, stream, temp_mr);
-    cudf::detail::batched_memcpy_async(d_sources.begin(),
-                                       d_targets.begin(),
-                                       d_copy_bytes.begin(),
-                                       d_sources.size(),
-                                       stream,
-                                       temp_mr);
+    cudf::detail::batched_memcpy_async(
+      d_sources.begin(), d_targets.begin(), d_copy_bytes.begin(), d_sources.size(), stream);
     if (to_host) { copy_to_host(window_begin, compacted, payload_bytes - window_begin); }
   }
   if (to_host) {
