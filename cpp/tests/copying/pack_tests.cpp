@@ -168,7 +168,7 @@ struct PackUnpackTest : public cudf::test::BaseFixture {
     }
   }
 
-  // ExperimentalPackIntoHost covers host destinations and staging windows.
+  // ExperimentalPackUnpackTest.PackIntoHost covers host destinations and staging windows.
   void verify_prepared_compressed_round_trip(cudf::table_view const& input)
   {
     for (auto const compression : compressed_codecs) {
@@ -208,7 +208,9 @@ struct PackUnpackTest : public cudf::test::BaseFixture {
   void run_test(std::vector<cudf::column_view> const& t) { run_test(cudf::table_view{t}); }
 };
 
-TEST_F(PackUnpackTest, ExperimentalPreparedPackInto)
+struct ExperimentalPackUnpackTest : public cudf::test::BaseFixture {};
+
+TEST_F(ExperimentalPackUnpackTest, PreparedPackInto)
 {
   std::vector<int32_t> values(64 * 1024, 7);
   cudf::test::fixed_width_column_wrapper<int32_t> numbers(
@@ -237,7 +239,7 @@ TEST_F(PackUnpackTest, ExperimentalPreparedPackInto)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalPackIntoHost)
+TEST_F(ExperimentalPackUnpackTest, PackIntoHost)
 {
   cudf::test::fixed_width_column_wrapper<int64_t> numbers({10, 20, 30, 40, 50},
                                                           {true, true, false, true, true});
@@ -265,7 +267,7 @@ TEST_F(PackUnpackTest, ExperimentalPackIntoHost)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalPackIntoHostBufferLargerThanStaging)
+TEST_F(ExperimentalPackUnpackTest, PackIntoHostBufferLargerThanStaging)
 {
   constexpr cudf::size_type num_rows = 256 * 1024;
   auto const values =
@@ -296,7 +298,7 @@ TEST_F(PackUnpackTest, ExperimentalPackIntoHostBufferLargerThanStaging)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalUnpackViewPageablePayload)
+TEST_F(ExperimentalPackUnpackTest, UnpackViewPageablePayload)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3});
   auto const input  = cudf::table_view{{numbers}};
@@ -313,7 +315,7 @@ TEST_F(PackUnpackTest, ExperimentalUnpackViewPageablePayload)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalMaterializeOversizedUncompressedPayload)
+TEST_F(ExperimentalPackUnpackTest, MaterializeOversizedUncompressedPayload)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4, 5});
   auto const input  = cudf::table_view{{numbers}};
@@ -330,7 +332,7 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeOversizedUncompressedPayload)
   EXPECT_EQ(columns.front()->release().data->size(), 5 * sizeof(int32_t));
 }
 
-TEST_F(PackUnpackTest, ExperimentalMaterializeColumnSubset)
+TEST_F(ExperimentalPackUnpackTest, MaterializeColumnSubset)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> numbers({1, 2, 3, 4, 5, 6},
                                                           {true, false, true, true, true, true});
@@ -367,7 +369,7 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeColumnSubset)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalMaterializeSparseColumnSubset)
+TEST_F(ExperimentalPackUnpackTest, MaterializeSparseColumnSubset)
 {
   // An incompressible middle column makes a pageable subset upload disjoint byte ranges. The first
   // column is stored raw with an odd length, and Cascaded requires aligned input for the last one.
@@ -393,7 +395,7 @@ TEST_F(PackUnpackTest, ExperimentalMaterializeSparseColumnSubset)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalPackIntoRejectsInvalidDestination)
+TEST_F(ExperimentalPackUnpackTest, PackIntoRejectsInvalidDestination)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> col({1, 2, 3, 4});
   auto const plan  = cx::prepare_pack(cudf::table_view{{col}});
@@ -406,7 +408,7 @@ TEST_F(PackUnpackTest, ExperimentalPackIntoRejectsInvalidDestination)
   EXPECT_THROW(cx::pack_into(plan, span.subspan(1, sizes.payload_bytes)), cudf::logic_error);
 }
 
-TEST_F(PackUnpackTest, ExperimentalCompressExistingPackedColumns)
+TEST_F(ExperimentalPackUnpackTest, CompressExistingPackedColumns)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> numbers({31, 31, 31, 31, 31},
                                                           {true, false, true, true, true});
@@ -428,7 +430,7 @@ TEST_F(PackUnpackTest, ExperimentalCompressExistingPackedColumns)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalCompressContiguousSplitPartitions)
+TEST_F(ExperimentalPackUnpackTest, CompressContiguousSplitPartitions)
 {
   constexpr cudf::size_type num_rows = 64 * 1024;
   auto const values =
@@ -474,7 +476,7 @@ TEST_F(PackUnpackTest, ExperimentalCompressContiguousSplitPartitions)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireMatchingLayout)
+TEST_F(ExperimentalPackUnpackTest, ExistingPackedColumnsRequireMatchingLayout)
 {
   // Two columns stored in reverse order: the total size matches the planned layout, but the
   // buffer offsets do not.
@@ -495,7 +497,7 @@ TEST_F(PackUnpackTest, ExperimentalExistingPackedColumnsRequireMatchingLayout)
                cudf::logic_error);
 }
 
-TEST_F(PackUnpackTest, ExperimentalCascadedUsesNativeTypedRegions)
+TEST_F(ExperimentalPackUnpackTest, CascadedUsesNativeTypedRegions)
 {
   cudf::test::fixed_width_column_wrapper<int16_t> small({1, 1, 2, 3, 5},
                                                         {true, false, true, true, true});
@@ -527,7 +529,7 @@ TEST_F(PackUnpackTest, ExperimentalCascadedUsesNativeTypedRegions)
   expect_materializes_to(input, packed.view());
 }
 
-TEST_F(PackUnpackTest, ExperimentalAutomaticPerRegionCompression)
+TEST_F(ExperimentalPackUnpackTest, AutomaticPerRegionCompression)
 {
   constexpr cudf::size_type rows = 32 * 1024;
   std::vector<int32_t> values(rows, 7);
@@ -562,7 +564,7 @@ TEST_F(PackUnpackTest, ExperimentalAutomaticPerRegionCompression)
   expect_materializes_to(input, packed.view());
 }
 
-TEST_F(PackUnpackTest, ExperimentalPerRegionCompression)
+TEST_F(ExperimentalPackUnpackTest, PerRegionCompression)
 {
   if (!is_codec_enabled(cx::pack_compression::zstd) ||
       !is_codec_enabled(cx::pack_compression::snappy)) {
@@ -610,7 +612,7 @@ TEST_F(PackUnpackTest, ExperimentalPerRegionCompression)
   }
 }
 
-TEST_F(PackUnpackTest, ExperimentalRegionColumnPaths)
+TEST_F(ExperimentalPackUnpackTest, RegionColumnPaths)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> first({1, 2, 3});
   cudf::test::fixed_width_column_wrapper<int32_t> second({4, 5, 6});
@@ -639,7 +641,7 @@ TEST_F(PackUnpackTest, ExperimentalRegionColumnPaths)
   expect_materializes_to(input, pack_to_device(std::move(builder).build()).view());
 }
 
-TEST_F(PackUnpackTest, ExperimentalCompressedInputValidation)
+TEST_F(ExperimentalPackUnpackTest, CompressedInputValidation)
 {
   if (!is_codec_enabled(cx::pack_compression::zstd)) { GTEST_SKIP() << "Zstd is disabled"; }
   std::vector<int32_t> values(32 * 1024, 23);
