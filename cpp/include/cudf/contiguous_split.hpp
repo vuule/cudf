@@ -480,12 +480,9 @@ pack_plan_builder make_pack_plan_builder(
 /**
  * @brief Prepare a reusable pack plan for `input`.
  *
- * Compression first creates the normalized contiguous representation, then independently
- * compresses each physical column buffer (data, offsets, characters, or validity) in chunks. The
- * chunks of all regions that share a codec are compressed in one batched call. Cascaded is
- * configured with the native width and signedness of each region when nvCOMP supports it.
- * `sizes().payload_bytes` is the combined upper-bound capacity; `pack_into()` reports the actual
- * compressed size.
+ * Each physical column buffer (data, offsets, characters or validity) is compressed independently,
+ * in chunks. For compressed plans, `sizes().payload_bytes` is an upper bound; `pack_into()`
+ * reports the actual size.
  *
  * Payloads are compressed with `pack_compression::automatic` by default. Only
  * `pack_compression::none` produces the exact uncompressed layout that `unpack_view()` accepts.
@@ -516,12 +513,10 @@ struct pack_result {
 /**
  * @brief Execute a prepared pack into caller-owned device or host memory.
  *
- * `destination` may be device memory, pinned host memory, or pageable host memory; it must contain
- * at least `plan.sizes().payload_bytes` bytes. Host destinations and compressed output are staged
- * through `pack_options::staging_buffer_bytes` of device memory, twice that for compressed output
- * to host memory. Compressed execution synchronizes the stream to report the compressed size. A
- * buffer smaller than the payload capacity is processed in several windows, each of which costs
- * Zstd and Snappy a separate batched call.
+ * `destination` may be device, pinned host or pageable host memory of at least
+ * `plan.sizes().payload_bytes` bytes. Host and compressed output are staged in windows through
+ * `pack_options::staging_buffer_bytes` of device memory, doubled for compressed host output.
+ * Compressed output synchronizes the stream.
  *
  * Work is submitted to the stream captured by the plan. The caller must preserve the input and
  * destination until that stream reaches the operation.
