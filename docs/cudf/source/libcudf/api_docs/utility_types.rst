@@ -7,20 +7,19 @@ Utility Types
 Concepts
 --------
 
-.. doxygenconcept:: cudf::boolean
-.. doxygenconcept:: cudf::arithmetic
-.. doxygenconcept:: cudf::arithmetic_not_bool
-.. doxygenconcept:: cudf::integral_not_bool
-.. doxygenconcept:: cudf::unsigned_integral_not_bool
-.. doxygenconcept:: cudf::floating_point
-.. doxygenconcept:: cudf::byte
-.. doxygenconcept:: cudf::timestamp
-.. doxygenconcept:: cudf::duration
-.. doxygenconcept:: cudf::chrono
-.. doxygenconcept:: cudf::fixed_point
-.. doxygenconcept:: cudf::fixed_width
-.. doxygenconcept:: cudf::rep_layout_compatible
-.. doxygenconcept:: cudf::dictionary_type
-.. doxygenconcept:: cudf::dictionary_key
-.. doxygenconcept:: cudf::nested
-.. doxygenconcept:: cudf::compound
+.. doxygenconcept:: cudf::concepts::boolean
+.. doxygenconcept:: cudf::concepts::arithmetic
+.. doxygenconcept:: cudf::concepts::arithmetic_not_bool
+.. doxygenconcept:: cudf::concepts::integral_not_bool
+.. doxygenconcept:: cudf::concepts::unsigned_integral_not_bool
+.. doxygenconcept:: cudf::concepts::byte
+.. doxygenconcept:: cudf::concepts::timestamp
+.. doxygenconcept:: cudf::concepts::duration
+.. doxygenconcept:: cudf::concepts::chrono
+.. doxygenconcept:: cudf::concepts::fixed_point
+.. doxygenconcept:: cudf::concepts::fixed_width
+.. doxygenconcept:: cudf::concepts::rep_layout_compatible
+.. doxygenconcept:: cudf::concepts::dictionary
+.. doxygenconcept:: cudf::concepts::dictionary_key
+.. doxygenconcept:: cudf::concepts::nested
+.. doxygenconcept:: cudf::concepts::compound

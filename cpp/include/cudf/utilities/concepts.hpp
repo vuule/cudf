@@ -19,9 +19,24 @@
 /**
  * @file
  * @brief Concepts for classifying cudf column and scalar types.
+ *
+ * The concepts live in `cudf::concepts` so that generic names such as `duration` do not collide
+ * with names brought into `cudf` code by using-directives, e.g. `using namespace
+ * cuda::std::chrono`. Constraints that the standard library already expresses exactly, such as
+ * `cuda::std::floating_point` or `cuda::std::totally_ordered_with`, are used directly instead.
+ *
+ * \code{cpp}
+ * template <cudf::concepts::fixed_width T>
+ * void foo(T value);
+ *
+ * template <typename T>
+ *   requires(cudf::concepts::chrono<T> || cuda::std::floating_point<T>)
+ * void bar(T value);
+ * \endcode
  */
 
 namespace CUDF_EXPORT cudf {
+namespace concepts {
 
 /**
  * @addtogroup utility_types
@@ -67,14 +82,6 @@ concept integral_not_bool = cuda::std::integral<T> && !boolean<T>;
  */
 template <typename T>
 concept unsigned_integral_not_bool = cuda::std::unsigned_integral<T> && !boolean<T>;
-
-/**
- * @brief Satisfied if `T` is a floating point type.
- *
- * @tparam T The type to verify
- */
-template <typename T>
-concept floating_point = cuda::std::floating_point<T>;
 
 /**
  * @brief Satisfied if `T` is `std::byte`.
@@ -163,7 +170,7 @@ concept rep_layout_compatible = arithmetic<T> || chrono<T> || byte<T>;
  * @tparam T The type to verify
  */
 template <typename T>
-concept dictionary_type = cuda::std::same_as<cuda::std::remove_cv_t<T>, dictionary32>;
+concept dictionary = cuda::std::same_as<cuda::std::remove_cv_t<T>, dictionary32>;
 
 /**
  * @brief Satisfied if `T` can be a dictionary key type.
@@ -171,7 +178,7 @@ concept dictionary_type = cuda::std::same_as<cuda::std::remove_cv_t<T>, dictiona
  * @tparam T The type to verify
  */
 template <typename T>
-concept dictionary_key = !dictionary_type<T> && cuda::std::totally_ordered<T>;
+concept dictionary_key = !dictionary<T> && cuda::std::totally_ordered<T>;
 
 /**
  * @brief Satisfied if `T` is a nested type.
@@ -196,8 +203,9 @@ concept nested = cuda::std::same_as<cuda::std::remove_cv_t<T>, list_view> ||
  */
 template <typename T>
 concept compound =
-  cuda::std::same_as<cuda::std::remove_cv_t<T>, string_view> || dictionary_type<T> || nested<T>;
+  cuda::std::same_as<cuda::std::remove_cv_t<T>, string_view> || dictionary<T> || nested<T>;
 
 /** @} */
 
+}  // namespace concepts
 }  // namespace CUDF_EXPORT cudf
