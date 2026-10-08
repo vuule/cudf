@@ -76,14 +76,6 @@ template <typename T>
 concept integral_not_bool = cuda::std::integral<T> && !boolean<T>;
 
 /**
- * @brief Satisfied if `T` is `std::byte`.
- *
- * @tparam T The type to verify
- */
-template <typename T>
-concept byte = cuda::std::same_as<cuda::std::remove_cv_t<T>, std::byte>;
-
-/**
  * @brief Satisfied if `T` is a cudf timestamp type.
  *
  * @tparam T The type to verify
@@ -154,7 +146,8 @@ concept fixed_width = arithmetic<T> || chrono<T> || fixed_point<T>;
  * @tparam T The type to verify
  */
 template <typename T>
-concept rep_layout_compatible = arithmetic<T> || chrono<T> || byte<T>;
+concept rep_layout_compatible =
+  arithmetic<T> || chrono<T> || cuda::std::same_as<cuda::std::remove_cv_t<T>, std::byte>;
 
 /**
  * @brief Satisfied if `T` is the cudf dictionary type.

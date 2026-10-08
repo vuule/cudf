@@ -194,7 +194,6 @@ constexpr bool concepts_match_traits()
   static_assert(cudf::concepts::integral_not_bool<T> == cudf::is_index_type<T>());
   static_assert(cuda::std::floating_point<T> == cudf::is_floating_point<T>());
   static_assert(cudf::concepts::boolean<T> == cudf::is_boolean<T>());
-  static_assert(cudf::concepts::byte<T> == cudf::is_byte<T>());
   static_assert(cudf::concepts::timestamp<T> == cudf::is_timestamp<T>());
   static_assert(cudf::concepts::duration<T> == cudf::is_duration<T>());
   static_assert(cudf::concepts::chrono<T> == cudf::is_chrono<T>());
