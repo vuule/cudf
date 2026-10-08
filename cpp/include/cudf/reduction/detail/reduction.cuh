@@ -10,6 +10,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/device_scalar.hpp>
 #include <cudf/detail/utilities/cast_functor.cuh>
+#include <cudf/utilities/concepts.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
@@ -51,7 +52,7 @@ std::unique_ptr<scalar> reduce(InputIterator d_in,
                                std::optional<OutputType> init,
                                cuda::stream_ref stream,
                                rmm::device_async_resource_ref mr)
-  requires(is_fixed_width<OutputType>() && not cudf::is_fixed_point<OutputType>())
+  requires(concepts::fixed_width<OutputType>)
 {
   auto const binary_op     = cudf::detail::cast_functor<OutputType>(op.get_binary_op());
   auto const initial_value = init.value_or(op.template get_identity<OutputType>());
@@ -76,7 +77,7 @@ std::unique_ptr<scalar> reduce(InputIterator d_in,
                                std::optional<OutputType> init,
                                cuda::stream_ref stream,
                                rmm::device_async_resource_ref mr)
-  requires(is_fixed_point<OutputType>())
+  requires(concepts::fixed_point<OutputType>)
 {
   CUDF_FAIL(
     "This function should never be called. fixed_point reduce should always go through the reduce "

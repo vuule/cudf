@@ -7,7 +7,6 @@
 #include <cudf/detail/nvtx/ranges.hpp>
 #include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
-#include <cudf/utilities/concepts.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/traits.hpp>
@@ -80,8 +79,9 @@ data_type DLDataType_to_data_type(DLDataType type)
 }
 
 struct data_type_to_DLDataType_impl {
-  template <concepts::arithmetic T>
+  template <typename T>
   DLDataType operator()()
+    requires(is_numeric<T>())
   {
     uint8_t const bits{sizeof(T) * 8};
     uint16_t const lanes{1};
@@ -96,7 +96,7 @@ struct data_type_to_DLDataType_impl {
 
   template <typename T>
   DLDataType operator()()
-    requires(not concepts::arithmetic<T>)
+    requires(not is_numeric<T>())
   {
     CUDF_FAIL("Conversion of non-numeric types to DLPack is unsupported");
   }

@@ -18,15 +18,13 @@ struct size_of_helper {
   cudf::data_type type;
   template <typename T>
   constexpr int operator()() const
-    requires(not concepts::fixed_width<T>)
   {
     CUDF_FAIL("Invalid, non fixed-width element type.");
     return 0;
   }
 
-  template <typename T>
+  template <concepts::fixed_width T>
   constexpr int operator()() const noexcept
-    requires(concepts::fixed_width<T> && not concepts::fixed_point<T>)
   {
     return sizeof(T);
   }
