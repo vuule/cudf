@@ -7,8 +7,6 @@ Utility Types
 Concepts
 --------
 
-.. doxygenconcept:: cudf::relationally_comparable
-.. doxygenconcept:: cudf::equality_comparable
 .. doxygenconcept:: cudf::boolean
 .. doxygenconcept:: cudf::arithmetic
 .. doxygenconcept:: cudf::arithmetic_not_bool

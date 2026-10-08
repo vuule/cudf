@@ -13,7 +13,6 @@
 
 #include <cuda/std/concepts>
 #include <cuda/std/type_traits>
-#include <cuda/std/utility>
 
 #include <cstddef>
 
@@ -28,31 +27,6 @@ namespace CUDF_EXPORT cudf {
  * @addtogroup utility_types
  * @{
  */
-
-/**
- * @brief Satisfied if objects of types `L` and `R` can be relationally compared.
- *
- * Given two objects `L l` and `R r`, satisfied if `l < r` and `l > r` are well-formed expressions.
- *
- * @tparam L Type of the first object
- * @tparam R Type of the second object
- */
-template <typename L, typename R>
-concept relationally_comparable = requires {
-  cuda::std::declval<L>() < cuda::std::declval<R>();
-  cuda::std::declval<L>() > cuda::std::declval<R>();
-};
-
-/**
- * @brief Satisfied if objects of types `L` and `R` can be compared for equality.
- *
- * Given two objects `L l` and `R r`, satisfied if `l == r` is a well-formed expression.
- *
- * @tparam L Type of the first object
- * @tparam R Type of the second object
- */
-template <typename L, typename R>
-concept equality_comparable = requires { cuda::std::declval<L>() == cuda::std::declval<R>(); };
 
 /**
  * @brief Satisfied if `T` is a Boolean type.
@@ -197,7 +171,7 @@ concept dictionary_type = cuda::std::same_as<cuda::std::remove_cv_t<T>, dictiona
  * @tparam T The type to verify
  */
 template <typename T>
-concept dictionary_key = !dictionary_type<T> && relationally_comparable<T, T>;
+concept dictionary_key = !dictionary_type<T> && cuda::std::totally_ordered<T>;
 
 /**
  * @brief Satisfied if `T` is a nested type.
