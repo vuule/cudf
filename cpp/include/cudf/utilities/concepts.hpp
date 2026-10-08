@@ -76,14 +76,6 @@ template <typename T>
 concept integral_not_bool = cuda::std::integral<T> && !boolean<T>;
 
 /**
- * @brief Satisfied if `T` is an unsigned integral type other than `bool`.
- *
- * @tparam T The type to verify
- */
-template <typename T>
-concept unsigned_integral_not_bool = cuda::std::unsigned_integral<T> && !boolean<T>;
-
-/**
  * @brief Satisfied if `T` is `std::byte`.
  *
  * @tparam T The type to verify

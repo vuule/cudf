@@ -11,7 +11,6 @@ Concepts
 .. doxygenconcept:: cudf::concepts::arithmetic
 .. doxygenconcept:: cudf::concepts::arithmetic_not_bool
 .. doxygenconcept:: cudf::concepts::integral_not_bool
-.. doxygenconcept:: cudf::concepts::unsigned_integral_not_bool
 .. doxygenconcept:: cudf::concepts::byte
 .. doxygenconcept:: cudf::concepts::timestamp
 .. doxygenconcept:: cudf::concepts::duration
