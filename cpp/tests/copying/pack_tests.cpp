@@ -639,6 +639,44 @@ TEST_F(ExperimentalPackUnpackTest, RegionColumnPaths)
   expect_materializes_to(input, pack_to_device(std::move(builder).build()).view());
 }
 
+TEST_F(ExperimentalPackUnpackTest, ReadPackedRegions)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> first({1, 2, 3, 4}, {true, false, true, true});
+  cudf::test::strings_column_wrapper words({"a", "", "ccc", "dd"}, {true, false, true, true});
+  cudf::test::structs_column_wrapper structs({first, words}, {true, true, false, true});
+  using lcw = cudf::test::lists_column_wrapper<int32_t>;
+  lcw lists{lcw{lcw{1, 2}, lcw{3}}, lcw{lcw{4}}, lcw{}, lcw{lcw{5, 6}}};
+  cudf::test::strings_column_wrapper empty_words({"", "", "", ""});
+  cudf::test::fixed_width_column_wrapper<double> doubles({1.5, 2.5, 3.5, 4.5});
+  cudf::test::dictionary_column_wrapper<std::string> dictionary({"a", "bb", "a", "ccc"});
+  auto const table = cudf::table_view{{structs, lists, empty_words, doubles, dictionary}};
+
+  auto const expect_regions = [](std::vector<cx::pack_region_info> const& actual,
+                                 std::span<cx::pack_region const> expected) {
+    ASSERT_EQ(actual.size(), expected.size());
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+      auto const& info = expected[i].info();
+      EXPECT_EQ(actual[i].region_index, info.region_index);
+      EXPECT_EQ(actual[i].column_path, info.column_path);
+      EXPECT_EQ(actual[i].kind, info.kind);
+      EXPECT_EQ(actual[i].type, info.type);
+      EXPECT_EQ(actual[i].uncompressed_bytes, info.uncompressed_bytes) << i;
+    }
+  };
+
+  for (auto const& input : {table, cudf::slice(table, {1, 3}).front()}) {
+    auto const builder =
+      cx::make_pack_plan_builder(input, make_options(cx::pack_compression::none));
+    for (auto const compression : {cx::pack_compression::none, cx::pack_compression::cascaded}) {
+      auto const packed = pack_to_device(cx::prepare_pack(input, make_options(compression)));
+      expect_regions(cx::read_packed_regions(packed.result.metadata), builder.regions());
+    }
+    auto const legacy = cudf::pack(input);
+    expect_regions(cx::read_packed_regions(*legacy.metadata), builder.regions());
+  }
+  EXPECT_TRUE(cx::read_packed_regions({}).empty());
+}
+
 TEST_F(ExperimentalPackUnpackTest, CompressedInputValidation)
 {
   if (!is_codec_enabled(cx::pack_compression::zstd)) { GTEST_SKIP() << "Zstd is disabled"; }

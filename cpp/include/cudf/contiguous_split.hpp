@@ -603,6 +603,19 @@ std::unique_ptr<table> materialize(
   cuda::stream_ref stream   = cudf::get_default_stream(),
   cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
+/**
+ * @brief Describe the physical regions of a packed table from its host metadata alone.
+ *
+ * Accepts metadata from `pack_into()`, `cudf::pack()` and `chunked_pack`. Regions are listed in
+ * payload order, with the descriptions `make_pack_plan_builder()` reports for the packed table.
+ *
+ * @throw cudf::logic_error if `metadata` is truncated or malformed
+ *
+ * @param metadata Host metadata of a packed table
+ * @return One description per physical region
+ */
+std::vector<pack_region_info> read_packed_regions(std::span<uint8_t const> metadata);
+
 }  // namespace experimental
 
 /**

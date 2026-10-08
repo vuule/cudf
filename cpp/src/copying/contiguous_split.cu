@@ -3781,6 +3781,92 @@ std::unique_ptr<table> materialize(packed_data_view input,
   return materialize_selection(input, column_indices, stream, mr);
 }
 
+namespace {
+
+struct packed_buffer {
+  std::size_t offset;
+  pack_region_info info;
+  std::size_t data_bytes;  ///< Unpadded size, or 0 for string characters, whose size is unknown
+};
+
+/// Lists the buffers of `column` in payload order, matching the regions planning discovers.
+void append_packed_buffers(packed_metadata_view::column_view const& column,
+                           std::vector<size_type>& path,
+                           pack_region_kind data_kind,
+                           std::vector<packed_buffer>& buffers)
+{
+  auto const add = [&](int64_t offset, pack_region_kind kind, type_id type, std::size_t bytes) {
+    if (offset == -1) { return; }
+    buffers.push_back({static_cast<std::size_t>(offset), {0, path, kind, type, 0}, bytes});
+  };
+  auto const rows = static_cast<std::size_t>(column.num_rows());
+  auto const type = column.type();
+  add(column.null_mask_offset(),
+      pack_region_kind::validity,
+      type_id::INT32,
+      cudf::util::div_rounding_up_safe(rows, std::size_t{32}) * sizeof(bitmask_type));
+  if (type.id() == type_id::STRING) {
+    add(column.data_offset(), pack_region_kind::string_characters, type.id(), 0);
+  } else {
+    add(
+      column.data_offset(), data_kind, type.id(), is_fixed_width(type) ? rows * size_of(type) : 0);
+  }
+
+  auto const has_offsets_child = type.id() == type_id::STRING || type.id() == type_id::LIST;
+  for (size_type i = 0; i < column.num_children(); ++i) {
+    // Offsets belong to the column they describe.
+    if (has_offsets_child && i == 0) {
+      append_packed_buffers(column.child(i), path, pack_region_kind::offsets, buffers);
+      continue;
+    }
+    path.push_back(i);
+    append_packed_buffers(column.child(i), path, pack_region_kind::data, buffers);
+    path.pop_back();
+  }
+}
+
+}  // namespace
+
+std::vector<pack_region_info> read_packed_regions(std::span<uint8_t const> metadata)
+{
+  CUDF_FUNC_RANGE();
+  auto const parsed = is_compressed_metadata(metadata)
+                        ? std::optional{parse_compressed_metadata(metadata)}
+                        : std::nullopt;
+  auto const legacy = parsed.has_value() ? parsed->legacy_metadata : metadata;
+  if (legacy.empty()) { return {}; }
+
+  packed_metadata_view const view{legacy};
+  std::vector<packed_buffer> buffers;
+  for (size_type i = 0; i < view.num_columns(); ++i) {
+    std::vector<size_type> path{i};
+    append_packed_buffers(view.column(i), path, pack_region_kind::data, buffers);
+  }
+  // An empty buffer shares its offset with the buffer after it, and the stable sort keeps it first.
+  std::ranges::stable_sort(buffers, {}, &packed_buffer::offset);
+
+  std::vector<pack_region_info> regions;
+  regions.reserve(buffers.size());
+  for (std::size_t i = 0; i < buffers.size(); ++i) {
+    auto& buffer = buffers[i];
+    // String characters always precede their offsets, so the last buffer has a known size.
+    CUDF_EXPECTS(i + 1 < buffers.size() || parsed.has_value() || buffer.data_bytes > 0,
+                 "Packed metadata is malformed");
+    auto const end = i + 1 < buffers.size() ? buffers[i + 1].offset
+                     : parsed.has_value()
+                       ? parsed->uncompressed_payload_bytes
+                       : cudf::util::round_up_safe(buffer.offset + buffer.data_bytes, split_align);
+    CUDF_EXPECTS(end >= buffer.offset, "Packed metadata is malformed");
+    if (end == buffer.offset) { continue; }
+    buffer.info.region_index       = regions.size();
+    buffer.info.uncompressed_bytes = end - buffer.offset;
+    regions.push_back(std::move(buffer.info));
+  }
+  CUDF_EXPECTS(!parsed.has_value() || regions.size() == parsed->entries.size(),
+               "Compressed-region metadata does not match the column metadata");
+  return regions;
+}
+
 }  // namespace experimental
 
 };  // namespace cudf
