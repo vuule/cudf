@@ -20,7 +20,6 @@
 #include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/integer_utils.hpp>
-#include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/dictionary/dictionary_column_view.hpp>
 #include <cudf/io/detail/codec.hpp>
@@ -3706,6 +3705,12 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
 
   if (work.empty()) { return std::make_unique<table>(std::move(columns)); }
 
+  // Cascaded work goes first so that its value-type groups form one contiguous range of chunks.
+  auto const num_cascaded = static_cast<std::size_t>(
+    std::ranges::distance(work.begin(), std::ranges::stable_partition(work, [](auto const& item) {
+                                          return item.codec == pack_compression::cascaded;
+                                        }).begin()));
+
   // Descriptors for all codecs go up in one copy and their results come back in one copy.
   std::vector<std::size_t> work_offsets{0};
   std::vector<device_span<uint8_t const>> inputs;
@@ -3723,27 +3728,24 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                results.end(),
                codec_exec_result{0, codec_status::FAILURE});
 
-  auto const spans = [&](std::size_t i) {
-    auto const begin = work_offsets[i];
-    auto const count = work_offsets[i + 1] - begin;
+  auto const spans = [&](std::size_t begin, std::size_t end) {
+    auto const count = end - begin;
     return std::tuple{device_span<device_span<uint8_t const> const>{d_inputs}.subspan(begin, count),
                       device_span<device_span<uint8_t> const>{d_outputs}.subspan(begin, count),
                       device_span<codec_exec_result>{results}.subspan(begin, count)};
   };
-  // Each Cascaded data type needs its own call, so the calls run on forked streams.
-  std::vector<cudf::io::detail::nvcomp::batched_cascaded_decompression> cascaded;
-  for (std::size_t i = 0; i < work.size(); ++i) {
-    if (work[i].codec != pack_compression::cascaded) { continue; }
-    auto const [d_in, d_out, d_results] = spans(i);
-    cascaded.emplace_back(d_in, d_out, d_results, stream, scratch_resources(temp_mr));
+  if (num_cascaded > 0) {
+    auto const [d_in, d_out, d_results] = spans(0, work_offsets[num_cascaded]);
+    cudf::io::detail::nvcomp::batched_cascaded_decompress(
+      d_in,
+      d_out,
+      d_results,
+      host_span<std::size_t const>{work_offsets.data(), num_cascaded + 1},
+      stream,
+      scratch_resources(temp_mr));
   }
-  auto const forked = cudf::detail::fork_streams(stream, cascaded.size());
-  for (std::size_t k = 0; k < cascaded.size(); ++k) {
-    cascaded[k].launch(forked[k]);
-  }
-  for (std::size_t i = 0; i < work.size(); ++i) {
-    if (work[i].codec == pack_compression::cascaded) { continue; }
-    auto const [d_in, d_out, d_results] = spans(i);
+  for (auto i = num_cascaded; i < work.size(); ++i) {
+    auto const [d_in, d_out, d_results] = spans(work_offsets[i], work_offsets[i + 1]);
     decompress_batch(work[i].codec,
                      d_in,
                      d_out,
@@ -3753,7 +3755,6 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                      stream,
                      temp_mr);
   }
-  cudf::detail::join_streams(forked, stream);
 
   auto const h_results = cudf::detail::make_std_vector(results, stream);
   for (std::size_t i = 0; i < work.size(); ++i) {

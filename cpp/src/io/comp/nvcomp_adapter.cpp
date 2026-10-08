@@ -7,6 +7,7 @@
 
 #include "nvcomp_adapter.cuh"
 
+#include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/io/config_utils.hpp>
 #include <cudf/logger.hpp>
@@ -1001,56 +1002,47 @@ void batched_cascaded_compress(type_id value_type,
   update_compression_results(statuses, args.output_data_sizes, results, stream, {temp_mr, temp_mr});
 }
 
-struct batched_cascaded_decompression::impl {
-  batched_args args;
-  rmm::device_uvector<size_t> actual_bytes;
-  rmm::device_uvector<nvcompStatus_t> statuses;
-  device_span<codec_exec_result> results;
-  rmm::device_async_resource_ref temp_mr;
-};
-
-batched_cascaded_decompression::batched_cascaded_decompression(
-  device_span<device_span<uint8_t const> const> inputs,
-  device_span<device_span<uint8_t> const> outputs,
-  device_span<codec_exec_result> results,
-  cuda::stream_ref stream,
-  cudf::memory_resources mr)
+void batched_cascaded_decompress(device_span<device_span<uint8_t const> const> inputs,
+                                 device_span<device_span<uint8_t> const> outputs,
+                                 device_span<codec_exec_result> results,
+                                 host_span<size_t const> group_offsets,
+                                 cuda::stream_ref stream,
+                                 cudf::memory_resources mr)
 {
+  CUDF_EXPECTS(inputs.size() == outputs.size(), "inputs and outputs must have the same size");
+  CUDF_EXPECTS(inputs.size() == results.size(), "inputs and results must have the same size");
+  CUDF_EXPECTS(
+    !group_offsets.empty() && group_offsets.front() == 0 && group_offsets.back() == inputs.size(),
+    "group offsets must cover all chunks");
+  if (inputs.empty()) { return; }
+
   auto const temp_mr = mr.get_temporary_mr();
-  _impl              = std::make_unique<impl>(
-    impl{create_batched_nvcomp_args(inputs, outputs, stream, {temp_mr, temp_mr}),
-         rmm::device_uvector<size_t>(inputs.size(), stream, temp_mr),
-         rmm::device_uvector<nvcompStatus_t>(inputs.size(), stream, temp_mr),
-         results,
-         temp_mr});
-}
+  auto const args    = create_batched_nvcomp_args(inputs, outputs, stream, {temp_mr, temp_mr});
+  rmm::device_uvector<size_t> actual_sizes(inputs.size(), stream, temp_mr);
+  rmm::device_uvector<nvcompStatus_t> statuses(inputs.size(), stream, temp_mr);
 
-batched_cascaded_decompression::batched_cascaded_decompression(
-  batched_cascaded_decompression&&) noexcept = default;
+  // Nothing is allocated on the forked streams; freeing memory on several streams slows later
+  // allocations from a CUDA async memory pool.
+  auto const streams = cudf::detail::fork_streams(stream, group_offsets.size() - 1);
+  for (size_t i = 0; i < streams.size(); ++i) {
+    auto const begin = group_offsets[i];
+    auto const status =
+      nvcompBatchedCascadedDecompressAsync(args.input_data_ptrs.data() + begin,
+                                           args.input_data_sizes.data() + begin,
+                                           args.output_data_sizes.data() + begin,
+                                           actual_sizes.data() + begin,
+                                           group_offsets[i + 1] - begin,
+                                           nullptr,
+                                           0,
+                                           args.output_data_ptrs.data() + begin,
+                                           nvcompBatchedCascadedDecompressDefaultOpts,
+                                           statuses.data() + begin,
+                                           streams[i].get());
+    CHECK_NVCOMP_STATUS(status);
+  }
+  cudf::detail::join_streams(streams, stream);
 
-batched_cascaded_decompression& batched_cascaded_decompression::operator=(
-  batched_cascaded_decompression&&) noexcept = default;
-
-batched_cascaded_decompression::~batched_cascaded_decompression() = default;
-
-void batched_cascaded_decompression::launch(cuda::stream_ref stream)
-{
-  auto& state = *_impl;
-  auto const status =
-    nvcompBatchedCascadedDecompressAsync(state.args.input_data_ptrs.data(),
-                                         state.args.input_data_sizes.data(),
-                                         state.args.output_data_sizes.data(),
-                                         state.actual_bytes.data(),
-                                         state.results.size(),
-                                         nullptr,
-                                         0,
-                                         state.args.output_data_ptrs.data(),
-                                         nvcompBatchedCascadedDecompressDefaultOpts,
-                                         state.statuses.data(),
-                                         stream.get());
-  CHECK_NVCOMP_STATUS(status);
-  update_compression_results(
-    state.statuses, state.actual_bytes, state.results, stream, {state.temp_mr, state.temp_mr});
+  update_compression_results(statuses, actual_sizes, results, stream, {temp_mr, temp_mr});
 }
 
 }  // namespace cudf::io::detail::nvcomp

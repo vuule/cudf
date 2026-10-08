@@ -15,7 +15,6 @@
 
 #include <cuda/stream>
 
-#include <memory>
 #include <optional>
 
 namespace cudf::io::detail::nvcomp {
@@ -190,43 +189,25 @@ void batched_cascaded_compress(type_id value_type,
                                cudf::memory_resources mr);
 
 /**
- * @brief A batch of nvCOMP Cascaded decompression whose device arguments are allocated on
- * construction.
+ * @brief Device batch decompression with nvCOMP Cascaded.
  *
- * `launch` allocates nothing, so the batch can run on a forked stream; freeing memory on several
- * streams slows later allocations from a CUDA async memory pool. All chunks of a batch must have
- * been compressed with the same value type.
+ * nvCOMP decompresses a batch only if all of its chunks were compressed with the same value type,
+ * so the chunks are given in groups of one value type each. Group `i` holds the chunks in
+ * `[group_offsets[i], group_offsets[i + 1])`, and the groups are decompressed concurrently.
+ *
+ * @param[in] inputs List of input buffers
+ * @param[out] outputs List of output buffers
+ * @param[out] results List of output status structures
+ * @param[in] group_offsets Offsets of the chunk groups, starting with 0 and ending with the number
+ * of chunks
+ * @param[in] stream CUDA stream to use
+ * @param[in] mr Memory resources; only the temporary resource is used
  */
-class batched_cascaded_decompression {
- public:
-  /**
-   * @brief Allocates the device arguments for decompressing `inputs` into `outputs`.
-   *
-   * @param[in] inputs List of input buffers
-   * @param[out] outputs List of output buffers
-   * @param[out] results List of output status structures
-   * @param[in] stream CUDA stream to allocate on
-   * @param[in] mr Memory resources; only the temporary resource is used
-   */
-  batched_cascaded_decompression(device_span<device_span<uint8_t const> const> inputs,
+void batched_cascaded_decompress(device_span<device_span<uint8_t const> const> inputs,
                                  device_span<device_span<uint8_t> const> outputs,
                                  device_span<codec_exec_result> results,
+                                 host_span<size_t const> group_offsets,
                                  cuda::stream_ref stream,
                                  cudf::memory_resources mr);
-  batched_cascaded_decompression(batched_cascaded_decompression&&) noexcept;
-  batched_cascaded_decompression& operator=(batched_cascaded_decompression&&) noexcept;
-  ~batched_cascaded_decompression();
-
-  /**
-   * @brief Launches the decompression and writes `results`.
-   *
-   * @param stream CUDA stream to launch on
-   */
-  void launch(cuda::stream_ref stream);
-
- private:
-  struct impl;
-  std::unique_ptr<impl> _impl;
-};
 
 }  // namespace cudf::io::detail::nvcomp
