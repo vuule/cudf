@@ -3064,14 +3064,8 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
 pack_compression select_automatic_compression(compression_region_layout const& layout)
 {
   if (layout.uncompressed_bytes < automatic_min_region_bytes) { return pack_compression::none; }
-  if (layout.kind != pack_region_kind::string_characters) { return pack_compression::cascaded; }
-  // Unlike Cascaded, Snappy can be disabled by the nvCOMP policy. Requiring decompression support
-  // as well keeps automatic output readable by materialize() in the same process.
-  auto const snappy = to_io_compression(pack_compression::snappy);
-  return cudf::io::detail::is_compression_supported(snappy) &&
-             cudf::io::detail::is_decompression_supported(snappy)
-           ? pack_compression::snappy
-           : pack_compression::none;
+  return layout.kind == pack_region_kind::string_characters ? pack_compression::none
+                                                            : pack_compression::cascaded;
 }
 
 struct plan_input {

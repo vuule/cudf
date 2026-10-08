@@ -548,14 +548,12 @@ TEST_F(ExperimentalPackUnpackTest, AutomaticPerRegionCompression)
 
   auto const packed =
     pack_to_device(cx::prepare_pack(input, make_options(cx::pack_compression::automatic)));
-  auto const snappy = is_codec_enabled(cx::pack_compression::snappy) ? cx::pack_compression::snappy
-                                                                     : cx::pack_compression::none;
   // Data and string offsets are INT32 regions.
   for (auto const& entry : read_region_entries(packed.result.metadata)) {
     auto const expected =
       std::map<cudf::type_id, cx::pack_compression>{
         {cudf::type_id::INT32, cx::pack_compression::cascaded},
-        {cudf::type_id::STRING, snappy},
+        {cudf::type_id::STRING, cx::pack_compression::none},
         {cudf::type_id::INT64, cx::pack_compression::none}}
         .at(static_cast<cudf::type_id>(entry.type));
     EXPECT_EQ(static_cast<cx::pack_compression>(entry.compression), expected)

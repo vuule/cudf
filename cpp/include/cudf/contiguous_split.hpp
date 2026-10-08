@@ -279,8 +279,8 @@ namespace experimental {
  */
 enum class pack_compression : int32_t {
   none      = 0,  ///< Preserve the current uncompressed packed representation
-  automatic = 1,  ///< Select a codec for each physical region based on its kind and size, and
-                  ///< store chunks uncompressed when compression saves too little
+  automatic = 1,  ///< Cascaded, except that string characters and small regions stay
+                  ///< uncompressed, and so do chunks that Cascaded shrinks too little
   cascaded = 2,   ///< nvCOMP Cascaded, on values of each region's native width and signedness.
                   ///< Values wider than 64 bits, such as `DECIMAL128`, and string characters are
                   ///< treated as bytes.
