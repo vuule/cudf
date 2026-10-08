@@ -341,39 +341,33 @@ __device__ void copy_buffer(uint8_t* __restrict__ dst,
  * @param index_to_buffer A function that given a `buf_index` returns the destination buffer
  * @param src_bufs Input source buffers
  * @param buf_info Information on the range of values to be copied for each destination buffer
+ * @param dst_offset_base Offset subtracted from each `dst_offset`, used to write a window of the
+ * output into a buffer that starts at that offset
  */
 template <int block_size, typename IndexToDstBuf>
 CUDF_KERNEL void copy_partitions(IndexToDstBuf index_to_buffer,
                                  uint8_t const** src_bufs,
-                                 dst_buf_info* buf_info)
+                                 dst_buf_info* buf_info,
+                                 std::size_t dst_offset_base)
 {
   auto const buf_index     = blockIdx.x;
   auto const src_buf_index = buf_info[buf_index].src_buf_index;
 
   // copy, shifting offsets and validity bits as needed
-  auto& dst = buf_info[buf_index];
+  auto& dst            = buf_info[buf_index];
+  auto* const dst_data = index_to_buffer(buf_index) + (dst.dst_offset - dst_offset_base);
   if (dst.is_offsets) {
     if (dst.element_size == 4) {
-      copy_buffer<block_size, true, int32_t>(index_to_buffer(buf_index) + dst.dst_offset,
-                                             src_bufs[src_buf_index],
-                                             threadIdx.x,
-                                             dst,
-                                             blockDim.x);
+      copy_buffer<block_size, true, int32_t>(
+        dst_data, src_bufs[src_buf_index], threadIdx.x, dst, blockDim.x);
     }
     // wide offsets (for long strings)
     else {
-      copy_buffer<block_size, true, int64_t>(index_to_buffer(buf_index) + dst.dst_offset,
-                                             src_bufs[src_buf_index],
-                                             threadIdx.x,
-                                             dst,
-                                             blockDim.x);
+      copy_buffer<block_size, true, int64_t>(
+        dst_data, src_bufs[src_buf_index], threadIdx.x, dst, blockDim.x);
     }
   } else {
-    copy_buffer<block_size, false>(index_to_buffer(buf_index) + dst.dst_offset,
-                                   src_bufs[src_buf_index],
-                                   threadIdx.x,
-                                   dst,
-                                   blockDim.x);
+    copy_buffer<block_size, false>(dst_data, src_bufs[src_buf_index], threadIdx.x, dst, blockDim.x);
   }
 }
 
@@ -1901,13 +1895,14 @@ void copy_data(int num_batches_to_copy,
                uint8_t** d_dst_bufs,
                device_span<dst_buf_info> d_dst_buf_info,
                uint8_t* user_buffer,
-               cuda::stream_ref stream)
+               cuda::stream_ref stream,
+               std::size_t dst_offset_base = 0)
 {
   constexpr size_type block_size = 256;
   if (user_buffer != nullptr) {
     auto index_to_buffer = [user_buffer] __device__(unsigned int) { return user_buffer; };
     copy_partitions<block_size><<<num_batches_to_copy, block_size, 0, stream.get()>>>(
-      index_to_buffer, d_src_bufs, d_dst_buf_info.data() + starting_batch);
+      index_to_buffer, d_src_bufs, d_dst_buf_info.data() + starting_batch, dst_offset_base);
     CUDF_CUDA_TRY(cudaGetLastError());
   } else {
     auto index_to_buffer = [d_dst_bufs,
@@ -1917,7 +1912,7 @@ void copy_data(int num_batches_to_copy,
       return d_dst_bufs[dst_buf_index];
     };
     copy_partitions<block_size><<<num_batches_to_copy, block_size, 0, stream.get()>>>(
-      index_to_buffer, d_src_bufs, d_dst_buf_info.data() + starting_batch);
+      index_to_buffer, d_src_bufs, d_dst_buf_info.data() + starting_batch, dst_offset_base);
     CUDF_CUDA_TRY(cudaGetLastError());
   }
 }
@@ -2026,8 +2021,8 @@ struct contiguous_split_state {
       auto const& source = source_info[destination_info.src_buf_index];
       auto const source_bytes =
         destination_info.num_elements * static_cast<std::size_t>(destination_info.element_size);
-      // Compression can borrow a source buffer only when contiguous_split would copy its bytes
-      // verbatim. Sliced validity and offset buffers still require the normalization kernel.
+      // Compression can borrow a source buffer only when contiguous_split would copy its bytes.
+      // Sliced validity and offset buffers still require the normalization kernel.
       auto const can_use_source_directly =
         destination_info.src_element_index >= 0 && destination_info.value_shift == 0 &&
         destination_info.bit_shift == 0 && source_bytes <= destination_info.buf_size &&
@@ -2124,9 +2119,8 @@ struct contiguous_split_state {
     return chunk_iter_state->advance_iteration();
   }
 
-  void pack_into(cudf::device_span<uint8_t> const& user_buffer)
+  void pack_into(cudf::device_span<uint8_t> user_buffer)
   {
-    CUDF_FUNC_RANGE();
     CUDF_EXPECTS(num_partitions == 1, "pack_into does not support partitioned input");
     CUDF_EXPECTS(user_buffer.size() >= get_total_contiguous_size(),
                  "The destination buffer is smaller than the prepared packed size");
@@ -2189,16 +2183,14 @@ struct contiguous_split_state {
    */
   void pack_window_into(pack_window const& window, uint8_t* buffer)
   {
-    // copy_data writes each batch at its payload offset relative to the base pointer.
-    auto* const base =
-      reinterpret_cast<uint8_t*>(reinterpret_cast<std::uintptr_t>(buffer) - window.payload_offset);
     copy_data(window.end_item - window.first_item,
               window.first_item,
               src_and_dst_pointers->d_src_bufs,
               src_and_dst_pointers->d_dst_bufs,
               chunk_iter_state->d_batched_dst_buf_info,
-              base,
-              stream);
+              buffer,
+              stream,
+              window.payload_offset);
   }
 
   std::unique_ptr<std::vector<uint8_t>> build_packed_column_metadata()
@@ -2629,15 +2621,15 @@ void copy_chunks(device_span<device_span<uint8_t const> const> inputs,
   auto const sources = cuda::make_transform_iterator(
     inputs.begin(),
     cuda::proclaim_return_type<uint8_t const*>(
-      [] __device__(device_span<uint8_t const> const& span) { return span.data(); }));
+      [] __device__(device_span<uint8_t const> span) { return span.data(); }));
   auto const destinations = cuda::make_transform_iterator(
-    outputs.begin(),
-    cuda::proclaim_return_type<uint8_t*>(
-      [] __device__(device_span<uint8_t> const& span) { return span.data(); }));
+    outputs.begin(), cuda::proclaim_return_type<uint8_t*>([] __device__(device_span<uint8_t> span) {
+      return span.data();
+    }));
   auto const sizes = cuda::make_transform_iterator(
     inputs.begin(),
     cuda::proclaim_return_type<std::size_t>(
-      [] __device__(device_span<uint8_t const> const& span) { return span.size(); }));
+      [] __device__(device_span<uint8_t const> span) { return span.size(); }));
   cudf::detail::batched_memcpy_async(sources, destinations, sizes, inputs.size(), stream);
 }
 

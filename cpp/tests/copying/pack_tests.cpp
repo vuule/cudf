@@ -137,7 +137,7 @@ packed_output pack_to_device(cx::pack_plan const& plan)
   return pack_to(plan, destination_kind::device);
 }
 
-void expect_materializes_to(cudf::table_view const& expected, cx::packed_data_view const& packed)
+void expect_materializes_to(cudf::table_view const& expected, cx::packed_data_view packed)
 {
   auto const materialized = cx::materialize(packed);
   CUDF_TEST_EXPECT_TABLES_EQUAL(expected, materialized->view());
