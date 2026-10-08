@@ -3827,7 +3827,7 @@ void append_packed_buffers(packed_metadata_view::column_view const& column,
 
 }  // namespace
 
-std::vector<pack_region_info> read_packed_regions(std::span<uint8_t const> metadata)
+std::vector<pack_region_info> get_packed_region_info(std::span<uint8_t const> metadata)
 {
   CUDF_FUNC_RANGE();
   auto const parsed = is_compressed_metadata(metadata)

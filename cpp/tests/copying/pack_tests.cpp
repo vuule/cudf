@@ -639,7 +639,7 @@ TEST_F(ExperimentalPackUnpackTest, RegionColumnPaths)
   expect_materializes_to(input, pack_to_device(std::move(builder).build()).view());
 }
 
-TEST_F(ExperimentalPackUnpackTest, ReadPackedRegions)
+TEST_F(ExperimentalPackUnpackTest, GetPackedRegionInfo)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> first({1, 2, 3, 4}, {true, false, true, true});
   cudf::test::strings_column_wrapper words({"a", "", "ccc", "dd"}, {true, false, true, true});
@@ -669,12 +669,12 @@ TEST_F(ExperimentalPackUnpackTest, ReadPackedRegions)
       cx::make_pack_plan_builder(input, make_options(cx::pack_compression::none));
     for (auto const compression : {cx::pack_compression::none, cx::pack_compression::cascaded}) {
       auto const packed = pack_to_device(cx::prepare_pack(input, make_options(compression)));
-      expect_regions(cx::read_packed_regions(packed.result.metadata), builder.regions());
+      expect_regions(cx::get_packed_region_info(packed.result.metadata), builder.regions());
     }
     auto const legacy = cudf::pack(input);
-    expect_regions(cx::read_packed_regions(*legacy.metadata), builder.regions());
+    expect_regions(cx::get_packed_region_info(*legacy.metadata), builder.regions());
   }
-  EXPECT_TRUE(cx::read_packed_regions({}).empty());
+  EXPECT_TRUE(cx::get_packed_region_info({}).empty());
 }
 
 TEST_F(ExperimentalPackUnpackTest, CompressedInputValidation)

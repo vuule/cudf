@@ -614,7 +614,7 @@ std::unique_ptr<table> materialize(
  * @param metadata Host metadata of a packed table
  * @return One description per physical region
  */
-std::vector<pack_region_info> read_packed_regions(std::span<uint8_t const> metadata);
+std::vector<pack_region_info> get_packed_region_info(std::span<uint8_t const> metadata);
 
 }  // namespace experimental
 
