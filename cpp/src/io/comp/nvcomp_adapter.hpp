@@ -9,11 +9,13 @@
 
 #include <cudf/io/detail/nvcomp_adapter.hpp>
 #include <cudf/io/types.hpp>
+#include <cudf/types.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/span.hpp>
 
 #include <cuda/stream>
 
+#include <memory>
 #include <optional>
 
 namespace cudf::io::detail::nvcomp {
@@ -142,5 +144,89 @@ void batched_compress(compression_type compression,
                       device_span<codec_exec_result> results,
                       cuda::stream_ref stream,
                       cudf::memory_resources mr);
+
+/**
+ * @brief Maximum size of uncompressed chunks that can be compressed with nvCOMP Cascaded.
+ *
+ * @returns maximum chunk size
+ */
+[[nodiscard]] size_t cascaded_compress_max_allowed_chunk_size();
+
+/**
+ * @brief Gets input and output alignment requirements for nvCOMP Cascaded compression.
+ *
+ * @returns required alignment
+ */
+[[nodiscard]] size_t cascaded_compress_required_alignment();
+
+/**
+ * @brief Gets the maximum size any chunk could compress to with nvCOMP Cascaded.
+ *
+ * @param value_type Integral type the chunk data is interpreted as
+ * @param max_uncomp_chunk_size Size of the largest uncompressed chunk in the batch
+ * @returns maximum compressed chunk size
+ */
+[[nodiscard]] size_t cascaded_compress_max_output_chunk_size(type_id value_type,
+                                                             size_t max_uncomp_chunk_size);
+
+/**
+ * @brief Device batch compression with nvCOMP Cascaded.
+ *
+ * @param[in] value_type Integral type the data of every chunk is interpreted as; the chunk sizes
+ * must be multiples of its size
+ * @param[in] inputs List of input buffers
+ * @param[out] outputs List of output buffers
+ * @param[out] results List of output status structures
+ * @param[in] max_uncomp_chunk_size Size of the largest uncompressed chunk in the batch
+ * @param[in] stream CUDA stream to use
+ * @param[in] mr Memory resources; only the temporary resource is used
+ */
+void batched_cascaded_compress(type_id value_type,
+                               device_span<device_span<uint8_t const> const> inputs,
+                               device_span<device_span<uint8_t> const> outputs,
+                               device_span<codec_exec_result> results,
+                               size_t max_uncomp_chunk_size,
+                               cuda::stream_ref stream,
+                               cudf::memory_resources mr);
+
+/**
+ * @brief A batch of nvCOMP Cascaded decompression whose device arguments are allocated on
+ * construction.
+ *
+ * `launch` allocates nothing, so the batch can run on a forked stream; freeing memory on several
+ * streams slows later allocations from a CUDA async memory pool. All chunks of a batch must have
+ * been compressed with the same value type.
+ */
+class batched_cascaded_decompression {
+ public:
+  /**
+   * @brief Allocates the device arguments for decompressing `inputs` into `outputs`.
+   *
+   * @param[in] inputs List of input buffers
+   * @param[out] outputs List of output buffers
+   * @param[out] results List of output status structures
+   * @param[in] stream CUDA stream to allocate on
+   * @param[in] mr Memory resources; only the temporary resource is used
+   */
+  batched_cascaded_decompression(device_span<device_span<uint8_t const> const> inputs,
+                                 device_span<device_span<uint8_t> const> outputs,
+                                 device_span<codec_exec_result> results,
+                                 cuda::stream_ref stream,
+                                 cudf::memory_resources mr);
+  batched_cascaded_decompression(batched_cascaded_decompression&&) noexcept;
+  batched_cascaded_decompression& operator=(batched_cascaded_decompression&&) noexcept;
+  ~batched_cascaded_decompression();
+
+  /**
+   * @brief Launches the decompression and writes `results`.
+   *
+   * @param stream CUDA stream to launch on
+   */
+  void launch(cuda::stream_ref stream);
+
+ private:
+  struct impl;
+  std::unique_ptr<impl> _impl;
+};
 
 }  // namespace cudf::io::detail::nvcomp

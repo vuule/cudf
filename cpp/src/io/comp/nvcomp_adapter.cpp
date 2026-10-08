@@ -15,6 +15,7 @@
 #include <cuda/buffer>
 
 #include <io/utilities/hostdevice_vector.hpp>
+#include <nvcomp/cascaded.h>
 #include <nvcomp/deflate.h>
 #include <nvcomp/gzip.h>
 #include <nvcomp/lz4.h>
@@ -935,6 +936,121 @@ void load_nvcomp_library()
     // Perform compression - this will execute an nvCOMP kernel
     batched_compress(compression_type::SNAPPY, hd_inputs, hd_outputs, hd_results, stream, mr);
   });
+}
+
+namespace {
+
+nvcompBatchedCascadedCompressOpts_t cascaded_compress_options(type_id value_type)
+{
+  auto options = nvcompBatchedCascadedCompressDefaultOpts;
+  switch (value_type) {
+    case type_id::INT8: options.type = NVCOMP_TYPE_CHAR; break;
+    case type_id::UINT8: options.type = NVCOMP_TYPE_UCHAR; break;
+    case type_id::INT16: options.type = NVCOMP_TYPE_SHORT; break;
+    case type_id::UINT16: options.type = NVCOMP_TYPE_USHORT; break;
+    case type_id::INT32: options.type = NVCOMP_TYPE_INT; break;
+    case type_id::UINT32: options.type = NVCOMP_TYPE_UINT; break;
+    case type_id::INT64: options.type = NVCOMP_TYPE_LONGLONG; break;
+    case type_id::UINT64: options.type = NVCOMP_TYPE_ULONGLONG; break;
+    default: CUDF_FAIL("Cascaded compression supports only integral value types");
+  }
+  return options;
+}
+
+}  // namespace
+
+size_t cascaded_compress_max_allowed_chunk_size()
+{
+  return nvcompCascadedCompressionMaxAllowedChunkSize;
+}
+
+size_t cascaded_compress_required_alignment() { return nvcompCascadedRequiredCompressionAlignment; }
+
+size_t cascaded_compress_max_output_chunk_size(type_id value_type, size_t max_uncomp_chunk_size)
+{
+  size_t max_comp_chunk_size = 0;
+  auto const status          = nvcompBatchedCascadedCompressGetMaxOutputChunkSize(
+    max_uncomp_chunk_size, cascaded_compress_options(value_type), &max_comp_chunk_size);
+  CHECK_NVCOMP_STATUS(status);
+  return max_comp_chunk_size;
+}
+
+void batched_cascaded_compress(type_id value_type,
+                               device_span<device_span<uint8_t const> const> inputs,
+                               device_span<device_span<uint8_t> const> outputs,
+                               device_span<codec_exec_result> results,
+                               size_t max_uncomp_chunk_size,
+                               cuda::stream_ref stream,
+                               cudf::memory_resources mr)
+{
+  auto const temp_mr = mr.get_temporary_mr();
+  auto args          = create_batched_nvcomp_args(inputs, outputs, stream, {temp_mr, temp_mr});
+  rmm::device_uvector<nvcompStatus_t> statuses(inputs.size(), stream, temp_mr);
+  auto const status = nvcompBatchedCascadedCompressAsync(args.input_data_ptrs.data(),
+                                                         args.input_data_sizes.data(),
+                                                         max_uncomp_chunk_size,
+                                                         inputs.size(),
+                                                         nullptr,
+                                                         0,
+                                                         args.output_data_ptrs.data(),
+                                                         args.output_data_sizes.data(),
+                                                         cascaded_compress_options(value_type),
+                                                         statuses.data(),
+                                                         stream.get());
+  CHECK_NVCOMP_STATUS(status);
+  update_compression_results(statuses, args.output_data_sizes, results, stream, {temp_mr, temp_mr});
+}
+
+struct batched_cascaded_decompression::impl {
+  batched_args args;
+  rmm::device_uvector<size_t> actual_bytes;
+  rmm::device_uvector<nvcompStatus_t> statuses;
+  device_span<codec_exec_result> results;
+  rmm::device_async_resource_ref temp_mr;
+};
+
+batched_cascaded_decompression::batched_cascaded_decompression(
+  device_span<device_span<uint8_t const> const> inputs,
+  device_span<device_span<uint8_t> const> outputs,
+  device_span<codec_exec_result> results,
+  cuda::stream_ref stream,
+  cudf::memory_resources mr)
+{
+  auto const temp_mr = mr.get_temporary_mr();
+  _impl              = std::make_unique<impl>(
+    impl{create_batched_nvcomp_args(inputs, outputs, stream, {temp_mr, temp_mr}),
+         rmm::device_uvector<size_t>(inputs.size(), stream, temp_mr),
+         rmm::device_uvector<nvcompStatus_t>(inputs.size(), stream, temp_mr),
+         results,
+         temp_mr});
+}
+
+batched_cascaded_decompression::batched_cascaded_decompression(
+  batched_cascaded_decompression&&) noexcept = default;
+
+batched_cascaded_decompression& batched_cascaded_decompression::operator=(
+  batched_cascaded_decompression&&) noexcept = default;
+
+batched_cascaded_decompression::~batched_cascaded_decompression() = default;
+
+void batched_cascaded_decompression::launch(cuda::stream_ref stream)
+{
+  auto& state = *_impl;
+  auto const status =
+    nvcompBatchedCascadedDecompressAsync(state.args.input_data_ptrs.data(),
+                                         state.args.input_data_sizes.data(),
+                                         state.args.output_data_sizes.data(),
+                                         state.actual_bytes.data(),
+                                         state.results.size(),
+                                         nullptr,
+                                         0,
+                                         state.args.output_data_ptrs.data(),
+                                         nvcompBatchedCascadedDecompressDefaultOpts,
+                                         state.statuses.data(),
+                                         stream.get());
+  CHECK_NVCOMP_STATUS(status);
+  update_compression_results(
+    state.statuses, state.actual_bytes, state.results, stream, {state.temp_mr, state.temp_mr});
 }
 
 }  // namespace cudf::io::detail::nvcomp

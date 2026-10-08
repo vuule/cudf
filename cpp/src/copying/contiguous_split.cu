@@ -4,7 +4,7 @@
  */
 
 #include "io/comp/compression.hpp"
-#include "io/comp/nvcomp_adapter.cuh"
+#include "io/comp/nvcomp_adapter.hpp"
 
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_view.hpp>
@@ -47,8 +47,6 @@
 #include <thrust/reduce.h>
 #include <thrust/scan.h>
 #include <thrust/transform.h>
-
-#include <nvcomp/cascaded.h>
 
 #include <algorithm>
 #include <bit>
@@ -2515,19 +2513,20 @@ cudf::io::compression_type to_io_compression(pack_compression compression)
   }
 }
 
-nvcompType_t to_nvcomp_type(type_id type, bool is_validity)
+// The integral type nvCOMP Cascaded interprets a buffer as.
+type_id cascaded_value_type(type_id type, bool is_validity)
 {
-  if (is_validity) { return NVCOMP_TYPE_UINT; }
+  if (is_validity) { return type_id::UINT32; }
   switch (type) {
-    case type_id::INT8: return NVCOMP_TYPE_CHAR;
-    case type_id::INT16: return NVCOMP_TYPE_SHORT;
-    case type_id::UINT16: return NVCOMP_TYPE_USHORT;
+    case type_id::INT8:
+    case type_id::INT16:
+    case type_id::UINT16: return type;
     case type_id::INT32:
     case type_id::TIMESTAMP_DAYS:
     case type_id::DURATION_DAYS:
-    case type_id::DECIMAL32: return NVCOMP_TYPE_INT;
+    case type_id::DECIMAL32: return type_id::INT32;
     case type_id::UINT32:
-    case type_id::FLOAT32: return NVCOMP_TYPE_UINT;
+    case type_id::FLOAT32: return type_id::UINT32;
     case type_id::INT64:
     case type_id::TIMESTAMP_SECONDS:
     case type_id::TIMESTAMP_MILLISECONDS:
@@ -2537,22 +2536,20 @@ nvcompType_t to_nvcomp_type(type_id type, bool is_validity)
     case type_id::DURATION_MILLISECONDS:
     case type_id::DURATION_MICROSECONDS:
     case type_id::DURATION_NANOSECONDS:
-    case type_id::DECIMAL64: return NVCOMP_TYPE_LONGLONG;
+    case type_id::DECIMAL64: return type_id::INT64;
     case type_id::UINT64:
-    case type_id::FLOAT64: return NVCOMP_TYPE_ULONGLONG;
+    case type_id::FLOAT64: return type_id::UINT64;
     // Byte data, and types nvCOMP Cascaded cannot represent natively (128-bit values and
     // padding-only structural buffers), use lossless byte-wise compression.
-    default: return NVCOMP_TYPE_UCHAR;
+    default: return type_id::UINT8;
   }
 }
 
 // Cascaded chunks must hold whole values, so regions that do not are compressed as bytes.
-nvcompType_t cascaded_type(type_id type, bool is_validity, std::size_t data_bytes)
+type_id cascaded_type(type_id type, bool is_validity, std::size_t data_bytes)
 {
-  auto const native = to_nvcomp_type(type, is_validity);
-  auto const value_bytes =
-    native == NVCOMP_TYPE_UCHAR ? 1 : (is_validity ? 4 : cudf::size_of(data_type{type}));
-  return data_bytes % value_bytes == 0 ? native : NVCOMP_TYPE_UCHAR;
+  auto const value_type = cascaded_value_type(type, is_validity);
+  return data_bytes % cudf::size_of(data_type{value_type}) == 0 ? value_type : type_id::UINT8;
 }
 
 cudaMemoryType memory_type(void const* ptr)
@@ -2562,24 +2559,15 @@ cudaMemoryType memory_type(void const* ptr)
   return attributes.type;
 }
 
-nvcompBatchedCascadedCompressOpts_t make_cascaded_options(compression_region_layout const& layout)
-{
-  auto result = nvcompBatchedCascadedCompressDefaultOpts;
-  result.type =
-    cascaded_type(layout.type, layout.kind == pack_region_kind::validity, layout.data_bytes);
-  return result;
-}
-
 /**
  * @brief A contiguous range of chunks processed by a single batched codec call.
  *
- * Zstd and Snappy go through the cuIO codec API. Cascaded uses the nvCOMP batched API directly
- * because cuIO does not provide it; its options are per call, so each Cascaded data type is its
- * own batch.
+ * Zstd and Snappy go through the cuIO codec API and Cascaded through the nvCOMP adapter. Cascaded
+ * compresses all chunks of a call as one value type, so each Cascaded value type is its own batch.
  */
 struct chunk_batch {
   pack_compression codec;
-  nvcompBatchedCascadedCompressOpts_t cascaded_options;
+  type_id cascaded_type;
   std::size_t chunk_begin;
   std::size_t chunk_end;
   std::size_t max_chunk_bytes;
@@ -2588,14 +2576,18 @@ struct chunk_batch {
 
 std::size_t max_allowed_chunk_bytes(pack_compression codec)
 {
-  if (codec == pack_compression::cascaded) { return nvcompCascadedCompressionMaxAllowedChunkSize; }
+  if (codec == pack_compression::cascaded) {
+    return cudf::io::detail::nvcomp::cascaded_compress_max_allowed_chunk_size();
+  }
   return cudf::io::detail::compress_max_allowed_chunk_size(to_io_compression(codec))
     .value_or(std::numeric_limits<std::size_t>::max());
 }
 
 std::size_t chunk_alignment(pack_compression codec)
 {
-  if (codec == pack_compression::cascaded) { return nvcompCascadedRequiredCompressionAlignment; }
+  if (codec == pack_compression::cascaded) {
+    return cudf::io::detail::nvcomp::cascaded_compress_required_alignment();
+  }
   return std::max(sizeof(uint64_t),
                   cudf::io::detail::compress_required_chunk_alignment(to_io_compression(codec)));
 }
@@ -2606,11 +2598,8 @@ std::size_t max_compressed_chunk_bytes(chunk_batch const& batch)
     return cudf::io::detail::max_compressed_size(to_io_compression(batch.codec),
                                                  batch.max_chunk_bytes);
   }
-  std::size_t bytes = 0;
-  CUDF_EXPECTS(nvcompBatchedCascadedCompressGetMaxOutputChunkSize(
-                 batch.max_chunk_bytes, batch.cascaded_options, &bytes) == nvcompSuccess,
-               "Failed to query the maximum Cascaded chunk size");
-  return bytes;
+  return cudf::io::detail::nvcomp::cascaded_compress_max_output_chunk_size(batch.cascaded_type,
+                                                                           batch.max_chunk_bytes);
 }
 
 void copy_chunks(device_span<device_span<uint8_t const> const> inputs,
@@ -2651,23 +2640,13 @@ void compress_batch(chunk_batch const& batch,
     return cudf::io::detail::compress(
       to_io_compression(batch.codec), inputs, outputs, results, stream, scratch_resources(temp_mr));
   }
-  auto args = cudf::io::detail::nvcomp::create_batched_nvcomp_args(
-    inputs, outputs, stream, scratch_resources(temp_mr));
-  rmm::device_uvector<nvcompStatus_t> statuses(inputs.size(), stream, temp_mr);
-  CUDF_EXPECTS(nvcompBatchedCascadedCompressAsync(args.input_data_ptrs.data(),
-                                                  args.input_data_sizes.data(),
-                                                  batch.max_chunk_bytes,
-                                                  inputs.size(),
-                                                  nullptr,
-                                                  0,
-                                                  args.output_data_ptrs.data(),
-                                                  args.output_data_sizes.data(),
-                                                  batch.cascaded_options,
-                                                  statuses.data(),
-                                                  stream.get()) == nvcompSuccess,
-               "Failed to launch Cascaded compression");
-  cudf::io::detail::nvcomp::update_compression_results(
-    statuses, args.output_data_sizes, results, stream, scratch_resources(temp_mr));
+  cudf::io::detail::nvcomp::batched_cascaded_compress(batch.cascaded_type,
+                                                      inputs,
+                                                      outputs,
+                                                      results,
+                                                      batch.max_chunk_bytes,
+                                                      stream,
+                                                      scratch_resources(temp_mr));
 }
 
 void decompress_batch(pack_compression codec,
@@ -2690,58 +2669,10 @@ void decompress_batch(pack_compression codec,
                                scratch_resources(temp_mr));
 }
 
-/**
- * @brief A Cascaded decompression call whose device arguments are allocated on construction.
- *
- * Launching on a forked stream then allocates nothing there; freeing memory on several streams
- * slows later allocations from a CUDA async memory pool.
- */
-class cascaded_decompression {
- public:
-  cascaded_decompression(device_span<device_span<uint8_t const> const> inputs,
-                         device_span<device_span<uint8_t> const> outputs,
-                         device_span<codec_exec_result> results,
-                         cuda::stream_ref stream,
-                         rmm::device_async_resource_ref temp_mr)
-    : _args{cudf::io::detail::nvcomp::create_batched_nvcomp_args(
-        inputs, outputs, stream, scratch_resources(temp_mr))},
-      _actual_bytes(inputs.size(), stream, temp_mr),
-      _statuses(inputs.size(), stream, temp_mr),
-      _results{results},
-      _temp_mr{temp_mr}
-  {
-  }
-
-  void launch(cuda::stream_ref stream)
-  {
-    CUDF_EXPECTS(nvcompBatchedCascadedDecompressAsync(_args.input_data_ptrs.data(),
-                                                      _args.input_data_sizes.data(),
-                                                      _args.output_data_sizes.data(),
-                                                      _actual_bytes.data(),
-                                                      _results.size(),
-                                                      nullptr,
-                                                      0,
-                                                      _args.output_data_ptrs.data(),
-                                                      nvcompBatchedCascadedDecompressDefaultOpts,
-                                                      _statuses.data(),
-                                                      stream.get()) == nvcompSuccess,
-                 "Failed to launch Cascaded decompression");
-    cudf::io::detail::nvcomp::update_compression_results(
-      _statuses, _actual_bytes, _results, stream, scratch_resources(_temp_mr));
-  }
-
- private:
-  cudf::io::detail::nvcomp::batched_args _args;
-  rmm::device_uvector<std::size_t> _actual_bytes;
-  rmm::device_uvector<nvcompStatus_t> _statuses;
-  device_span<codec_exec_result> _results;
-  rmm::device_async_resource_ref _temp_mr;
-};
-
 // nvCOMP fails to decompress a Cascaded batch whose chunks have different data types.
 struct decompression_work {
   pack_compression codec;
-  nvcompType_t cascaded_type;
+  type_id cascaded_type;
   std::vector<device_span<uint8_t const>> inputs;
   std::vector<device_span<uint8_t>> outputs;
   std::size_t max_chunk_bytes = 0;
@@ -2789,7 +2720,7 @@ struct prepared_compression_region {
   compression_region_layout layout;
   uint8_t const* source;
   pack_compression compression;
-  nvcompBatchedCascadedCompressOpts_t cascaded_options;
+  type_id cascaded_type;
   bool allow_uncompressed_fallback;
   std::size_t chunk_bytes;
   std::size_t chunk_begin;
@@ -3264,8 +3195,8 @@ struct pack_plan::impl {
         auto const requested = automatic ? select_automatic_compression(layout) : codec;
         CUDF_EXPECTS(is_concrete_codec(requested), "Unsupported pack compression codec");
 
-        auto chunk_bytes      = raw_chunk_bytes;
-        auto cascaded_options = nvcompBatchedCascadedCompressDefaultOpts;
+        auto chunk_bytes = raw_chunk_bytes;
+        auto cascaded    = type_id::UINT8;
         if (requested != pack_compression::none) {
           CUDF_EXPECTS(requested == pack_compression::cascaded ||
                          cudf::io::detail::is_compression_supported(to_io_compression(requested)),
@@ -3277,13 +3208,14 @@ struct pack_plan::impl {
             std::min(
               {compression_chunk_bytes, max_allowed_chunk_bytes(requested), window_budget / 2}) /
               split_align * split_align);
-          cascaded_options = make_cascaded_options(layout);
+          cascaded = cascaded_type(
+            layout.type, layout.kind == pack_region_kind::validity, layout.data_bytes);
         }
         regions.push_back(prepared_compression_region{
           layout,
           packed_base != nullptr ? packed_base + layout.uncompressed_offset : layout.direct_source,
           requested,
-          cascaded_options,
+          cascaded,
           automatic,
           chunk_bytes,
           0,
@@ -3297,13 +3229,12 @@ struct pack_plan::impl {
       std::vector<std::size_t> region_batch;
       for (auto const& region : regions) {
         auto const batch = std::ranges::find_if(batches, [&](auto const& item) {
-          return item.codec == region.compression &&
-                 (item.codec != pack_compression::cascaded ||
-                  item.cascaded_options.type == region.cascaded_options.type);
+          return item.codec == region.compression && (item.codec != pack_compression::cascaded ||
+                                                      item.cascaded_type == region.cascaded_type);
         });
         region_batch.push_back(batch - batches.begin());
         if (batch == batches.end()) {
-          batches.push_back(chunk_batch{region.compression, region.cascaded_options, 0, 0, 0, 0});
+          batches.push_back(chunk_batch{region.compression, region.cascaded_type, 0, 0, 0, 0});
         }
         auto& target           = batches[region_batch.back()];
         target.max_chunk_bytes = std::max(target.max_chunk_bytes, region.chunk_bytes);
@@ -3710,7 +3641,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     stream);
 
   std::vector<decompression_work> work;
-  auto const work_for = [&](pack_compression codec, nvcompType_t cascaded_type) -> auto& {
+  auto const work_for = [&](pack_compression codec, type_id cascaded_type) -> auto& {
     auto iter = std::ranges::find_if(work, [&](auto const& item) {
       return item.codec == codec && item.cascaded_type == cascaded_type;
     });
@@ -3724,7 +3655,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     auto const cascaded =
       compression == pack_compression::cascaded
         ? cascaded_type(static_cast<type_id>(entry.type), entry.is_validity != 0, entry.data_bytes)
-        : NVCOMP_TYPE_UCHAR;
+        : type_id::UINT8;
     auto* const output = static_cast<uint8_t*>(destination);
     for (std::size_t k = 0; k < entry.num_chunks; ++k) {
       auto const c        = entry.chunk_begin + k;
@@ -3736,7 +3667,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                      payload_contains(parsed.chunk_offsets[c], bytes),
                    "Compressed chunk is missing or truncated");
       auto& codec =
-        raw ? work_for(pack_compression::none, NVCOMP_TYPE_UCHAR) : work_for(compression, cascaded);
+        raw ? work_for(pack_compression::none, type_id::UINT8) : work_for(compression, cascaded);
       codec.inputs.emplace_back(input.payload.data() + parsed.chunk_offsets[c], bytes);
       reader.request(codec.inputs.back().data(), bytes);
       codec.outputs.emplace_back(output + offset, expected);
@@ -3800,11 +3731,11 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                       device_span<codec_exec_result>{results}.subspan(begin, count)};
   };
   // Each Cascaded data type needs its own call, so the calls run on forked streams.
-  std::vector<cascaded_decompression> cascaded;
+  std::vector<cudf::io::detail::nvcomp::batched_cascaded_decompression> cascaded;
   for (std::size_t i = 0; i < work.size(); ++i) {
     if (work[i].codec != pack_compression::cascaded) { continue; }
     auto const [d_in, d_out, d_results] = spans(i);
-    cascaded.emplace_back(d_in, d_out, d_results, stream, temp_mr);
+    cascaded.emplace_back(d_in, d_out, d_results, stream, scratch_resources(temp_mr));
   }
   auto const forked = cudf::detail::fork_streams(stream, cascaded.size());
   for (std::size_t k = 0; k < cascaded.size(); ++k) {
