@@ -232,7 +232,7 @@ TEST_F(ExperimentalPackUnpackTest, PreparedPackInto)
         CUDF_TEST_EXPECT_TABLES_EQUAL(input, cx::unpack_view(packed.view()));
       } else {
         EXPECT_LT(packed.result.payload_bytes, plan.sizes().uncompressed_payload_bytes);
-        EXPECT_THROW(cx::unpack_view(packed.view()), cudf::logic_error);
+        EXPECT_THROW(cx::unpack_view(packed.view()), std::invalid_argument);
       }
       expect_materializes_to(input, packed.view());
     }
@@ -273,7 +273,7 @@ TEST_F(ExperimentalPackUnpackTest, PackIntoHostBufferLargerThanStaging)
   // The smallest staging buffer forces the 2 MiB data buffer through several staging windows.
   auto options                 = make_options(cx::pack_compression::none);
   options.staging_buffer_bytes = 1024 * 1024 - 1;
-  EXPECT_THROW(cx::prepare_pack(input, options), cudf::logic_error);
+  EXPECT_THROW(cx::prepare_pack(input, options), std::invalid_argument);
   options.staging_buffer_bytes = 1024 * 1024;
   for (auto const compression : all_codecs) {
     if (!is_codec_enabled(compression)) { continue; }
@@ -405,8 +405,8 @@ TEST_F(ExperimentalPackUnpackTest, PackIntoRejectsInvalidDestination)
   rmm::device_buffer destination(sizes.payload_bytes + sizes.payload_alignment,
                                  cudf::get_default_stream());
   auto const span = as_span(destination);
-  EXPECT_THROW(cx::pack_into(plan, span.first(sizes.payload_bytes - 1)), cudf::logic_error);
-  EXPECT_THROW(cx::pack_into(plan, span.subspan(1, sizes.payload_bytes)), cudf::logic_error);
+  EXPECT_THROW(cx::pack_into(plan, span.first(sizes.payload_bytes - 1)), std::invalid_argument);
+  EXPECT_THROW(cx::pack_into(plan, span.subspan(1, sizes.payload_bytes)), std::invalid_argument);
 }
 
 TEST_F(ExperimentalPackUnpackTest, CompressExistingPackedColumns)
@@ -495,7 +495,7 @@ TEST_F(ExperimentalPackUnpackTest, ExistingPackedColumnsRequireMatchingLayout)
     std::make_unique<std::vector<uint8_t>>(cudf::pack_metadata(input, base, data->size()));
   cudf::packed_columns const packed{std::move(metadata), std::move(data)};
   EXPECT_THROW(cx::make_pack_plan_builder(packed, make_options(cx::pack_compression::cascaded)),
-               cudf::logic_error);
+               std::invalid_argument);
 }
 
 TEST_F(ExperimentalPackUnpackTest, CascadedUsesNativeTypedRegions)

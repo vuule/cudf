@@ -3061,7 +3061,8 @@ std::unique_ptr<detail::contiguous_split_state> make_split_state(cudf::table_vie
 {
   // Copy batches are at most desired_batch_size bytes, and each must fit in a staging window.
   CUDF_EXPECTS(options.staging_buffer_bytes >= desired_batch_size,
-               "The staging buffer must hold at least 1 MiB");
+               "The staging buffer must hold at least 1 MiB",
+               std::invalid_argument);
   // A zero user-buffer size selects the existing whole-table layout. std::nullopt suppresses the
   // output allocation while preserving the already-computed source buffers, destination offsets,
   // batching, and metadata state for pack_into().
@@ -3087,7 +3088,8 @@ plan_input make_plan_input(cudf::packed_columns const& input,
                            cudf::memory_resources mr)
 {
   CUDF_EXPECTS(input.metadata != nullptr && input.gpu_data != nullptr,
-               "Packed input must contain metadata and a device allocation");
+               "Packed input must contain metadata and a device allocation",
+               std::invalid_argument);
   auto state = make_split_state(cudf::unpack(input), options, stream, mr);
   // The metadata records every buffer offset, so equal metadata means the planned layout matches
   // the existing allocation. Empty columns may be described in several ways, but with no bytes
@@ -3096,7 +3098,8 @@ plan_input make_plan_input(cudf::packed_columns const& input,
   CUDF_EXPECTS(
     state->get_total_contiguous_size() == input.gpu_data->size() &&
       (input.gpu_data->size() == 0 || (planned != nullptr && *planned == *input.metadata)),
-    "Packed metadata does not describe the layout of the device allocation");
+    "Packed metadata does not describe the layout of the device allocation",
+    std::invalid_argument);
   return {std::move(state),
           *input.metadata,
           {static_cast<uint8_t const*>(input.gpu_data->data()), input.gpu_data->size()}};
@@ -3162,7 +3165,9 @@ struct pack_plan::impl {
           has_region_configuration ? configured_regions[region_index].codec : options.compression;
         auto const automatic = codec == pack_compression::automatic;
         auto const requested = automatic ? select_automatic_compression(layout) : codec;
-        CUDF_EXPECTS(is_concrete_codec(requested), "Unsupported pack compression codec");
+        CUDF_EXPECTS(is_concrete_codec(requested),
+                     "Unsupported pack compression codec",
+                     std::invalid_argument);
 
         auto chunk_bytes = raw_chunk_bytes;
         auto cascaded    = type_id::UINT8;
@@ -3385,11 +3390,13 @@ pack_result pack_into(pack_plan const& plan,
   auto const& sizes = impl.storage_sizes;
   auto& state       = *impl.input.state;
   CUDF_EXPECTS(destination.size() >= sizes.payload_bytes,
-               "The destination buffer is smaller than the prepared packed size");
+               "The destination buffer is smaller than the prepared packed size",
+               std::invalid_argument);
   CUDF_EXPECTS(
     destination.empty() ||
       reinterpret_cast<std::uintptr_t>(destination.data()) % sizes.payload_alignment == 0,
-    "The destination pointer does not satisfy the prepared payload alignment");
+    "The destination pointer does not satisfy the prepared payload alignment",
+    std::invalid_argument);
   auto const stream  = state.get_stream();
   auto const temp_mr = mr.get_temporary_mr();
   // Host destinations are written with DMA copies through bounded device staging memory, because
@@ -3542,7 +3549,8 @@ table_view unpack_view(packed_data_view input)
 {
   CUDF_FUNC_RANGE();
   CUDF_EXPECTS(!is_compressed_metadata(input.metadata),
-               "Compressed packed data cannot be exposed as a zero-copy table view");
+               "Compressed packed data cannot be exposed as a zero-copy table view",
+               std::invalid_argument);
   if (input.metadata.empty()) { return table_view{}; }
   CUDF_EXPECTS(
     input.payload.empty() || memory_type(input.payload.data()) != cudaMemoryTypeUnregistered ||

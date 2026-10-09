@@ -439,7 +439,7 @@ class pack_plan_builder {
  * Each region initially inherits the codec in `options`. Callers may edit the
  * returned regions before consuming the builder with `build()`.
  *
- * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 1 MiB
+ * @throw std::invalid_argument if `options.staging_buffer_bytes` is less than 1 MiB
  *
  * @param input View of the table to pack
  * @param options Pack options; `options.compression` is each region's initial codec
@@ -461,8 +461,8 @@ pack_plan_builder make_pack_plan_builder(
  * partition produced by `cudf::contiguous_split()`. Each region initially inherits the codec in
  * `options`. Call `build()` directly to apply `options` to every region.
  *
- * @throw cudf::logic_error if `input.metadata` does not describe the layout of `input.gpu_data`
- * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 1 MiB
+ * @throw std::invalid_argument if `input.metadata` does not describe the layout of `input.gpu_data`
+ * @throw std::invalid_argument if `options.staging_buffer_bytes` is less than 1 MiB
  *
  * @param input Existing ordinary, uncompressed packed columns
  * @param options Pack options; `options.compression` is each region's initial codec
@@ -487,7 +487,7 @@ pack_plan_builder make_pack_plan_builder(
  * Payloads are compressed with `pack_compression::automatic` by default. Only
  * `pack_compression::none` produces the exact uncompressed layout that `unpack_view()` accepts.
  *
- * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 1 MiB
+ * @throw std::invalid_argument if `options.staging_buffer_bytes` is less than 1 MiB
  * @throw cudf::logic_error if an explicitly selected codec is disabled
  *
  * @param input View of the table to pack
@@ -523,8 +523,8 @@ struct pack_result {
  *
  * The same plan may be executed repeatedly while its input remains valid and unchanged.
  *
- * @throw cudf::logic_error if `destination` is smaller than `plan.sizes().payload_bytes`
- * @throw cudf::logic_error if `destination` is not aligned to `plan.sizes().payload_alignment`
+ * @throw std::invalid_argument if `destination` is smaller than `plan.sizes().payload_bytes`
+ * @throw std::invalid_argument if `destination` is not aligned to `plan.sizes().payload_alignment`
  * @throw cudf::logic_error if compression fails for a region with a forced codec
  *
  * @param plan Prepared pack plan
@@ -552,7 +552,7 @@ struct packed_data_view {
  * The returned view must not outlive either buffer in `input`.
  * Compressed inputs must be passed to `materialize()` instead.
  *
- * @throw cudf::logic_error if `input.metadata` describes a compressed payload
+ * @throw std::invalid_argument if `input.metadata` describes a compressed payload
  * @throw cudf::logic_error if the payload is pageable host memory and the device cannot access
  * pageable memory
  * @throw cudf::logic_error if `input.metadata` is truncated or malformed
