@@ -439,7 +439,7 @@ class pack_plan_builder {
  * Each region initially inherits the codec in `options`. Callers may edit the
  * returned regions before consuming the builder with `build()`.
  *
- * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
+ * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 1 MiB
  *
  * @param input View of the table to pack
  * @param options Pack options; `options.compression` is each region's initial codec
@@ -462,7 +462,7 @@ pack_plan_builder make_pack_plan_builder(
  * `options`. Call `build()` directly to apply `options` to every region.
  *
  * @throw cudf::logic_error if `input.metadata` does not describe the layout of `input.gpu_data`
- * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
+ * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 1 MiB
  *
  * @param input Existing ordinary, uncompressed packed columns
  * @param options Pack options; `options.compression` is each region's initial codec
@@ -487,7 +487,7 @@ pack_plan_builder make_pack_plan_builder(
  * Payloads are compressed with `pack_compression::automatic` by default. Only
  * `pack_compression::none` produces the exact uncompressed layout that `unpack_view()` accepts.
  *
- * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 256
+ * @throw cudf::logic_error if `options.staging_buffer_bytes` is less than 1 MiB
  * @throw cudf::logic_error if an explicitly selected codec is disabled
  *
  * @param input View of the table to pack

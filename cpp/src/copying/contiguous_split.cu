@@ -48,7 +48,6 @@
 #include <thrust/transform.h>
 
 #include <algorithm>
-#include <bit>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -1830,7 +1829,6 @@ std::unique_ptr<chunk_iteration_state> chunk_iteration_state::create(
  * @param num_partitions the number of partitions (1 meaning no splits)
  * @param user_buffer_size if non-zero, it is the size in bytes that 1MB batches should be
  *        grouped in, as different iterations.
- * @param batch_size the maximum size in bytes of a batch, a power of two
  * @param stream Optional CUDA stream on which to execute kernels
  * @param temp_mr A memory resource for temporary and scratch space
  *
@@ -1841,7 +1839,6 @@ std::unique_ptr<chunk_iteration_state> compute_batches(int num_bufs,
                                                        std::size_t const* const h_buf_sizes,
                                                        std::size_t num_partitions,
                                                        std::size_t user_buffer_size,
-                                                       std::size_t batch_size,
                                                        cuda::stream_ref stream,
                                                        rmm::device_async_resource_ref temp_mr)
 {
@@ -1857,7 +1854,7 @@ std::unique_ptr<chunk_iteration_state> compute_batches(int num_bufs,
     d_dst_buf_info + num_bufs,
     batches.begin(),
     cuda::proclaim_return_type<cuda::std::pair<std::size_t, std::size_t>>(
-      [desired_batch_size = batch_size] __device__(
+      [desired_batch_size = desired_batch_size] __device__(
         dst_buf_info const& buf) -> cuda::std::pair<std::size_t, std::size_t> {
         // Total bytes for this incoming partition
         std::size_t const bytes = buf.num_elements * static_cast<std::size_t>(buf.element_size);
@@ -2130,23 +2127,6 @@ struct contiguous_split_state {
   }
 
   /**
-   * @brief Recompute the copy batches so that none exceeds `batch_size` bytes.
-   */
-  void rebatch(std::size_t batch_size)
-  {
-    CUDF_EXPECTS(num_partitions == 1, "rebatch does not support partitioned input");
-    if (is_empty) { return; }
-    chunk_iter_state = compute_batches(num_bufs,
-                                       partition_buf_size_and_dst_buf_info->d_dst_buf_info.data(),
-                                       partition_buf_size_and_dst_buf_info->h_buf_sizes,
-                                       num_partitions,
-                                       user_buffer_size,
-                                       batch_size,
-                                       stream,
-                                       temp_mr);
-  }
-
-  /**
    * @brief Group the copy batches into windows whose output spans at most `max_bytes`.
    */
   [[nodiscard]] std::vector<pack_window> compute_pack_windows(std::size_t max_bytes) const
@@ -2255,7 +2235,6 @@ struct contiguous_split_state {
                                        partition_buf_size_and_dst_buf_info->h_buf_sizes,
                                        num_partitions,
                                        user_buffer_size,
-                                       desired_batch_size,
                                        stream,
                                        temp_mr);
 
@@ -3080,8 +3059,9 @@ std::unique_ptr<detail::contiguous_split_state> make_split_state(cudf::table_vie
                                                                  cuda::stream_ref stream,
                                                                  cudf::memory_resources mr)
 {
-  CUDF_EXPECTS(options.staging_buffer_bytes >= 4 * split_align,
-               "The staging buffer must hold at least 256 bytes");
+  // Copy batches are at most desired_batch_size bytes, and each must fit in a staging window.
+  CUDF_EXPECTS(options.staging_buffer_bytes >= desired_batch_size,
+               "The staging buffer must hold at least 1 MiB");
   // A zero user-buffer size selects the existing whole-table layout. std::nullopt suppresses the
   // output allocation while preserving the already-computed source buffers, destination offsets,
   // batching, and metadata state for pack_into().
@@ -3150,12 +3130,7 @@ struct pack_plan::impl {
 
     if (uncompressed_bytes > 0 && !uses_compressed_metadata) {
       // The destination kind is known only in pack_into(), so any uncompressed plan must be able to
-      // stage host output, one window of copy batches at a time. Compressed plans stage chunks
-      // instead and keep the default batches.
-      if (auto const batch_bytes = std::bit_floor(options.staging_buffer_bytes);
-          batch_bytes < desired_batch_size) {
-        input.state->rebatch(batch_bytes);
-      }
+      // stage host output, one window of copy batches at a time.
       windows = input.state->compute_pack_windows(options.staging_buffer_bytes);
       for (auto const& window : windows) {
         max_window_bytes = std::max(max_window_bytes, window.bytes);

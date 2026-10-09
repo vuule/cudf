@@ -248,21 +248,15 @@ TEST_F(ExperimentalPackUnpackTest, PackIntoHost)
 
   for (auto const compression : all_codecs) {
     if (!is_codec_enabled(compression)) { continue; }
-    for (auto const windowed : {false, true}) {
-      auto options = make_options(compression);
-      // A small staging buffer forces pack_into() through many staging windows.
-      if (windowed) { options.staging_buffer_bytes = 8 * 1024; }
-      auto const plan = cx::prepare_pack(input, options);
-      for (auto const kind : {destination_kind::pinned, destination_kind::pageable}) {
-        SCOPED_TRACE(static_cast<int>(compression));
-        SCOPED_TRACE(windowed);
-        SCOPED_TRACE(static_cast<int>(kind));
-        auto const packed = pack_to(plan, kind);
-        if (compression == cx::pack_compression::none && kind == destination_kind::pinned) {
-          CUDF_TEST_EXPECT_TABLES_EQUAL(input, cx::unpack_view(packed.view()));
-        }
-        expect_materializes_to(input, packed.view());
+    auto const plan = cx::prepare_pack(input, make_options(compression));
+    for (auto const kind : {destination_kind::pinned, destination_kind::pageable}) {
+      SCOPED_TRACE(static_cast<int>(compression));
+      SCOPED_TRACE(static_cast<int>(kind));
+      auto const packed = pack_to(plan, kind);
+      if (compression == cx::pack_compression::none && kind == destination_kind::pinned) {
+        CUDF_TEST_EXPECT_TABLES_EQUAL(input, cx::unpack_view(packed.view()));
       }
+      expect_materializes_to(input, packed.view());
     }
   }
 }
@@ -276,16 +270,23 @@ TEST_F(ExperimentalPackUnpackTest, PackIntoHostBufferLargerThanStaging)
     values, values + num_rows, cudf::test::iterators::null_at(7));
   auto const input = cudf::table_view{{numbers}};
 
-  // The 2 MiB data buffer spans several 1 MiB copy batches, each larger than the staging buffer.
+  // The smallest staging buffer forces the 2 MiB data buffer through several staging windows.
   auto options                 = make_options(cx::pack_compression::none);
-  options.staging_buffer_bytes = 64 * 1024 + 3 * 64;
-  auto const plan              = cx::prepare_pack(input, options);
-  for (auto const kind : {destination_kind::pinned, destination_kind::pageable}) {
-    SCOPED_TRACE(static_cast<int>(kind));
-    expect_materializes_to(input, pack_to(plan, kind).view());
+  options.staging_buffer_bytes = 1024 * 1024 - 1;
+  EXPECT_THROW(cx::prepare_pack(input, options), cudf::logic_error);
+  options.staging_buffer_bytes = 1024 * 1024;
+  for (auto const compression : all_codecs) {
+    if (!is_codec_enabled(compression)) { continue; }
+    options.compression = compression;
+    auto const plan     = cx::prepare_pack(input, options);
+    for (auto const kind : {destination_kind::pinned, destination_kind::pageable}) {
+      SCOPED_TRACE(static_cast<int>(compression));
+      SCOPED_TRACE(static_cast<int>(kind));
+      expect_materializes_to(input, pack_to(plan, kind).view());
+    }
   }
 
-  // A builder whose regions all end up uncompressed is batched for staging only in build().
+  // A builder whose regions all end up uncompressed stages output through copy windows.
   options.compression = cx::pack_compression::automatic;
   auto builder        = cx::make_pack_plan_builder(input, options);
   for (auto& region : builder.regions()) {
