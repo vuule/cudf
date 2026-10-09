@@ -2112,9 +2112,9 @@ struct contiguous_split_state {
     return chunk_iter_state->advance_iteration();
   }
 
-  void pack_into(cudf::device_span<uint8_t> user_buffer)
+  void copy_into(cudf::device_span<uint8_t> user_buffer)
   {
-    CUDF_EXPECTS(num_partitions == 1, "pack_into does not support partitioned input");
+    CUDF_EXPECTS(num_partitions == 1, "copy_into does not support partitioned input");
     CUDF_EXPECTS(user_buffer.size() >= get_total_contiguous_size(),
                  "The destination buffer is smaller than the prepared packed size");
 
@@ -2123,7 +2123,7 @@ struct contiguous_split_state {
     // Do not advance the iterator: a prepared plan is intentionally reusable.
     auto const num_batches =
       std::get<1>(chunk_iter_state->get_current_starting_index_and_buff_count());
-    pack_window_into({0, num_batches, 0, get_total_contiguous_size()}, user_buffer.data());
+    copy_window_into({0, num_batches, 0, get_total_contiguous_size()}, user_buffer.data());
   }
 
   /**
@@ -2157,7 +2157,7 @@ struct contiguous_split_state {
   /**
    * @brief Pack the payload bytes covered by `window` into `buffer`, which holds `window.bytes`.
    */
-  void pack_window_into(pack_window const& window, uint8_t* buffer)
+  void copy_window_into(pack_window const& window, uint8_t* buffer)
   {
     copy_data(window.end_item - window.first_item,
               window.first_item,
@@ -2238,7 +2238,8 @@ struct contiguous_split_state {
                                        stream,
                                        temp_mr);
 
-    // allocate output partition buffers, in the non-chunked case
+    // allocate output partition buffers for contiguous_split; chunked_pack and prepared pack plans
+    // pass no `mr` and write into caller-provided memory
     if (user_buffer_size == 0 && mr.has_value()) {
       out_buffers.reserve(num_partitions);
       auto h_buf_sizes = partition_buf_size_and_dst_buf_info->h_buf_sizes;
@@ -2491,20 +2492,22 @@ using cudf::io::detail::codec_status;
 }
 
 // The integral type nvCOMP Cascaded interprets a buffer as.
-[[nodiscard]] type_id cascaded_value_type(type_id type, bool is_validity)
+[[nodiscard]] type_id cascaded_type(type_id type, bool is_validity)
 {
   if (is_validity) { return type_id::UINT32; }
   switch (type) {
     case type_id::INT8:
+    case type_id::UINT8:
     case type_id::INT16:
-    case type_id::UINT16: return type;
+    case type_id::UINT16:
     case type_id::INT32:
+    case type_id::UINT32:
+    case type_id::INT64:
+    case type_id::UINT64: return type;
     case type_id::TIMESTAMP_DAYS:
     case type_id::DURATION_DAYS:
     case type_id::DECIMAL32: return type_id::INT32;
-    case type_id::UINT32:
     case type_id::FLOAT32: return type_id::UINT32;
-    case type_id::INT64:
     case type_id::TIMESTAMP_SECONDS:
     case type_id::TIMESTAMP_MILLISECONDS:
     case type_id::TIMESTAMP_MICROSECONDS:
@@ -2514,19 +2517,11 @@ using cudf::io::detail::codec_status;
     case type_id::DURATION_MICROSECONDS:
     case type_id::DURATION_NANOSECONDS:
     case type_id::DECIMAL64: return type_id::INT64;
-    case type_id::UINT64:
     case type_id::FLOAT64: return type_id::UINT64;
     // Byte data, and types nvCOMP Cascaded cannot represent natively (128-bit values and
     // padding-only structural buffers), use lossless byte-wise compression.
     default: return type_id::UINT8;
   }
-}
-
-// Cascaded chunks must hold whole values, so regions that do not are compressed as bytes.
-[[nodiscard]] type_id cascaded_type(type_id type, bool is_validity, std::size_t data_bytes)
-{
-  auto const value_type = cascaded_value_type(type, is_validity);
-  return data_bytes % cudf::size_of(data_type{value_type}) == 0 ? value_type : type_id::UINT8;
 }
 
 [[nodiscard]] cudaMemoryType memory_type(void const* ptr)
@@ -3180,8 +3175,7 @@ struct pack_plan::impl {
             std::min(
               {compression_chunk_bytes, max_allowed_chunk_bytes(requested), window_budget / 2}) /
               split_align * split_align);
-          cascaded = cascaded_type(
-            layout.type, layout.kind == pack_region_kind::validity, layout.data_bytes);
+          cascaded = cascaded_type(layout.type, layout.kind == pack_region_kind::validity);
         }
         regions.emplace_back(
           layout,
@@ -3411,17 +3405,17 @@ pack_result pack_into(pack_plan const& plan,
     if (to_host) {
       rmm::device_buffer staging(impl.max_window_bytes, stream, temp_mr);
       for (auto const& window : impl.windows) {
-        state.pack_window_into(window, static_cast<uint8_t*>(staging.data()));
+        state.copy_window_into(window, static_cast<uint8_t*>(staging.data()));
         copy_to_host(window.payload_offset, staging.data(), window.bytes);
       }
     } else {
-      state.pack_into({destination.data(), destination.size()});
+      state.copy_into({destination.data(), destination.size()});
     }
     return pack_result{impl.input.metadata, sizes.uncompressed_payload_bytes};
   }
 
   if (impl.staging_buffer != nullptr) {
-    state.pack_into(
+    state.copy_into(
       {static_cast<uint8_t*>(impl.staging_buffer->data()), sizes.uncompressed_payload_bytes});
   }
 
@@ -3624,7 +3618,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     auto const compression = static_cast<pack_compression>(entry.compression);
     auto const cascaded =
       compression == pack_compression::cascaded
-        ? cascaded_type(static_cast<type_id>(entry.type), entry.is_validity != 0, entry.data_bytes)
+        ? cascaded_type(static_cast<type_id>(entry.type), entry.is_validity != 0)
         : type_id::UINT8;
     auto* const output = static_cast<uint8_t*>(destination);
     for (std::size_t k = 0; k < entry.num_chunks; ++k) {
