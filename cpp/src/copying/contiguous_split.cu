@@ -56,6 +56,7 @@
 #include <stdexcept>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 
 namespace cudf {
 namespace {
@@ -2991,8 +2992,8 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
   }
   std::ranges::sort(offsets);
   offsets.erase(std::ranges::unique(offsets).begin(), offsets.end());
-  CUDF_EXPECTS(offsets.empty() || (offsets.front() >= 0 &&
-                                   static_cast<std::size_t>(offsets.back()) < input.payload.size()),
+  CUDF_EXPECTS(offsets.empty() ||
+                 (offsets.front() >= 0 && std::cmp_less(offsets.back(), input.payload.size())),
                "Packed column buffer lies outside the payload");
 
   std::vector<uint8_t const*> sources;
@@ -3653,7 +3654,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     auto const entry  = std::ranges::lower_bound(
       parsed.entries, target, {}, &compressed_metadata_entry::uncompressed_offset);
     CUDF_EXPECTS(entry != parsed.entries.end() && entry->uncompressed_offset == target &&
-                   static_cast<bool>(entry->is_validity) == is_validity,
+                   (entry->is_validity != 0) == is_validity,
                  "Compressed regions do not match the packed column schema at offset " +
                    std::to_string(target));
     CUDF_EXPECTS(entry->uncompressed_bytes >= required_bytes,
