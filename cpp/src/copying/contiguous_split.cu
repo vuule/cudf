@@ -2012,9 +2012,8 @@ struct contiguous_split_state {
     regions.reserve(num_bufs);
     for (auto const& destination_info : partition_buf_size_and_dst_buf_info->h_dst_buf_info) {
       if (destination_info.buf_size == 0) { continue; }
-      auto const& source = source_info[destination_info.src_buf_index];
-      auto const source_bytes =
-        destination_info.num_elements * static_cast<std::size_t>(destination_info.element_size);
+      auto const& source      = source_info[destination_info.src_buf_index];
+      auto const source_bytes = destination_info.num_elements * destination_info.element_size;
       // Compression can borrow a source buffer only when contiguous_split would copy its bytes.
       // Sliced validity and offset buffers still require the normalization kernel.
       auto const can_use_source_directly =
@@ -2137,8 +2136,8 @@ struct contiguous_split_state {
     std::vector<pack_window> windows;
     std::size_t end = 0;
     for (std::size_t i = 0; i < batches.size(); ++i) {
-      auto const bytes = util::round_up_safe(
-        batches[i].num_elements * static_cast<std::size_t>(batches[i].element_size), split_align);
+      auto const bytes =
+        util::round_up_safe(batches[i].num_elements * batches[i].element_size, split_align);
       if (bytes == 0) { continue; }
       auto const begin = batches[i].dst_offset;
       CUDF_EXPECTS(begin >= end, "Copy batches are not ordered by destination offset");
@@ -2782,8 +2781,8 @@ struct parsed_compressed_metadata {
   CUDF_EXPECTS(header.version == compressed_metadata_version,
                "Packed metadata is not a supported compressed metadata version");
   auto const entries_offset = sizeof(compressed_metadata_header);
-  auto const chunks_offset  = entries_offset + static_cast<std::size_t>(header.num_regions) *
-                                                sizeof(compressed_metadata_entry);
+  auto const chunks_offset =
+    entries_offset + header.num_regions * sizeof(compressed_metadata_entry);
   CUDF_EXPECTS(chunks_offset <= metadata.size() &&
                  header.num_chunks <= (metadata.size() - chunks_offset) / sizeof(uint64_t),
                "Compressed-region metadata has invalid bounds");
@@ -2791,11 +2790,10 @@ struct parsed_compressed_metadata {
   CUDF_EXPECTS(header.legacy_metadata_bytes == metadata.size() - legacy_offset,
                "Compressed-region metadata has invalid bounds");
 
-  parsed_compressed_metadata result{
-    static_cast<std::size_t>(header.uncompressed_payload_bytes),
-    std::vector<compressed_metadata_entry>(header.num_regions),
-    std::vector<uint64_t>(header.num_chunks),
-    metadata.subspan(legacy_offset, static_cast<std::size_t>(header.legacy_metadata_bytes))};
+  parsed_compressed_metadata result{header.uncompressed_payload_bytes,
+                                    std::vector<compressed_metadata_entry>(header.num_regions),
+                                    std::vector<uint64_t>(header.num_chunks),
+                                    metadata.subspan(legacy_offset, header.legacy_metadata_bytes)};
   std::memcpy(result.entries.data(),
               metadata.data() + entries_offset,
               result.entries.size() * sizeof(compressed_metadata_entry));
@@ -2847,11 +2845,10 @@ std::unique_ptr<column> allocate_materialized_column(
 
   rmm::device_buffer data;
   if (metadata.data_offset() != -1) {
-    auto const required_bytes =
-      is_fixed_width(metadata.type())
-        ? static_cast<std::size_t>(metadata.num_rows()) * size_of(metadata.type())
-        : std::size_t{0};
-    data = allocate_buffer(
+    auto const required_bytes = is_fixed_width(metadata.type())
+                                  ? metadata.num_rows() * size_of(metadata.type())
+                                  : std::size_t{0};
+    data                      = allocate_buffer(
       std::type_identity<rmm::device_buffer>{}, metadata.data_offset(), required_bytes);
   }
 
@@ -3007,8 +3004,8 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
     auto const end = next == offsets.end() ? input.payload.size() : static_cast<std::size_t>(*next);
     // A payload span longer than the packed data would otherwise oversize its last buffer.
     auto const bytes = next == offsets.end() && required_bytes > 0
-                         ? std::min(required_bytes, end - static_cast<std::size_t>(offset))
-                         : end - static_cast<std::size_t>(offset);
+                         ? std::min(required_bytes, end - offset)
+                         : end - offset;
     CUDF_EXPECTS(bytes >= required_bytes, "Packed column buffer is smaller than its column");
     auto buffer = allocate_output_buffer<Buffer>(bytes, stream, mr.get_output_mr());
     sources.push_back(input.payload.data() + offset);
@@ -3775,8 +3772,7 @@ void append_packed_buffers(packed_metadata_view::column_view const& column,
 {
   auto const add = [&](int64_t offset, pack_region_kind kind, type_id type, std::size_t bytes) {
     if (offset == -1) { return; }
-    buffers.emplace_back(
-      static_cast<std::size_t>(offset), pack_region_info{0, path, kind, type, 0}, bytes);
+    buffers.emplace_back(offset, pack_region_info{0, path, kind, type, 0}, bytes);
   };
   auto const rows = static_cast<std::size_t>(column.num_rows());
   auto const type = column.type();
