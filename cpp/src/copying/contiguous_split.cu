@@ -2656,7 +2656,7 @@ constexpr std::size_t automatic_min_region_bytes = 4 * 1024;
 constexpr std::size_t automatic_min_savings_bytes = 256;
 
 // Leads with a version, like legacy packed metadata, so the first field identifies the format.
-struct compressed_metadata_header {
+struct compression_metadata_header {
   int32_t version;
   uint32_t num_regions;
   uint64_t num_chunks;
@@ -2664,7 +2664,7 @@ struct compressed_metadata_header {
   uint64_t uncompressed_payload_bytes;
 };
 
-struct compressed_metadata_entry {
+struct compression_metadata_entry {
   uint64_t uncompressed_offset;
   uint64_t uncompressed_bytes;
   uint64_t data_bytes;   ///< Size of the leading data stored in chunks; the rest is padding
@@ -2678,8 +2678,8 @@ struct compressed_metadata_entry {
 };
 
 // Shares the version sequence of legacy packed metadata and must not collide with it.
-constexpr int32_t compressed_metadata_version = 3;
-static_assert(compressed_metadata_version > cudf::detail::packed_metadata_version);
+constexpr int32_t compression_metadata_version = 3;
+static_assert(compression_metadata_version > cudf::detail::packed_metadata_version);
 
 struct prepared_compression_region {
   compression_region_layout layout;
@@ -2703,14 +2703,14 @@ struct chunk_descriptor {
 };
 
 template <typename T>
-void append_pod(std::vector<uint8_t>& output, T const* values, std::size_t count = 1)
+void append_bytes(std::vector<uint8_t>& output, std::span<T const> values)
 {
-  auto const begin = reinterpret_cast<uint8_t const*>(values);
-  output.insert(output.end(), begin, begin + count * sizeof(T));
+  auto const begin = reinterpret_cast<uint8_t const*>(values.data());
+  output.insert(output.end(), begin, begin + values.size_bytes());
 }
 
 template <typename T>
-[[nodiscard]] T read_pod(std::span<uint8_t const> input, std::size_t offset)
+[[nodiscard]] T read_bytes(std::span<uint8_t const> input, std::size_t offset)
 {
   CUDF_EXPECTS(offset <= input.size() && sizeof(T) <= input.size() - offset,
                "Compressed region metadata is truncated");
@@ -2719,59 +2719,58 @@ template <typename T>
   return value;
 }
 
-[[nodiscard]] std::size_t compressed_metadata_size(std::size_t legacy_bytes,
-                                                   std::size_t num_regions,
-                                                   std::size_t num_chunks)
+[[nodiscard]] std::size_t compression_metadata_size(std::size_t legacy_bytes,
+                                                    std::size_t num_regions,
+                                                    std::size_t num_chunks)
 {
-  return sizeof(compressed_metadata_header) + num_regions * sizeof(compressed_metadata_entry) +
+  return sizeof(compression_metadata_header) + num_regions * sizeof(compression_metadata_entry) +
          num_chunks * sizeof(uint64_t) + legacy_bytes;
 }
 
-[[nodiscard]] std::vector<uint8_t> make_compressed_metadata(
-  std::vector<uint8_t> const& legacy_metadata,
+[[nodiscard]] std::vector<uint8_t> make_compression_metadata(
+  std::span<uint8_t const> legacy_metadata,
   std::size_t uncompressed_payload_bytes,
-  std::vector<compressed_metadata_entry> const& entries,
-  std::vector<uint64_t> const& chunk_offsets)
+  std::span<compression_metadata_entry const> entries,
+  std::span<uint64_t const> chunk_offsets)
 {
   CUDF_EXPECTS(entries.size() <= std::numeric_limits<uint32_t>::max(),
                "Too many compressed regions");
   std::vector<uint8_t> output;
   output.reserve(
-    compressed_metadata_size(legacy_metadata.size(), entries.size(), chunk_offsets.size()));
-  compressed_metadata_header const header{compressed_metadata_version,
-                                          static_cast<uint32_t>(entries.size()),
-                                          chunk_offsets.size(),
-                                          legacy_metadata.size(),
-                                          uncompressed_payload_bytes};
-  append_pod(output, &header);
-  append_pod(output, entries.data(), entries.size());
-  append_pod(output, chunk_offsets.data(), chunk_offsets.size());
-  append_pod(output, legacy_metadata.data(), legacy_metadata.size());
+    compression_metadata_size(legacy_metadata.size(), entries.size(), chunk_offsets.size()));
+  compression_metadata_header const header{compression_metadata_version,
+                                           static_cast<uint32_t>(entries.size()),
+                                           chunk_offsets.size(),
+                                           legacy_metadata.size(),
+                                           uncompressed_payload_bytes};
+  append_bytes(output, std::span{&header, 1});
+  append_bytes(output, entries);
+  append_bytes(output, chunk_offsets);
+  append_bytes(output, legacy_metadata);
   return output;
 }
 
-struct parsed_compressed_metadata {
+struct compression_metadata {
   std::size_t uncompressed_payload_bytes;
-  std::vector<compressed_metadata_entry> entries;
+  std::vector<compression_metadata_entry> entries;
   std::vector<uint64_t> chunk_offsets;
   std::span<uint8_t const> legacy_metadata;
 };
 
-[[nodiscard]] bool is_compressed_metadata(std::span<uint8_t const> metadata)
+[[nodiscard]] bool has_compression_metadata(std::span<uint8_t const> metadata)
 {
   return metadata.size() >= sizeof(int32_t) &&
-         read_pod<int32_t>(metadata, 0) == compressed_metadata_version;
+         read_bytes<int32_t>(metadata, 0) == compression_metadata_version;
 }
 
-[[nodiscard]] parsed_compressed_metadata parse_compressed_metadata(
-  std::span<uint8_t const> metadata)
+[[nodiscard]] compression_metadata read_compression_metadata(std::span<uint8_t const> metadata)
 {
-  auto const header = read_pod<compressed_metadata_header>(metadata, 0);
-  CUDF_EXPECTS(header.version == compressed_metadata_version,
-               "Packed metadata is not a supported compressed metadata version");
-  auto const entries_offset = sizeof(compressed_metadata_header);
+  auto const header = read_bytes<compression_metadata_header>(metadata, 0);
+  CUDF_EXPECTS(header.version == compression_metadata_version,
+               "Packed metadata is not a supported compression metadata version");
+  auto const entries_offset = sizeof(compression_metadata_header);
   auto const chunks_offset =
-    entries_offset + header.num_regions * sizeof(compressed_metadata_entry);
+    entries_offset + header.num_regions * sizeof(compression_metadata_entry);
   CUDF_EXPECTS(chunks_offset <= metadata.size() &&
                  header.num_chunks <= (metadata.size() - chunks_offset) / sizeof(uint64_t),
                "Compressed-region metadata has invalid bounds");
@@ -2779,13 +2778,13 @@ struct parsed_compressed_metadata {
   CUDF_EXPECTS(header.legacy_metadata_bytes == metadata.size() - legacy_offset,
                "Compressed-region metadata has invalid bounds");
 
-  parsed_compressed_metadata result{header.uncompressed_payload_bytes,
-                                    std::vector<compressed_metadata_entry>(header.num_regions),
-                                    std::vector<uint64_t>(header.num_chunks),
-                                    metadata.subspan(legacy_offset, header.legacy_metadata_bytes)};
+  compression_metadata result{header.uncompressed_payload_bytes,
+                              std::vector<compression_metadata_entry>(header.num_regions),
+                              std::vector<uint64_t>(header.num_chunks),
+                              metadata.subspan(legacy_offset, header.legacy_metadata_bytes)};
   std::memcpy(result.entries.data(),
               metadata.data() + entries_offset,
-              result.entries.size() * sizeof(compressed_metadata_entry));
+              result.entries.size() * sizeof(compression_metadata_entry));
   std::memcpy(result.chunk_offsets.data(),
               metadata.data() + chunks_offset,
               result.chunk_offsets.size() * sizeof(uint64_t));
@@ -3105,7 +3104,7 @@ struct pack_plan::impl {
     auto const uncompressed_bytes       = input.state->get_total_contiguous_size();
     auto const stream                   = input.state->get_stream();
     auto const has_region_configuration = !configured_regions.empty();
-    auto const uses_compressed_metadata =
+    auto const uses_compression_metadata =
       has_region_configuration
         ? std::ranges::any_of(
             configured_regions,
@@ -3117,7 +3116,7 @@ struct pack_plan::impl {
     auto const raw_chunk_bytes =
       std::min(max_raw_chunk_bytes, window_budget) / split_align * split_align;
 
-    if (uncompressed_bytes > 0 && !uses_compressed_metadata) {
+    if (uncompressed_bytes > 0 && !uses_compression_metadata) {
       // The destination kind is known only in pack_into(), so any uncompressed plan must be able to
       // stage host output, one window of copy batches at a time.
       windows = input.state->compute_pack_windows(options.staging_buffer_bytes);
@@ -3126,7 +3125,7 @@ struct pack_plan::impl {
       }
     }
 
-    if (uncompressed_bytes > 0 && uses_compressed_metadata) {
+    if (uncompressed_bytes > 0 && uses_compression_metadata) {
       if (layouts.empty()) { layouts = input.state->compute_compression_regions(); }
       CUDF_EXPECTS(!has_region_configuration || configured_regions.size() == layouts.size(),
                    "Region configuration does not match the prepared layout");
@@ -3244,7 +3243,7 @@ struct pack_plan::impl {
     auto const metadata_bytes =
       regions.empty()
         ? input.metadata.size()
-        : compressed_metadata_size(input.metadata.size(), regions.size(), chunks.size());
+        : compression_metadata_size(input.metadata.size(), regions.size(), chunks.size());
     storage_sizes = pack_sizes{metadata_bytes, destination_bytes, split_align, uncompressed_bytes};
   }
 
@@ -3501,7 +3500,7 @@ pack_result pack_into(pack_plan const& plan,
       device_span{reinterpret_cast<uint64_t*>(destination.data()), num_chunks}, table, stream);
   }
 
-  std::vector<compressed_metadata_entry> entries;
+  std::vector<compression_metadata_entry> entries;
   entries.reserve(impl.regions.size());
   for (auto const& region : impl.regions) {
     auto const all_raw =
@@ -3520,7 +3519,7 @@ pack_result pack_into(pack_plan const& plan,
       0U);
   }
   return pack_result{
-    make_compressed_metadata(
+    make_compression_metadata(
       impl.input.metadata, sizes.uncompressed_payload_bytes, entries, chunk_offsets),
     payload_bytes};
 }
@@ -3528,7 +3527,7 @@ pack_result pack_into(pack_plan const& plan,
 table_view unpack_view(packed_data_view input)
 {
   CUDF_FUNC_RANGE();
-  CUDF_EXPECTS(!is_compressed_metadata(input.metadata),
+  CUDF_EXPECTS(!has_compression_metadata(input.metadata),
                "Compressed packed data cannot be exposed as a zero-copy table view",
                std::invalid_argument);
   if (input.metadata.empty()) { return table_view{}; }
@@ -3554,11 +3553,11 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
 {
   payload_reader reader{input.payload};
   if (!selection.has_value()) { reader.request(input.payload.data(), input.payload.size()); }
-  if (!is_compressed_metadata(input.metadata)) {
+  if (!has_compression_metadata(input.metadata)) {
     return materialize_uncompressed(input, selection, reader, stream, mr);
   }
 
-  auto const parsed = parse_compressed_metadata(input.metadata);
+  auto const parsed = read_compression_metadata(input.metadata);
   CUDF_EXPECTS(!parsed.entries.empty(), "Compressed payload has no region directory");
   auto const num_chunks = parsed.chunk_offsets.size();
   CUDF_EXPECTS(num_chunks <= input.payload.size() / sizeof(uint64_t),
@@ -3605,7 +3604,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     }
     return *iter;
   };
-  auto submit_decompression = [&](compressed_metadata_entry const& entry, void* destination) {
+  auto submit_decompression = [&](compression_metadata_entry const& entry, void* destination) {
     auto const compression = static_cast<pack_compression>(entry.compression);
     auto const cascaded =
       compression == pack_compression::cascaded
@@ -3637,7 +3636,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
     CUDF_EXPECTS(offset >= 0, "Compressed column buffer has no packed offset");
     auto const target = static_cast<uint64_t>(offset);
     auto const entry  = std::ranges::lower_bound(
-      parsed.entries, target, {}, &compressed_metadata_entry::uncompressed_offset);
+      parsed.entries, target, {}, &compression_metadata_entry::uncompressed_offset);
     CUDF_EXPECTS(entry != parsed.entries.end() && entry->uncompressed_offset == target &&
                    (entry->is_validity != 0) == is_validity,
                  "Compressed regions do not match the packed column schema at offset " +
@@ -3787,8 +3786,8 @@ void append_packed_buffers(packed_metadata_view::column_view const& column,
 std::vector<pack_region_info> get_packed_region_info(std::span<uint8_t const> metadata)
 {
   CUDF_FUNC_RANGE();
-  auto const parsed = is_compressed_metadata(metadata)
-                        ? std::optional{parse_compressed_metadata(metadata)}
+  auto const parsed = has_compression_metadata(metadata)
+                        ? std::optional{read_compression_metadata(metadata)}
                         : std::nullopt;
   auto const legacy = parsed.has_value() ? parsed->legacy_metadata : metadata;
   if (legacy.empty()) { return {}; }

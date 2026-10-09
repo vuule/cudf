@@ -34,7 +34,7 @@ namespace cx = cudf::experimental;
 
 namespace {
 
-// Must match `compressed_metadata_entry` in cpp/src/copying/contiguous_split.cu.
+// Must match `compression_metadata_entry` in cpp/src/copying/contiguous_split.cu.
 struct compressed_region_entry {
   uint64_t uncompressed_offset;
   uint64_t uncompressed_bytes;
