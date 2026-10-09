@@ -553,10 +553,6 @@ __device__ constexpr primitive_type primitive_type_for()
     return primitive_type::FLOAT32;
   } else if constexpr (cuda::std::is_same_v<T, double>) {
     return primitive_type::FLOAT64;
-  } else if constexpr (cuda::std::is_same_v<T, cudf::timestamp_us>) {
-    return primitive_type::TIMESTAMP_MICROS;
-  } else if constexpr (cuda::std::is_same_v<T, cudf::timestamp_ns>) {
-    return primitive_type::TIMESTAMP_NANOS;
   } else {
     CUDF_UNREACHABLE("primitive_type_for: T is not a supported variant primitive type");
     return primitive_type::NULLVAL;
@@ -569,11 +565,14 @@ template <typename T>
   requires(is_variant_numerical<T>)
 __device__ constexpr bool matches_primitive_type(primitive_type ptype)
 {
-  auto const ntz =
-    cuda::std::is_same_v<T, cudf::timestamp_us>   ? primitive_type::TIMESTAMP_NTZ_MICROS
-    : cuda::std::is_same_v<T, cudf::timestamp_ns> ? primitive_type::TIMESTAMP_NTZ_NANOS
-                                                  : primitive_type_for<T>();
-  return ptype == primitive_type_for<T>() || ptype == ntz;
+  if constexpr (cuda::std::is_same_v<T, cudf::timestamp_us>) {
+    return ptype == primitive_type::TIMESTAMP_MICROS ||
+           ptype == primitive_type::TIMESTAMP_NTZ_MICROS;
+  } else if constexpr (cuda::std::is_same_v<T, cudf::timestamp_ns>) {
+    return ptype == primitive_type::TIMESTAMP_NANOS || ptype == primitive_type::TIMESTAMP_NTZ_NANOS;
+  } else {
+    return ptype == primitive_type_for<T>();
+  }
 }
 
 /**
