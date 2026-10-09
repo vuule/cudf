@@ -111,13 +111,13 @@ struct src_buf_info {
   {
   }
 
-  cudf::type_id type;
+  cudf::type_id type{cudf::type_id::EMPTY};
   detail::input_offsetalator offsets{};
   bool is_offsets{false};             // offsets if I am an offset buffer
-  int offset_stack_pos;               // position in the offset stack buffer
-  int parent_offsets_index;           // immediate parent that has offsets, or -1 if none
-  bool is_validity;                   // if I am a validity buffer
-  size_type column_offset;            // offset in the case of a sliced column
+  int offset_stack_pos{0};            // position in the offset stack buffer
+  int parent_offsets_index{-1};       // immediate parent that has offsets, or -1 if none
+  bool is_validity{false};            // if I am a validity buffer
+  size_type column_offset{0};         // offset in the case of a sliced column
   size_type full_copy_row_count{-1};  // rows I copy in full, or -1 if I follow the splits
 };
 
@@ -478,7 +478,7 @@ size_type count_src_bufs(InputIter begin, InputIter end)
   return std::accumulate(buf_iter, buf_iter + std::distance(begin, end), 0);
 }
 
-cudf::experimental::pack_region_kind region_kind(src_buf_info const& source)
+[[nodiscard]] cudf::experimental::pack_region_kind region_kind(src_buf_info const& source)
 {
   using cudf::experimental::pack_region_kind;
   if (source.is_validity) { return pack_region_kind::validity; }
@@ -1992,7 +1992,7 @@ struct contiguous_split_state {
 
   [[nodiscard]] cuda::stream_ref get_stream() const { return stream; }
 
-  [[nodiscard]] std::vector<compression_region_layout> get_compression_regions() const
+  [[nodiscard]] std::vector<compression_region_layout> compute_compression_regions() const
   {
     if (is_empty || num_src_bufs == 0) { return {}; }
 
@@ -2029,14 +2029,13 @@ struct contiguous_split_state {
           ? src_and_dst_pointers->h_src_bufs[destination_info.src_buf_index] +
               destination_info.src_element_index * destination_info.element_size
           : nullptr;
-      regions.push_back(compression_region_layout{
-        destination_info.dst_offset,
-        destination_info.buf_size,
-        direct_source != nullptr ? source_bytes : destination_info.buf_size,
-        source.type,
-        region_kind(source),
-        paths[destination_info.src_buf_index],
-        direct_source});
+      regions.emplace_back(destination_info.dst_offset,
+                           destination_info.buf_size,
+                           direct_source != nullptr ? source_bytes : destination_info.buf_size,
+                           source.type,
+                           region_kind(source),
+                           paths[destination_info.src_buf_index],
+                           direct_source);
     }
     std::ranges::sort(regions, {}, &compression_region_layout::uncompressed_offset);
     return regions;
@@ -2150,7 +2149,7 @@ struct contiguous_split_state {
   /**
    * @brief Group the copy batches into windows whose output spans at most `max_bytes`.
    */
-  [[nodiscard]] std::vector<pack_window> get_pack_windows(std::size_t max_bytes) const
+  [[nodiscard]] std::vector<pack_window> compute_pack_windows(std::size_t max_bytes) const
   {
     if (is_empty || input.num_columns() == 0) { return {}; }
     auto const batches = cudf::detail::make_std_vector(
@@ -2165,7 +2164,7 @@ struct contiguous_split_state {
       CUDF_EXPECTS(begin >= end, "Copy batches are not ordered by destination offset");
       CUDF_EXPECTS(bytes <= max_bytes, "The staging buffer is smaller than a copy batch");
       if (windows.empty() || begin + bytes - windows.back().payload_offset > max_bytes) {
-        windows.push_back({i, i, begin, 0});
+        windows.emplace_back(i, i, begin, 0);
       }
       auto& window    = windows.back();
       window.end_item = i + 1;
@@ -2497,13 +2496,13 @@ namespace {
 using cudf::io::detail::codec_exec_result;
 using cudf::io::detail::codec_status;
 
-bool is_concrete_codec(pack_compression compression)
+[[nodiscard]] bool is_concrete_codec(pack_compression compression)
 {
   return compression == pack_compression::none || compression == pack_compression::cascaded ||
          compression == pack_compression::zstd || compression == pack_compression::snappy;
 }
 
-cudf::io::compression_type to_io_compression(pack_compression compression)
+[[nodiscard]] cudf::io::compression_type to_io_compression(pack_compression compression)
 {
   switch (compression) {
     case pack_compression::zstd: return cudf::io::compression_type::ZSTD;
@@ -2513,7 +2512,7 @@ cudf::io::compression_type to_io_compression(pack_compression compression)
 }
 
 // The integral type nvCOMP Cascaded interprets a buffer as.
-type_id cascaded_value_type(type_id type, bool is_validity)
+[[nodiscard]] type_id cascaded_value_type(type_id type, bool is_validity)
 {
   if (is_validity) { return type_id::UINT32; }
   switch (type) {
@@ -2545,13 +2544,13 @@ type_id cascaded_value_type(type_id type, bool is_validity)
 }
 
 // Cascaded chunks must hold whole values, so regions that do not are compressed as bytes.
-type_id cascaded_type(type_id type, bool is_validity, std::size_t data_bytes)
+[[nodiscard]] type_id cascaded_type(type_id type, bool is_validity, std::size_t data_bytes)
 {
   auto const value_type = cascaded_value_type(type, is_validity);
   return data_bytes % cudf::size_of(data_type{value_type}) == 0 ? value_type : type_id::UINT8;
 }
 
-cudaMemoryType memory_type(void const* ptr)
+[[nodiscard]] cudaMemoryType memory_type(void const* ptr)
 {
   cudaPointerAttributes attributes{};
   CUDF_CUDA_TRY(cudaPointerGetAttributes(&attributes, ptr));
@@ -2573,7 +2572,7 @@ struct chunk_batch {
   std::size_t total_bytes;
 };
 
-std::size_t max_allowed_chunk_bytes(pack_compression codec)
+[[nodiscard]] std::size_t max_allowed_chunk_bytes(pack_compression codec)
 {
   if (codec == pack_compression::cascaded) {
     return cudf::io::detail::nvcomp::cascaded_compress_max_allowed_chunk_size();
@@ -2582,7 +2581,7 @@ std::size_t max_allowed_chunk_bytes(pack_compression codec)
     .value_or(std::numeric_limits<std::size_t>::max());
 }
 
-std::size_t chunk_alignment(pack_compression codec)
+[[nodiscard]] std::size_t chunk_alignment(pack_compression codec)
 {
   if (codec == pack_compression::cascaded) {
     return cudf::io::detail::nvcomp::cascaded_compress_required_alignment();
@@ -2591,7 +2590,7 @@ std::size_t chunk_alignment(pack_compression codec)
                   cudf::io::detail::compress_required_chunk_alignment(to_io_compression(codec)));
 }
 
-std::size_t max_compressed_chunk_bytes(chunk_batch const& batch)
+[[nodiscard]] std::size_t max_compressed_chunk_bytes(chunk_batch const& batch)
 {
   if (batch.codec != pack_compression::cascaded) {
     return cudf::io::detail::max_compressed_size(to_io_compression(batch.codec),
@@ -2622,7 +2621,7 @@ void copy_chunks(device_span<device_span<uint8_t const> const> inputs,
 }
 
 /// Codec helpers allocate only scratch here, so the temporary resource backs both roles.
-cudf::memory_resources scratch_resources(rmm::device_async_resource_ref temp_mr)
+[[nodiscard]] cudf::memory_resources scratch_resources(rmm::device_async_resource_ref temp_mr)
 {
   return {temp_mr, temp_mr};
 }
@@ -2744,7 +2743,7 @@ void append_pod(std::vector<uint8_t>& output, T const* values, std::size_t count
 }
 
 template <typename T>
-T read_pod(std::span<uint8_t const> input, std::size_t offset)
+[[nodiscard]] T read_pod(std::span<uint8_t const> input, std::size_t offset)
 {
   CUDF_EXPECTS(offset <= input.size() && sizeof(T) <= input.size() - offset,
                "Compressed region metadata is truncated");
@@ -2753,18 +2752,19 @@ T read_pod(std::span<uint8_t const> input, std::size_t offset)
   return value;
 }
 
-std::size_t compressed_metadata_size(std::size_t legacy_bytes,
-                                     std::size_t num_regions,
-                                     std::size_t num_chunks)
+[[nodiscard]] std::size_t compressed_metadata_size(std::size_t legacy_bytes,
+                                                   std::size_t num_regions,
+                                                   std::size_t num_chunks)
 {
   return sizeof(compressed_metadata_header) + num_regions * sizeof(compressed_metadata_entry) +
          num_chunks * sizeof(uint64_t) + legacy_bytes;
 }
 
-std::vector<uint8_t> make_compressed_metadata(std::vector<uint8_t> const& legacy_metadata,
-                                              std::size_t uncompressed_payload_bytes,
-                                              std::vector<compressed_metadata_entry> const& entries,
-                                              std::vector<uint64_t> const& chunk_offsets)
+[[nodiscard]] std::vector<uint8_t> make_compressed_metadata(
+  std::vector<uint8_t> const& legacy_metadata,
+  std::size_t uncompressed_payload_bytes,
+  std::vector<compressed_metadata_entry> const& entries,
+  std::vector<uint64_t> const& chunk_offsets)
 {
   CUDF_EXPECTS(entries.size() <= std::numeric_limits<uint32_t>::max(),
                "Too many compressed regions");
@@ -2790,13 +2790,14 @@ struct parsed_compressed_metadata {
   std::span<uint8_t const> legacy_metadata;
 };
 
-bool is_compressed_metadata(std::span<uint8_t const> metadata)
+[[nodiscard]] bool is_compressed_metadata(std::span<uint8_t const> metadata)
 {
   return metadata.size() >= sizeof(int32_t) &&
          read_pod<int32_t>(metadata, 0) == compressed_metadata_version;
 }
 
-parsed_compressed_metadata parse_compressed_metadata(std::span<uint8_t const> metadata)
+[[nodiscard]] parsed_compressed_metadata parse_compressed_metadata(
+  std::span<uint8_t const> metadata)
 {
   auto const header = read_pod<compressed_metadata_header>(metadata, 0);
   CUDF_EXPECTS(header.version == compressed_metadata_version,
@@ -2844,7 +2845,7 @@ Buffer allocate_output_buffer(std::size_t bytes,
 }
 
 template <typename Buffer>
-uint8_t* buffer_data(Buffer& buffer)
+[[nodiscard]] uint8_t* buffer_data(Buffer& buffer)
 {
   return reinterpret_cast<uint8_t*>(buffer.data());
 }
@@ -2919,7 +2920,7 @@ class payload_reader {
     if (_pageable && bytes > 0) {
       // Staged bytes keep their alignment in the payload, which codecs such as Cascaded require.
       auto const offset = static_cast<std::size_t>(data - _payload.data());
-      _ranges.push_back({offset / split_align * split_align, offset + bytes, 0});
+      _ranges.emplace_back(offset / split_align * split_align, offset + bytes, 0);
     }
   }
 
@@ -3061,7 +3062,7 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
   return std::make_unique<table>(std::move(columns));
 }
 
-pack_compression select_automatic_compression(compression_region_layout const& layout)
+[[nodiscard]] pack_compression select_automatic_compression(compression_region_layout const& layout)
 {
   if (layout.uncompressed_bytes < automatic_min_region_bytes) { return pack_compression::none; }
   return layout.kind == pack_region_kind::string_characters ? pack_compression::none
@@ -3155,14 +3156,14 @@ struct pack_plan::impl {
           batch_bytes < desired_batch_size) {
         input.state->rebatch(batch_bytes);
       }
-      windows = input.state->get_pack_windows(options.staging_buffer_bytes);
+      windows = input.state->compute_pack_windows(options.staging_buffer_bytes);
       for (auto const& window : windows) {
         max_window_bytes = std::max(max_window_bytes, window.bytes);
       }
     }
 
     if (uncompressed_bytes > 0 && uses_compressed_metadata) {
-      if (layouts.empty()) { layouts = input.state->get_compression_regions(); }
+      if (layouts.empty()) { layouts = input.state->compute_compression_regions(); }
       CUDF_EXPECTS(!has_region_configuration || configured_regions.size() == layouts.size(),
                    "Region configuration does not match the prepared layout");
       auto const all_regions_are_direct = std::ranges::all_of(
@@ -3204,7 +3205,7 @@ struct pack_plan::impl {
           cascaded = cascaded_type(
             layout.type, layout.kind == pack_region_kind::validity, layout.data_bytes);
         }
-        regions.push_back(prepared_compression_region{
+        regions.emplace_back(
           layout,
           packed_base != nullptr ? packed_base + layout.uncompressed_offset : layout.direct_source,
           requested,
@@ -3213,7 +3214,7 @@ struct pack_plan::impl {
           chunk_bytes,
           0,
           cudf::util::div_rounding_up_safe(layout.data_bytes, chunk_bytes),
-          sizeof(uint64_t)});
+          sizeof(uint64_t));
       }
       CUDF_EXPECTS(uncompressed_end == uncompressed_bytes,
                    "Prepared compression regions do not cover the complete payload");
@@ -3227,7 +3228,7 @@ struct pack_plan::impl {
         });
         region_batch.push_back(batch - batches.begin());
         if (batch == batches.end()) {
-          batches.push_back(chunk_batch{region.compression, region.cascaded_type, 0, 0, 0, 0});
+          batches.emplace_back(region.compression, region.cascaded_type, 0, 0, 0, 0);
         }
         auto& target           = batches[region_batch.back()];
         target.max_chunk_bytes = std::max(target.max_chunk_bytes, region.chunk_bytes);
@@ -3246,8 +3247,7 @@ struct pack_plan::impl {
           for (std::size_t offset = 0; offset < region.layout.data_bytes;
                offset += region.chunk_bytes) {
             auto const bytes = std::min(region.chunk_bytes, region.layout.data_bytes - offset);
-            chunks.push_back(
-              chunk_descriptor{region.source + offset, bytes, raw ? bytes : slot_bytes, 0, i, raw});
+            chunks.emplace_back(region.source + offset, bytes, raw ? bytes : slot_bytes, 0, i, raw);
           }
         }
         batches[b].chunk_end = chunks.size();
@@ -3265,7 +3265,7 @@ struct pack_plan::impl {
                      "The staging buffer is too small for the compression chunk size");
         if (windows.empty() ||
             destination_bytes + extent - windows.back().payload_offset > window_budget) {
-          windows.push_back(pack_window{c, c, destination_bytes, 0});
+          windows.emplace_back(c, c, destination_bytes, 0);
         }
         auto& window        = windows.back();
         chunk.window_offset = destination_bytes - window.payload_offset;
@@ -3302,7 +3302,7 @@ struct pack_plan_builder::impl {
     : input(std::move(input)),
       options(std::move(options)),
       mr(std::move(mr)),
-      layouts(this->input.state->get_compression_regions())
+      layouts(this->input.state->compute_compression_regions())
   {
     regions.reserve(layouts.size());
     for (std::size_t i = 0; i < layouts.size(); ++i) {
@@ -3545,16 +3545,17 @@ pack_result pack_into(pack_plan const& plan,
     auto const all_raw =
       std::ranges::all_of(std::span{table}.subspan(region.chunk_begin, region.num_chunks),
                           [](auto entry) { return (entry & raw_chunk_flag) != 0; });
-    entries.push_back({region.layout.uncompressed_offset,
-                       region.layout.uncompressed_bytes,
-                       region.layout.data_bytes,
-                       region.chunk_bytes,
-                       region.chunk_begin,
-                       region.num_chunks,
-                       static_cast<int32_t>(region.layout.type),
-                       region.layout.kind == pack_region_kind::validity ? 1U : 0U,
-                       static_cast<int32_t>(all_raw ? pack_compression::none : region.compression),
-                       0U});
+    entries.emplace_back(
+      region.layout.uncompressed_offset,
+      region.layout.uncompressed_bytes,
+      region.layout.data_bytes,
+      region.chunk_bytes,
+      region.chunk_begin,
+      region.num_chunks,
+      static_cast<int32_t>(region.layout.type),
+      region.layout.kind == pack_region_kind::validity ? 1U : 0U,
+      static_cast<int32_t>(all_raw ? pack_compression::none : region.compression),
+      0U);
   }
   return pack_result{
     make_compressed_metadata(
@@ -3797,7 +3798,8 @@ void append_packed_buffers(packed_metadata_view::column_view const& column,
 {
   auto const add = [&](int64_t offset, pack_region_kind kind, type_id type, std::size_t bytes) {
     if (offset == -1) { return; }
-    buffers.push_back({static_cast<std::size_t>(offset), {0, path, kind, type, 0}, bytes});
+    buffers.emplace_back(
+      static_cast<std::size_t>(offset), pack_region_info{0, path, kind, type, 0}, bytes);
   };
   auto const rows = static_cast<std::size_t>(column.num_rows());
   auto const type = column.type();
