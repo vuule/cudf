@@ -2132,8 +2132,8 @@ struct contiguous_split_state {
   [[nodiscard]] std::vector<pack_window> compute_pack_windows(std::size_t max_bytes) const
   {
     if (is_empty || input.num_columns() == 0) { return {}; }
-    auto const batches = cudf::detail::make_std_vector(
-      device_span<dst_buf_info const>{chunk_iter_state->d_batched_dst_buf_info}, stream);
+    auto const batches =
+      cudf::detail::make_pinned_vector(chunk_iter_state->d_batched_dst_buf_info, stream);
     std::vector<pack_window> windows;
     std::size_t end = 0;
     for (std::size_t i = 0; i < batches.size(); ++i) {
@@ -3417,14 +3417,14 @@ pack_result pack_into(pack_plan const& plan,
         copy_to_host(window.payload_offset, staging.data(), window.bytes);
       }
     } else {
-      state.pack_into(cudf::device_span<uint8_t>{destination.data(), destination.size()});
+      state.pack_into({destination.data(), destination.size()});
     }
     return pack_result{impl.input.metadata, sizes.uncompressed_payload_bytes};
   }
 
   if (impl.staging_buffer != nullptr) {
-    state.pack_into(cudf::device_span<uint8_t>{static_cast<uint8_t*>(impl.staging_buffer->data()),
-                                               sizes.uncompressed_payload_bytes});
+    state.pack_into(
+      {static_cast<uint8_t*>(impl.staging_buffer->data()), sizes.uncompressed_payload_bytes});
   }
 
   // Each window of chunks is compressed into staging memory and compacted into the destination,
@@ -3459,13 +3459,12 @@ pack_result pack_into(pack_plan const& plan,
       auto const begin = std::max(batch.chunk_begin, window.first_item);
       auto const end   = std::min(batch.chunk_end, window.end_item);
       if (begin >= end || batch.codec == pack_compression::none) { continue; }
-      compress_batch(
-        batch,
-        device_span<device_span<uint8_t const> const>{inputs}.subspan(begin, end - begin),
-        device_span<device_span<uint8_t> const>{outputs}.subspan(begin, end - begin),
-        device_span<codec_exec_result>{results}.subspan(begin, end - begin),
-        stream,
-        temp_mr);
+      compress_batch(batch,
+                     device_span{inputs}.subspan(begin, end - begin),
+                     device_span{outputs}.subspan(begin, end - begin),
+                     device_span{results}.subspan(begin, end - begin),
+                     stream,
+                     temp_mr);
     }
   };
 
@@ -3475,9 +3474,9 @@ pack_result pack_into(pack_plan const& plan,
   for (auto const& window : impl.windows) {
     compress_window(window);
     auto const h_results =
-      cudf::detail::make_std_vector(device_span<codec_exec_result const>{results}.subspan(
-                                      window.first_item, window.end_item - window.first_item),
-                                    stream);
+      cudf::detail::make_pinned_vector(device_span<codec_exec_result const>{results}.subspan(
+                                         window.first_item, window.end_item - window.first_item),
+                                       stream);
     auto const window_begin = payload_bytes;
     std::vector<uint8_t const*> sources;
     std::vector<uint8_t*> targets;
@@ -3516,9 +3515,7 @@ pack_result pack_into(pack_plan const& plan,
     std::memcpy(destination.data(), table.data(), table_bytes);
   } else {
     cudf::detail::cuda_memcpy<uint64_t>(
-      device_span<uint64_t>{reinterpret_cast<uint64_t*>(destination.data()), num_chunks},
-      table,
-      stream);
+      device_span{reinterpret_cast<uint64_t*>(destination.data()), num_chunks}, table, stream);
   }
 
   std::vector<compressed_metadata_entry> entries;
@@ -3612,10 +3609,8 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
   CUDF_EXPECTS(uncompressed_end == parsed.uncompressed_payload_bytes,
                "Compressed regions do not cover the complete output");
 
-  auto const chunk_sizes = cudf::detail::make_std_vector(
-    device_span<uint64_t const>{reinterpret_cast<uint64_t const*>(input.payload.data()),
-                                num_chunks},
-    stream);
+  auto const chunk_sizes = cudf::detail::make_pinned_vector(
+    device_span{reinterpret_cast<uint64_t const*>(input.payload.data()), num_chunks}, stream);
 
   std::vector<decompression_work> work;
   auto const work_for = [&](pack_compression codec, type_id cascaded_type) -> auto& {
@@ -3708,19 +3703,18 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
 
   auto const spans = [&](std::size_t begin, std::size_t end) {
     auto const count = end - begin;
-    return std::tuple{device_span<device_span<uint8_t const> const>{d_inputs}.subspan(begin, count),
-                      device_span<device_span<uint8_t> const>{d_outputs}.subspan(begin, count),
-                      device_span<codec_exec_result>{results}.subspan(begin, count)};
+    return std::tuple{device_span{d_inputs}.subspan(begin, count),
+                      device_span{d_outputs}.subspan(begin, count),
+                      device_span{results}.subspan(begin, count)};
   };
   if (num_cascaded > 0) {
     auto const [d_in, d_out, d_results] = spans(0, work_offsets[num_cascaded]);
-    cudf::io::detail::nvcomp::batched_cascaded_decompress(
-      d_in,
-      d_out,
-      d_results,
-      host_span<std::size_t const>{work_offsets.data(), num_cascaded + 1},
-      stream,
-      scratch_resources(temp_mr));
+    cudf::io::detail::nvcomp::batched_cascaded_decompress(d_in,
+                                                          d_out,
+                                                          d_results,
+                                                          {work_offsets.data(), num_cascaded + 1},
+                                                          stream,
+                                                          scratch_resources(temp_mr));
   }
   for (auto i = num_cascaded; i < work.size(); ++i) {
     auto const [d_in, d_out, d_results] = spans(work_offsets[i], work_offsets[i + 1]);
@@ -3734,7 +3728,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                      temp_mr);
   }
 
-  auto const h_results = cudf::detail::make_std_vector(results, stream);
+  auto const h_results = cudf::detail::make_pinned_vector(results, stream);
   for (std::size_t i = 0; i < work.size(); ++i) {
     if (work[i].codec == pack_compression::none) { continue; }
     for (std::size_t k = work_offsets[i]; k < work_offsets[i + 1]; ++k) {

@@ -99,7 +99,7 @@ struct packed_output {
 
   [[nodiscard]] cx::packed_data_view view() const
   {
-    return {result.metadata, std::span<uint8_t const>{data, result.payload_bytes}};
+    return {result.metadata, {data, result.payload_bytes}};
   }
 };
 
@@ -325,8 +325,7 @@ TEST_F(ExperimentalPackUnpackTest, MaterializeOversizedUncompressedPayload)
   rmm::device_buffer buffer(plan.sizes().payload_bytes + 4096, stream);
   auto const result = cx::pack_into(plan, as_span(buffer));
   auto const view   = cx::packed_data_view{
-    result.metadata,
-    std::span<uint8_t const>{static_cast<uint8_t const*>(buffer.data()), buffer.size()}};
+    result.metadata, {static_cast<uint8_t const*>(buffer.data()), buffer.size()}};
   auto materialized = cx::materialize(view);
   CUDF_TEST_EXPECT_TABLES_EQUAL(input, materialized->view());
   auto columns = materialized->release();
