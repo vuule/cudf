@@ -132,6 +132,9 @@ concept fixed_point = cuda::std::same_as<cuda::std::remove_cv_t<T>, numeric::dec
  *
  * Elements of a fixed-width type all have the same size in bytes.
  *
+ * @note Defined in terms of `fixed_point<T>` so that a `fixed_point` constrained overload is more
+ * constrained and preferred over a `fixed_width` constrained one.
+ *
  * @tparam T The type to verify
  */
 template <typename T>
