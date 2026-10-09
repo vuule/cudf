@@ -48,6 +48,7 @@
 #include <thrust/transform.h>
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -2598,19 +2599,13 @@ void compress_batch(chunk_batch const& batch,
                     device_span<device_span<uint8_t> const> outputs,
                     device_span<codec_exec_result> results,
                     cuda::stream_ref stream,
-                    rmm::device_async_resource_ref temp_mr)
+                    cudf::memory_resources mr)
 {
   if (batch.codec == pack_compression::cascaded) {
-    return io::detail::nvcomp::batched_cascaded_compress(batch.cascaded_type,
-                                                         inputs,
-                                                         outputs,
-                                                         results,
-                                                         batch.max_chunk_bytes,
-                                                         stream,
-                                                         {temp_mr, temp_mr});
+    return io::detail::nvcomp::batched_cascaded_compress(
+      batch.cascaded_type, inputs, outputs, results, batch.max_chunk_bytes, stream, mr);
   }
-  io::detail::compress(
-    to_io_compression(batch.codec), inputs, outputs, results, stream, {temp_mr, temp_mr});
+  io::detail::compress(to_io_compression(batch.codec), inputs, outputs, results, stream, mr);
 }
 
 void decompress_batch(pack_compression codec,
@@ -2620,17 +2615,11 @@ void decompress_batch(pack_compression codec,
                       std::size_t max_chunk_bytes,
                       std::size_t total_bytes,
                       cuda::stream_ref stream,
-                      rmm::device_async_resource_ref temp_mr)
+                      cudf::memory_resources mr)
 {
   if (codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream); }
-  io::detail::decompress(to_io_compression(codec),
-                         inputs,
-                         outputs,
-                         results,
-                         max_chunk_bytes,
-                         total_bytes,
-                         stream,
-                         {temp_mr, temp_mr});
+  io::detail::decompress(
+    to_io_compression(codec), inputs, outputs, results, max_chunk_bytes, total_bytes, stream, mr);
 }
 
 /// Chunks decompressed together: one codec and, for Cascaded, one value type, because a Cascaded
@@ -2719,6 +2708,18 @@ template <typename T>
   return value;
 }
 
+template <typename T>
+[[nodiscard]] std::vector<T> read_array(std::span<uint8_t const> input,
+                                        std::size_t offset,
+                                        std::size_t count)
+{
+  CUDF_EXPECTS(offset <= input.size() && count <= (input.size() - offset) / sizeof(T),
+               "Compressed region metadata is truncated");
+  std::vector<T> values(count);
+  std::memcpy(values.data(), input.data() + offset, count * sizeof(T));
+  return values;
+}
+
 [[nodiscard]] std::size_t compression_metadata_size(std::size_t legacy_bytes,
                                                     std::size_t num_regions,
                                                     std::size_t num_chunks)
@@ -2778,38 +2779,32 @@ struct compression_metadata {
   CUDF_EXPECTS(header.legacy_metadata_bytes == metadata.size() - legacy_offset,
                "Compressed-region metadata has invalid bounds");
 
-  compression_metadata result{header.uncompressed_payload_bytes,
-                              std::vector<compression_metadata_entry>(header.num_regions),
-                              std::vector<uint64_t>(header.num_chunks),
-                              metadata.subspan(legacy_offset, header.legacy_metadata_bytes)};
-  std::memcpy(result.entries.data(),
-              metadata.data() + entries_offset,
-              result.entries.size() * sizeof(compression_metadata_entry));
-  std::memcpy(result.chunk_offsets.data(),
-              metadata.data() + chunks_offset,
-              result.chunk_offsets.size() * sizeof(uint64_t));
-  return result;
+  return {header.uncompressed_payload_bytes,
+          read_array<compression_metadata_entry>(metadata, entries_offset, header.num_regions),
+          read_array<uint64_t>(metadata, chunks_offset, header.num_chunks),
+          metadata.subspan(legacy_offset, header.legacy_metadata_bytes)};
 }
 
 using null_mask_buffer = cuda::device_buffer<std::byte>;
 
 template <typename Buffer>
-constexpr bool is_validity_buffer = std::is_same_v<Buffer, null_mask_buffer>;
+concept validity_buffer = std::same_as<Buffer, null_mask_buffer>;
 
 template <typename Buffer>
-Buffer allocate_output_buffer(std::size_t bytes,
-                              cuda::stream_ref stream,
-                              rmm::device_async_resource_ref mr)
+concept output_buffer = validity_buffer<Buffer> || std::same_as<Buffer, rmm::device_buffer>;
+
+template <output_buffer Buffer>
+Buffer allocate_output_buffer(std::size_t bytes, cuda::stream_ref stream, cudf::memory_resources mr)
 {
-  if constexpr (is_validity_buffer<Buffer>) {
+  if constexpr (validity_buffer<Buffer>) {
     auto const env = cuda::std::execution::prop{cuda::allocation_alignment, alignof(bitmask_type)};
-    return Buffer(stream, mr, bytes, cuda::no_init, env);
+    return Buffer(stream, mr.get_output_mr(), bytes, cuda::no_init, env);
   } else {
-    return Buffer(bytes, stream, mr);
+    return Buffer(bytes, stream, mr.get_output_mr());
   }
 }
 
-template <typename Buffer>
+template <output_buffer Buffer>
 [[nodiscard]] uint8_t* buffer_data(Buffer& buffer)
 {
   return reinterpret_cast<uint8_t*>(buffer.data());
@@ -2866,7 +2861,7 @@ void collect_buffer_offsets(packed_metadata_view::column_view const& metadata,
 }
 
 /**
- * @brief Device-accessible access to a packed payload.
+ * @brief Provides device pointers into a packed payload.
  *
  * Device and pinned payloads are read in place. Only the byte ranges requested before `upload()`
  * are copied from a pageable payload, so materializing a column subset transfers only its bytes.
@@ -2879,16 +2874,16 @@ class payload_reader {
   {
   }
 
-  void request(uint8_t const* data, std::size_t bytes)
+  void request(std::span<uint8_t const> bytes)
   {
-    if (_pageable && bytes > 0) {
+    if (_pageable && !bytes.empty()) {
       // Staged bytes keep their alignment in the payload, which codecs such as Cascaded require.
-      auto const offset = static_cast<std::size_t>(data - _payload.data());
-      _ranges.emplace_back(offset / split_align * split_align, offset + bytes, 0);
+      auto const offset = static_cast<std::size_t>(bytes.data() - _payload.data());
+      _ranges.emplace_back(offset / split_align * split_align, offset + bytes.size(), 0);
     }
   }
 
-  void upload(cuda::stream_ref stream, rmm::device_async_resource_ref temp_mr)
+  void upload(cuda::stream_ref stream, cudf::memory_resources mr)
   {
     if (_ranges.empty()) { return; }
     // Gaps this small cost less to copy than a separate transfer.
@@ -2907,7 +2902,7 @@ class payload_reader {
       item.staged_offset = staged_bytes;
       staged_bytes = cudf::util::round_up_safe(staged_bytes + item.end - item.begin, split_align);
     }
-    _staged = rmm::device_buffer(staged_bytes, stream, temp_mr);
+    _staged = rmm::device_buffer(staged_bytes, stream, mr.get_temporary_mr());
     for (auto const& item : merged) {
       CUDF_CUDA_TRY(
         cudf::detail::memcpy_async(static_cast<uint8_t*>(_staged.data()) + item.staged_offset,
@@ -2986,7 +2981,7 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
   std::vector<uint8_t const*> sources;
   std::vector<uint8_t*> destinations;
   std::vector<std::size_t> sizes;
-  auto allocate_buffer = [&]<typename Buffer>(
+  auto allocate_buffer = [&]<output_buffer Buffer>(
                            std::type_identity<Buffer>, int64_t offset, std::size_t required_bytes) {
     auto const next = std::ranges::upper_bound(offsets, offset);
     auto const end = next == offsets.end() ? input.payload.size() : static_cast<std::size_t>(*next);
@@ -2995,15 +2990,16 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
                          ? std::min(required_bytes, end - offset)
                          : end - offset;
     CUDF_EXPECTS(bytes >= required_bytes, "Packed column buffer is smaller than its column");
-    auto buffer = allocate_output_buffer<Buffer>(bytes, stream, mr.get_output_mr());
-    sources.push_back(input.payload.data() + offset);
+    auto buffer       = allocate_output_buffer<Buffer>(bytes, stream, mr);
+    auto const source = input.payload.subspan(offset, bytes);
+    reader.request(source);
+    sources.push_back(source.data());
     destinations.push_back(buffer_data(buffer));
     sizes.push_back(bytes);
-    reader.request(sources.back(), bytes);
     return buffer;
   };
   auto columns = materialize_columns(metadata, selection, allocate_buffer);
-  reader.upload(stream, mr.get_temporary_mr());
+  reader.upload(stream, mr);
   for (auto& source : sources) {
     source = reader.device_pointer(source);
   }
@@ -3446,7 +3442,7 @@ pack_result pack_into(pack_plan const& plan,
                      device_span{outputs}.subspan(begin, end - begin),
                      device_span{results}.subspan(begin, end - begin),
                      stream,
-                     temp_mr);
+                     mr);
     }
   };
 
@@ -3552,7 +3548,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                                              cudf::memory_resources mr)
 {
   payload_reader reader{input.payload};
-  if (!selection.has_value()) { reader.request(input.payload.data(), input.payload.size()); }
+  if (!selection.has_value()) { reader.request(input.payload); }
   if (!has_compression_metadata(input.metadata)) {
     return materialize_uncompressed(input, selection, reader, stream, mr);
   }
@@ -3622,17 +3618,18 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                    "Compressed chunk is missing or truncated");
       auto& task =
         raw ? task_for(pack_compression::none, type_id::UINT8) : task_for(compression, cascaded);
-      task.inputs.emplace_back(input.payload.data() + parsed.chunk_offsets[c], bytes);
-      reader.request(task.inputs.back().data(), bytes);
+      auto const chunk = input.payload.subspan(parsed.chunk_offsets[c], bytes);
+      reader.request(chunk);
+      task.inputs.emplace_back(chunk.data(), chunk.size());
       task.outputs.emplace_back(output + offset, expected);
       task.max_chunk_bytes = std::max(task.max_chunk_bytes, expected);
       task.total_bytes += expected;
     }
   };
 
-  auto allocate_buffer = [&]<typename Buffer>(
+  auto allocate_buffer = [&]<output_buffer Buffer>(
                            std::type_identity<Buffer>, int64_t offset, std::size_t required_bytes) {
-    constexpr bool is_validity = is_validity_buffer<Buffer>;
+    constexpr bool is_validity = validity_buffer<Buffer>;
     CUDF_EXPECTS(offset >= 0, "Compressed column buffer has no packed offset");
     auto const target = static_cast<uint64_t>(offset);
     auto const entry  = std::ranges::lower_bound(
@@ -3643,15 +3640,14 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                    std::to_string(target));
     CUDF_EXPECTS(entry->uncompressed_bytes >= required_bytes,
                  "Compressed region is smaller than its column buffer");
-    auto buffer =
-      allocate_output_buffer<Buffer>(entry->uncompressed_bytes, stream, mr.get_output_mr());
+    auto buffer = allocate_output_buffer<Buffer>(entry->uncompressed_bytes, stream, mr);
     submit_decompression(*entry, buffer_data(buffer));
     return buffer;
   };
   auto columns =
     materialize_columns(packed_metadata_view{parsed.legacy_metadata}, selection, allocate_buffer);
+  reader.upload(stream, mr);
   auto const temp_mr = mr.get_temporary_mr();
-  reader.upload(stream, temp_mr);
   for (auto& task : tasks) {
     for (auto& chunk : task.inputs) {
       chunk = {reader.device_pointer(chunk.data()), chunk.size()};
@@ -3692,7 +3688,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
   if (num_cascaded > 0) {
     auto const [d_in, d_out, d_results] = spans(0, task_offsets[num_cascaded]);
     io::detail::nvcomp::batched_cascaded_decompress(
-      d_in, d_out, d_results, {task_offsets.data(), num_cascaded + 1}, stream, {temp_mr, temp_mr});
+      d_in, d_out, d_results, {task_offsets.data(), num_cascaded + 1}, stream, mr);
   }
   for (auto i = num_cascaded; i < tasks.size(); ++i) {
     auto const [d_in, d_out, d_results] = spans(task_offsets[i], task_offsets[i + 1]);
@@ -3703,7 +3699,7 @@ std::unique_ptr<table> materialize_selection(packed_data_view input,
                      tasks[i].max_chunk_bytes,
                      tasks[i].total_bytes,
                      stream,
-                     temp_mr);
+                     mr);
   }
 
   auto const h_results = cudf::detail::make_pinned_vector(results, stream);
