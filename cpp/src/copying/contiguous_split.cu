@@ -2886,12 +2886,11 @@ class payload_reader {
   void upload(cuda::stream_ref stream, cudf::memory_resources mr)
   {
     if (_ranges.empty()) { return; }
-    // Gaps this small cost less to copy than a separate transfer.
-    constexpr std::size_t max_gap_bytes = 256 * 1024;
+    // Ranges separated only by alignment padding, such as consecutive chunks, merge into one copy.
     std::ranges::sort(_ranges, {}, &range::begin);
     std::vector<range> merged{_ranges.front()};
     for (auto const& next : _ranges) {
-      if (next.begin <= merged.back().end + max_gap_bytes) {
+      if (next.begin <= merged.back().end + split_align) {
         merged.back().end = std::max(merged.back().end, next.end);
       } else {
         merged.push_back(next);
@@ -2903,13 +2902,16 @@ class payload_reader {
       staged_bytes = cudf::util::round_up_safe(staged_bytes + item.end - item.begin, split_align);
     }
     _staged = rmm::device_buffer(staged_bytes, stream, mr.get_temporary_mr());
+    std::vector<void*> destinations;
+    std::vector<void const*> sources;
+    std::vector<std::size_t> sizes;
     for (auto const& item : merged) {
-      CUDF_CUDA_TRY(
-        cudf::detail::memcpy_async(static_cast<uint8_t*>(_staged.data()) + item.staged_offset,
-                                   _payload.data() + item.begin,
-                                   item.end - item.begin,
-                                   stream));
+      destinations.push_back(static_cast<uint8_t*>(_staged.data()) + item.staged_offset);
+      sources.push_back(_payload.data() + item.begin);
+      sizes.push_back(item.end - item.begin);
     }
+    CUDF_CUDA_TRY(cudf::detail::memcpy_batch_async(
+      destinations.data(), sources.data(), sizes.data(), merged.size(), stream));
     _ranges = std::move(merged);
   }
 
