@@ -2915,6 +2915,9 @@ class payload_reader {
     _ranges = std::move(merged);
   }
 
+  /// Whether `upload()` copied any pageable bytes, which stay in use until the stream reaches them.
+  [[nodiscard]] bool reads_host_memory() const { return !_ranges.empty(); }
+
   /// Translates a payload pointer whose bytes were requested to a device-accessible pointer.
   [[nodiscard]] uint8_t const* device_pointer(uint8_t const* data) const
   {
@@ -2980,9 +2983,8 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
                  (offsets.front() >= 0 && std::cmp_less(offsets.back(), input.payload.size())),
                "Packed column buffer lies outside the payload");
 
-  std::vector<uint8_t const*> sources;
+  std::vector<std::span<uint8_t const>> payload_ranges;
   std::vector<uint8_t*> destinations;
-  std::vector<std::size_t> sizes;
   auto allocate_buffer = [&]<output_buffer Buffer>(
                            std::type_identity<Buffer>, int64_t offset, std::size_t required_bytes) {
     auto const next = std::ranges::upper_bound(offsets, offset);
@@ -2992,22 +2994,25 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
                          ? std::min(required_bytes, end - offset)
                          : end - offset;
     CUDF_EXPECTS(bytes >= required_bytes, "Packed column buffer is smaller than its column");
-    auto buffer       = allocate_output_buffer<Buffer>(bytes, stream, mr);
-    auto const source = input.payload.subspan(offset, bytes);
-    reader.request(source);
-    sources.push_back(source.data());
+    auto buffer = allocate_output_buffer<Buffer>(bytes, stream, mr);
+    payload_ranges.push_back(input.payload.subspan(offset, bytes));
+    reader.request(payload_ranges.back());
     destinations.push_back(buffer_data(buffer));
-    sizes.push_back(bytes);
     return buffer;
   };
   auto columns = materialize_columns(metadata, selection, allocate_buffer);
   reader.upload(stream, mr);
-  for (auto& source : sources) {
-    source = reader.device_pointer(source);
+  std::vector<uint8_t const*> sources;
+  std::vector<std::size_t> sizes;
+  for (auto const range : payload_ranges) {
+    sources.push_back(reader.device_pointer(range.data()));
+    sizes.push_back(range.size());
   }
 
   // Uploading the batch descriptors costs more than a few individual copies.
   constexpr std::size_t max_individual_copies = 16;
+  auto const reads_host_memory =
+    reader.reads_host_memory() || sources.size() > max_individual_copies;
   if (sources.size() <= max_individual_copies) {
     for (std::size_t i = 0; i < sources.size(); ++i) {
       CUDF_CUDA_TRY(cudf::detail::memcpy_async(destinations[i], sources[i], sizes[i], stream));
@@ -3021,6 +3026,8 @@ std::unique_ptr<table> materialize_uncompressed(packed_data_view input,
     cudf::detail::batched_memcpy_async(
       d_sources.begin(), d_destinations.begin(), d_sizes.begin(), sources.size(), stream);
   }
+  // Host sources are read when the stream reaches each copy, so they must outlive this call.
+  if (reads_host_memory) { stream.sync(); }
   return std::make_unique<table>(std::move(columns));
 }
 
@@ -3451,6 +3458,10 @@ pack_result pack_into(pack_plan const& plan,
   std::vector<uint64_t> table(num_chunks, 0);
   std::vector<uint64_t> chunk_offsets(num_chunks, 0);
   auto payload_bytes = table_bytes;
+  // The asynchronous uploads read these until the stream synchronizes on the next window's results.
+  std::vector<uint8_t const*> sources;
+  std::vector<uint8_t*> targets;
+  std::vector<std::size_t> copy_bytes;
   for (auto const& window : impl.windows) {
     compress_window(window);
     auto const h_results =
@@ -3458,9 +3469,9 @@ pack_result pack_into(pack_plan const& plan,
                                          window.first_item, window.end_item - window.first_item),
                                        stream);
     auto const window_begin = payload_bytes;
-    std::vector<uint8_t const*> sources;
-    std::vector<uint8_t*> targets;
-    std::vector<std::size_t> copy_bytes;
+    sources.clear();
+    targets.clear();
+    copy_bytes.clear();
     for (auto c = window.first_item; c < window.end_item; ++c) {
       auto const& chunk  = impl.chunks[c];
       auto const& region = impl.regions[chunk.region];
@@ -3484,9 +3495,9 @@ pack_result pack_into(pack_plan const& plan,
       copy_bytes.push_back(bytes);
       payload_bytes += bytes;
     }
-    auto const d_sources    = cudf::detail::make_device_uvector(sources, stream, temp_mr);
-    auto const d_targets    = cudf::detail::make_device_uvector(targets, stream, temp_mr);
-    auto const d_copy_bytes = cudf::detail::make_device_uvector(copy_bytes, stream, temp_mr);
+    auto const d_sources    = cudf::detail::make_device_uvector_async(sources, stream, temp_mr);
+    auto const d_targets    = cudf::detail::make_device_uvector_async(targets, stream, temp_mr);
+    auto const d_copy_bytes = cudf::detail::make_device_uvector_async(copy_bytes, stream, temp_mr);
     cudf::detail::batched_memcpy_async(
       d_sources.begin(), d_targets.begin(), d_copy_bytes.begin(), d_sources.size(), stream);
     if (to_host) { copy_to_host(window_begin, compacted, payload_bytes - window_begin); }
@@ -3494,9 +3505,10 @@ pack_result pack_into(pack_plan const& plan,
   if (to_host) {
     std::memcpy(destination.data(), table.data(), table_bytes);
   } else {
-    cudf::detail::cuda_memcpy<uint64_t>(
+    cudf::detail::cuda_memcpy_async<uint64_t>(
       device_span{reinterpret_cast<uint64_t*>(destination.data()), num_chunks}, table, stream);
   }
+  stream.sync();
 
   std::vector<compression_metadata_entry> entries;
   entries.reserve(impl.regions.size());
