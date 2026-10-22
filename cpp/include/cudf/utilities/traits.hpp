@@ -35,18 +35,22 @@ namespace CUDF_EXPORT cudf {
 template <typename...>
 using void_t [[deprecated("Use cuda::std::void_t instead.")]] = void;
 
+namespace detail {
+[[deprecated(
+  "CUDF_ENABLE_IF is deprecated. Use a constrained template parameter or a requires clause "
+  "instead.")]] inline constexpr bool cudf_enable_if = true;
+}  // namespace detail
+
 /**
  * @brief Convenience macro for SFINAE as an unnamed template parameter.
  *
- * Example:
- * \code{cpp}
- * // This function will participate in overload resolution only if T is an integral type
- * template <typename T, CUDF_ENABLE_IF(cuda::std::is_integral_v<T> )>
- * void foo();
- * \endcode
- *
+ * @deprecated Use a constrained template parameter or a `requires` clause instead, with the
+ * concepts in `cudf/utilities/concepts.hpp`. For example,
+ * `template <typename T, CUDF_ENABLE_IF(cudf::is_fixed_width<T>())>` becomes
+ * `template <cudf::concepts::fixed_width T>`.
  */
-#define CUDF_ENABLE_IF(...) cuda::std::enable_if_t<(__VA_ARGS__)>* = nullptr
+#define CUDF_ENABLE_IF(...) \
+  cuda::std::enable_if_t<(::cudf::detail::cudf_enable_if && (__VA_ARGS__))>* = nullptr
 
 /**
  * @brief Checks if two types are comparable using less operator (i.e. <).

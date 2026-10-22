@@ -127,6 +127,14 @@ repos:
         types_or: [c, c++, cuda]
         files: '^cpp/'
         exclude: '^cpp/include/cudf_test/cxxopts[.]hpp$'
+      - id: use-concepts-instead-of-sfinae
+        name: use-concepts-instead-of-sfinae
+        description: 'Enforce that templates are constrained with concepts instead of SFINAE with CUDF_ENABLE_IF or enable_if (see developer guide)'
+        entry: '\b(?:CUDF_ENABLE_IF|enable_if(?:_t)?)\b'
+        language: pygrep
+        types_or: [c, c++, cuda]
+        files: '^cpp/'
+        exclude: '^cpp/include/cudf/utilities/traits[.]hpp$|^cpp/include/cudf_test/cxxopts[.]hpp$'
       - id: exec-policy-nosync-memory-resource
         name: exec-policy-nosync-memory-resource
         description: 'Enforce that rmm::exec_policy_nosync is always passed a memory resource as its second argument'
