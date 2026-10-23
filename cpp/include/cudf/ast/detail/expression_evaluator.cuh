@@ -667,6 +667,9 @@ struct expression_evaluator {
     }
 
     template <typename Element, typename ResultSubclass, typename T, bool result_has_nulls>
+      requires(not cudf::concepts::rep_layout_compatible<Element> and
+               not(cuda::std::same_as<Element, numeric::decimal32> or
+                   cuda::std::same_as<Element, numeric::decimal64>))
     __device__ inline void resolve_output(
       expression_result<ResultSubclass, T, result_has_nulls>& output_object,
       detail::device_data_reference const& device_data_reference,
