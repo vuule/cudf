@@ -117,7 +117,7 @@ std::vector<std::string> parse_variant_path(std::string_view path)
   return steps;
 }
 
-variant_path_trie build_variant_path_trie(host_span<std::string_view const> paths)
+variant_path_trie build_variant_path_trie(std::span<std::string_view const> paths)
 {
   // Node 0 is the root: the value blob itself, before any step is applied.
   std::vector<trie_builder_node> nodes(1);

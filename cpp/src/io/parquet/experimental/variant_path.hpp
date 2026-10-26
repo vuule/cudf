@@ -6,8 +6,8 @@
 #pragma once
 
 #include <cudf/types.hpp>
-#include <cudf/utilities/span.hpp>
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -74,6 +74,6 @@ struct variant_path_trie {
  *
  * @throws std::invalid_argument if any path is empty or malformed
  */
-[[nodiscard]] variant_path_trie build_variant_path_trie(host_span<std::string_view const> paths);
+[[nodiscard]] variant_path_trie build_variant_path_trie(std::span<std::string_view const> paths);
 
 }  // namespace cudf::io::parquet::experimental::detail

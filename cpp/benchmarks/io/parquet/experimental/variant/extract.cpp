@@ -8,8 +8,10 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
+#include <cudf/filling.hpp>
 #include <cudf/io/experimental/variant.hpp>
 #include <cudf/io/experimental/variant_spec.hpp>
+#include <cudf/scalar/scalar.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
@@ -705,12 +707,15 @@ status_columns make_status_columns(std::size_t num_paths,
   status_columns out;
   out.columns.reserve(num_paths);
   out.views.reserve(num_paths);
+  cudf::numeric_scalar<uint8_t> const success{
+    static_cast<uint8_t>(cudf::io::parquet::experimental::variant_operation_status::SUCCESS),
+    true,
+    stream};
   for (std::size_t p = 0; p < num_paths; ++p) {
     out.columns.push_back(cudf::make_numeric_column(
       cudf::data_type{cudf::type_id::UINT8}, num_rows, cudf::mask_state::UNALLOCATED, stream, mr));
     auto view = out.columns.back()->mutable_view();
-    CUDF_CUDA_TRY(
-      cudaMemsetAsync(view.data<uint8_t>(), 0, static_cast<std::size_t>(num_rows), stream.get()));
+    cudf::fill_in_place(view, 0, num_rows, success, stream);
     out.views.push_back(view);
   }
   CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));

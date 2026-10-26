@@ -34,7 +34,6 @@
 #include <cudf/utilities/type_dispatcher.hpp>
 
 #include <rmm/device_buffer.hpp>
-#include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cub/device/device_segmented_reduce.cuh>
@@ -58,6 +57,7 @@
 #include <iterator>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -1726,11 +1726,14 @@ std::unique_ptr<column> get_variant_field(column_view const& variant_column,
 }
 
 std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
-                                          host_span<std::string_view const> paths,
-                                          host_span<mutable_column_view const> statuses,
+                                          std::span<std::string_view const> paths,
+                                          std::span<mutable_column_view const> statuses,
                                           cuda::stream_ref stream,
-                                          rmm::device_async_resource_ref mr)
+                                          cudf::memory_resources resources)
 {
+  auto const mr      = resources.get_output_mr();
+  auto const temp_mr = resources.get_temporary_mr();
+
   // Validate the variant column
   CUDF_EXPECTS(variant_column.type().id() == type_id::STRUCT,
                "VARIANT column must be struct type",
@@ -1778,8 +1781,6 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
     return std::make_unique<table>(std::move(output));
   }
 
-  auto const temp_mr = cudf::get_current_device_resource_ref();
-
   auto steps_column           = build_path_column(trie.steps, stream, temp_mr);
   auto steps_device_view      = column_device_view::create(steps_column->view(), stream);
   auto const d_slot_steps     = stage_to_device_async(trie.slot_steps, stream, temp_mr);
@@ -1811,8 +1812,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
                "VARIANT paths times rows exceeds cudf size_type limit",
                std::overflow_error);
   auto const num_outputs = num_paths * num_rows;
-  rmm::device_uvector<size_type> d_sizes(num_outputs, stream, temp_mr);
-  rmm::device_uvector<size_type> d_src_offsets(num_outputs, stream, temp_mr);
+  cuda::device_buffer<size_type> d_sizes(stream, temp_mr, num_outputs, cuda::no_init);
+  cuda::device_buffer<size_type> d_src_offsets(stream, temp_mr, num_outputs, cuda::no_init);
 
   // One null mask per output column, narrowed from all-valid by the walk
   std::vector<cuda::device_buffer<bitmask_type>> null_masks;
@@ -1846,10 +1847,11 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   auto const num_blocks =
     use_local_scratch ? grid.num_blocks
                       : std::min(grid.num_blocks, static_cast<thread_index_type>(scratch_blocks));
-  rmm::device_uvector<slot_result> d_scratch(
-    use_local_scratch ? 0 : static_cast<std::size_t>(num_blocks) * block_size * trie_depth,
+  cuda::device_buffer<slot_result> d_scratch(
     stream,
-    temp_mr);
+    temp_mr,
+    use_local_scratch ? 0 : static_cast<std::size_t>(num_blocks) * block_size * trie_depth,
+    cuda::no_init);
 
   // Room for the trie arrays in shared memory, kept within the default per-block limit so that the
   // launch needs no opt-in; a trie too large for it is read from global memory instead
@@ -1892,8 +1894,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   // the device and read back together below: going through the host once per path instead would
   // cost two blocking transfers per path, which is the one cost that would still scale with the
   // number of paths.
-  rmm::device_uvector<int64_t> d_totals_and_nulls(
-    2 * static_cast<std::size_t>(num_paths), stream, temp_mr);
+  cuda::device_buffer<int64_t> d_totals_and_nulls(
+    stream, temp_mr, 2 * static_cast<std::size_t>(num_paths), cuda::no_init);
   std::vector<std::unique_ptr<column>> offsets_columns;
   offsets_columns.reserve(num_paths);
   auto h_offsets = cudf::detail::make_pinned_vector_async<size_type*>(num_paths, stream);
@@ -2068,11 +2070,11 @@ std::unique_ptr<column> cast_variant(column_view const& values,
 }
 
 std::unique_ptr<table> extract_variant_fields(column_view const& variant_column,
-                                              host_span<std::string_view const> paths,
-                                              host_span<data_type const> desired_types,
-                                              host_span<mutable_column_view const> statuses,
+                                              std::span<std::string_view const> paths,
+                                              std::span<data_type const> desired_types,
+                                              std::span<mutable_column_view const> statuses,
                                               cuda::stream_ref stream,
-                                              rmm::device_async_resource_ref mr)
+                                              cudf::memory_resources resources)
 {
   CUDF_EXPECTS(paths.size() == desired_types.size(),
                "VARIANT paths and desired types must have the same size",
@@ -2084,11 +2086,11 @@ std::unique_ptr<table> extract_variant_fields(column_view const& variant_column,
     validate_cast_type(desired_type);
   }
 
-  auto const temp_mr     = cudf::get_current_device_resource_ref();
   auto const want_status = !statuses.empty();
   // Each path's status is filled by the walk, then read back by that path's cast as incoming status
   // and overwritten in place with the final status.
-  auto const values = get_variant_fields(variant_column, paths, statuses, stream, temp_mr);
+  auto const values =
+    get_variant_fields(variant_column, paths, statuses, stream, resources.as_temporary());
 
   std::vector<std::unique_ptr<column>> output;
   output.reserve(paths.size());
@@ -2097,7 +2099,7 @@ std::unique_ptr<table> extract_variant_fields(column_view const& variant_column,
                                   desired_types[p],
                                   want_status ? std::optional{statuses[p]} : std::nullopt,
                                   stream,
-                                  mr));
+                                  resources.get_output_mr()));
   }
   return std::make_unique<table>(std::move(output));
 }
@@ -2195,21 +2197,21 @@ std::unique_ptr<column> extract_variant_field(column_view const& variant_column,
 }
 
 std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
-                                          host_span<std::string_view const> paths,
-                                          host_span<mutable_column_view const> statuses,
+                                          std::span<std::string_view const> paths,
+                                          std::span<mutable_column_view const> statuses,
                                           cuda::stream_ref stream,
-                                          rmm::device_async_resource_ref mr)
+                                          cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   return detail::get_variant_fields(variant_column, paths, statuses, stream, mr);
 }
 
 std::unique_ptr<table> extract_variant_fields(column_view const& variant_column,
-                                              host_span<std::string_view const> paths,
-                                              host_span<data_type const> desired_types,
-                                              host_span<mutable_column_view const> statuses,
+                                              std::span<std::string_view const> paths,
+                                              std::span<data_type const> desired_types,
+                                              std::span<mutable_column_view const> statuses,
                                               cuda::stream_ref stream,
-                                              rmm::device_async_resource_ref mr)
+                                              cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   return detail::extract_variant_fields(variant_column, paths, desired_types, statuses, stream, mr);

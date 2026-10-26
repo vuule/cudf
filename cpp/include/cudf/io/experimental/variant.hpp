@@ -12,12 +12,12 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
-#include <cudf/utilities/span.hpp>
 
 #include <cuda/stream>
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <string_view>
 
 /**
@@ -154,7 +154,7 @@ namespace io::parquet::experimental {
  *                 fills its own. Each must be non-nullable, `UINT8`, and have the same row count as
  *                 `variant_column`
  * @param stream CUDA stream
- * @param mr Device memory resource
+ * @param mr Memory resources for the returned table and for temporary allocations
  * @return Table of one `list<uint8>` column per path, in the order the paths were given. Row
  *         nullability matches `get_variant_field`
  *
@@ -164,10 +164,10 @@ namespace io::parquet::experimental {
  */
 [[nodiscard]] std::unique_ptr<table> get_variant_fields(
   column_view const& variant_column,
-  host_span<std::string_view const> paths,
-  host_span<mutable_column_view const> statuses = {},
+  std::span<std::string_view const> paths,
+  std::span<mutable_column_view const> statuses = {},
   cuda::stream_ref stream                       = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr             = cudf::get_current_device_resource_ref());
+  cudf::memory_resources mr                     = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Convenience wrapper: extract several nested fields by path and decode each into a typed
@@ -185,7 +185,7 @@ namespace io::parquet::experimental {
  *                 `extract_variant_field` fills its own. Each must be non-nullable, `UINT8`, and
  *                 have the same row count as `variant_column`. Any incoming values are overwritten
  * @param stream CUDA stream
- * @param mr Device memory resource
+ * @param mr Memory resources for the returned table and for temporary allocations
  * @return Table of one column per path, in the order the paths were given
  *
  * @throws std::invalid_argument if any path is empty or malformed, if `paths` and `desired_types`
@@ -195,11 +195,11 @@ namespace io::parquet::experimental {
  */
 [[nodiscard]] std::unique_ptr<table> extract_variant_fields(
   column_view const& variant_column,
-  host_span<std::string_view const> paths,
-  host_span<data_type const> desired_types,
-  host_span<mutable_column_view const> statuses = {},
+  std::span<std::string_view const> paths,
+  std::span<data_type const> desired_types,
+  std::span<mutable_column_view const> statuses = {},
   cuda::stream_ref stream                       = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr             = cudf::get_current_device_resource_ref());
+  cudf::memory_resources mr                     = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Return the logical type of each VARIANT value blob in a `list<uint8>` column.
