@@ -27,6 +27,7 @@
 #include <memory>
 #include <numeric>
 #include <random>
+#include <ranges>
 #include <span>
 #include <string>
 #include <tuple>
@@ -130,16 +131,16 @@ std::vector<uint8_t> build_object(
   std::vector<uint8_t> out{
     make_variant_header(variant_basic_type::OBJECT, static_cast<uint8_t>(offset_size - 1)),
     static_cast<uint8_t>(fields.size())};
-  for (auto const& [id, value] : fields) {
-    out.push_back(id);
-  }
+  auto const ids = std::views::keys(fields);
+  out.insert(out.end(), ids.begin(), ids.end());
+
   std::size_t running = 0;
-  for (auto const& [id, value] : fields) {
+  for (auto const& value : std::views::values(fields)) {
     append_le(out, running, offset_size);
     running += value.size();
   }
   append_le(out, running, offset_size);  // sentinel offset after the last field
-  for (auto const& [id, value] : fields) {
+  for (auto const& value : std::views::values(fields)) {
     out.insert(out.end(), value.begin(), value.end());
   }
   return out;
