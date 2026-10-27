@@ -686,35 +686,9 @@ NVBENCH_BENCH(bench_variant_extract_fields)
   .add_int64_axis("hit_rate", {20, 80})
   .add_string_axis("sorted", {"true", "false"});
 
-// One status column per path, for the benchmarks' `status` axis, or none when it is off: an empty
-// `views` is how the batched API spells "no status wanted".
-struct status_columns {
-  std::vector<std::unique_ptr<cudf::column>> columns;
-  std::vector<cudf::mutable_column_view> views;
-};
-
-status_columns make_status_columns(std::size_t num_paths,
-                                   cudf::size_type num_rows,
-                                   cuda::stream_ref stream,
-                                   rmm::device_async_resource_ref mr)
-{
-  status_columns out;
-  out.columns.reserve(num_paths);
-  out.views.reserve(num_paths);
-  // Left uninitialized: the extraction APIs write every row's status before their cast reads it.
-  for (std::size_t path_idx = 0; path_idx < num_paths; ++path_idx) {
-    out.columns.push_back(cudf::make_numeric_column(
-      cudf::data_type{cudf::type_id::UINT8}, num_rows, cudf::mask_state::UNALLOCATED, stream, mr));
-    out.views.push_back(out.columns.back()->mutable_view());
-  }
-  CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
-  return out;
-}
-
 // Compares extracting many fields in one batched call against looping the single-field API, with
 // and without a prefix shared by all the requested paths. Type is fixed to int32_t; both APIs
-// decode, so the two sides of the comparison are end-to-end equivalent. The `status` axis asks both
-// for per-row status, which the batched walk writes once per path and row.
+// decode, so the two sides of the comparison are end-to-end equivalent.
 // Every field holds a real leaf, so no path hits a filler value and skips its cast and copy.
 static void bench_variant_extract_multi_field(nvbench::state& state)
 {
@@ -726,7 +700,6 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
   auto const hit_rate      = static_cast<int>(state.get_int64("hit_rate"));
   bool const shared_prefix = state.get_string("prefix") == "shared";
   bool const batched       = state.get_string("api") == "batched";
-  bool const with_status   = state.get_string("status") == "on";
 
   // Dictionary: the shared parent key "a", the leaf keys f00..f{N-1}, and "z" for miss rows, in
   // sorted order. Field ids are dictionary indices, so "a" is 0 and leaf `i` is `i + 1`.
@@ -764,8 +737,6 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
   auto const target_type = cudf::data_type{cudf::type_id::INT32};
   std::vector<cudf::data_type> const target_types(num_fields, target_type);
 
-  auto status = make_status_columns(with_status ? paths.size() : 0, num_rows, stream, mr);
-
   auto const data_size = static_cast<std::size_t>(num_rows) * (meta_blob.size() + hit_val.size());
 
   auto mem_stats_logger = cudf::memory_stats_logger();
@@ -774,16 +745,11 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) {
     if (batched) {
       std::ignore = cudf::io::parquet::experimental::extract_variant_fields(
-        col->view(), paths, target_types, status.views, stream, mr);
+        col->view(), paths, target_types, {}, stream, mr);
     } else {
       for (std::size_t path_idx = 0; path_idx < path_strings.size(); ++path_idx) {
         std::ignore = cudf::io::parquet::experimental::extract_variant_field(
-          col->view(),
-          path_strings[path_idx],
-          target_type,
-          with_status ? std::optional{status.views[path_idx]} : std::nullopt,
-          stream,
-          mr);
+          col->view(), path_strings[path_idx], target_type, std::nullopt, stream, mr);
       }
     }
   });
@@ -800,5 +766,4 @@ NVBENCH_BENCH(bench_variant_extract_multi_field)
   .add_int64_axis("num_fields", {1, 4, 16, 64})
   .add_string_axis("prefix", {"shared", "disjoint"})
   .add_string_axis("api", {"batched", "looped"})
-  .add_string_axis("status", {"off", "on"})
   .add_int64_axis("hit_rate", {80});
