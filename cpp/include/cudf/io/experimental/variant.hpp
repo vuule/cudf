@@ -146,12 +146,10 @@ namespace io::parquet::experimental {
  * and copied by a single pass.
  *
  * @param variant_column Struct column (VARIANT materialization)
- * @param paths JSONPath-like path strings (see `get_variant_field` for syntax). Duplicate and
+ * @param paths JSONPath-like path strings (see `get_variant_field` for syntax); duplicate and
  *              overlapping paths are allowed
- * @param statuses Optional. When non-empty, one status column per path, each filled with that
- *                 path's `variant_operation_status` values, one per row, as `get_variant_field`
- *                 fills its own. Each must be non-nullable, `UINT8`, and have the same row count as
- *                 `variant_column`. Any incoming values are overwritten
+ * @param statuses Optional. When non-empty, one status column per path, each as `status` in
+ *                 `get_variant_field`
  * @param stream CUDA stream
  * @param mr Memory resources used for the returned table and temporary allocations
  * @return Table of one `list<uint8>` column per path, in the order the paths were given. Row
@@ -180,10 +178,8 @@ namespace io::parquet::experimental {
  *              sets are allowed)
  * @param desired_types Target type of each path's output column; parallels `paths` (see
  *                      `cast_variant` for the supported types)
- * @param statuses Optional. When non-empty, one status column per path, each filled with that
- *                 path's `variant_operation_status` values, one per row, as
- *                 `extract_variant_field` fills its own. Each must be non-nullable, `UINT8`, and
- *                 have the same row count as `variant_column`. Any incoming values are overwritten
+ * @param statuses Optional. When non-empty, one status column per path, each as `status` in
+ *                 `extract_variant_field`
  * @param stream CUDA stream
  * @param mr Memory resources used for the returned table and temporary allocations
  * @return Table of one column per path, in the order the paths were given
