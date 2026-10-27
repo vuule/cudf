@@ -36,24 +36,18 @@ namespace cudf::io::parquet::experimental::detail {
 /**
  * @brief A set of VARIANT paths merged into a prefix tree, flattened for a device walk.
  *
- * Slots are the units of work of the device walk: slot `k` starts from the value located by its
- * parent slot (or from the whole value blob when `slot_depth[k]` is 0) and applies the steps
- * `steps[slot_steps[k] : slot_steps[k + 1]]`.
+ * Slots are the walk's units of work: slot `k` starts from the value its parent slot located, or
+ * from the whole value blob when `slot_depth[k]` is 0, and applies the steps
+ * `steps[slot_steps[k] : slot_steps[k + 1]]`. Only branch points and path ends get a slot; a prefix
+ * with a single continuation is folded into its descendant's step range, so `$.user.addr.zip` is
+ * one slot of three steps.
  *
- * Only prefixes worth caching get a slot: a prefix shared by more than one path (a branch point) or
- * one that ends a path. A prefix with a single continuation and no path ending on it is folded into
- * its descendant's step range, so `$.user.addr.zip` is one slot holding three steps rather than
- * three slots.
+ * Slots are in depth-first pre-order, so a walk can keep one located value per depth rather than
+ * one per slot.
  *
- * Slots are in depth-first pre-order, so a slot's subtree is contiguous and immediately follows it.
- * A walk can therefore keep one located value per depth: when it reaches slot `k`, the entry at
- * `slot_depth[k] - 1` still holds its parent's value. That bounds the walk's scratch by the depth
- * of the trie rather than by its slot count.
- *
- * `output_offsets` and `output_paths` are the reverse of the path-to-slot mapping in CSR form: the
- * value of slot `k` is the output of the input paths `output_paths[output_offsets[k] :
- * output_offsets[k + 1]]`, which is empty for a slot that only exists as a shared prefix. Duplicate
- * paths land on one slot with several outputs.
+ * `output_offsets` and `output_paths` invert the path-to-slot mapping in CSR form: slot `k`'s value
+ * is the output of paths `output_paths[output_offsets[k] : output_offsets[k + 1]]`, which is empty
+ * for a slot that only exists as a shared prefix.
  */
 struct variant_path_trie {
   std::vector<std::string> steps;         ///< Step tokens of every slot, concatenated in slot order
