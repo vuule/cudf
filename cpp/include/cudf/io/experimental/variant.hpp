@@ -54,7 +54,7 @@ namespace io::parquet::experimental {
  * @param path JSONPath-like path string identifying the target field
  * @param status Optional. When provided, filled with `variant_operation_status` values, one per
  *               row. Must be non-nullable, `UINT8`, and have the same row count as
- *               `variant_column`
+ *               `variant_column`. Any incoming values are overwritten
  * @param stream CUDA stream
  * @param mr Device memory resource
  * @return `list<uint8>` column with the extracted value's encoded bytes. A row is null when the
@@ -122,7 +122,7 @@ namespace io::parquet::experimental {
  * @param desired_type Target type (see `cast_variant` for the supported types)
  * @param status Optional. When provided, filled with `variant_operation_status` values, one per
  *               row. Must be non-nullable, `UINT8`, and have the same row count as
- *               `variant_column`
+ *               `variant_column`. Any incoming values are overwritten
  * @param stream CUDA stream
  * @param mr Device memory resource
  * @return Column of `desired_type`
@@ -154,7 +154,7 @@ namespace io::parquet::experimental {
  *                 fills its own. Each must be non-nullable, `UINT8`, and have the same row count as
  *                 `variant_column`. Any incoming values are overwritten
  * @param stream CUDA stream
- * @param mr Memory resources for the returned table and for temporary allocations
+ * @param mr Memory resources used for the returned table and temporary allocations
  * @return Table of one `list<uint8>` column per path, in the order the paths were given. Row
  *         nullability matches `get_variant_field`
  *
@@ -186,7 +186,7 @@ namespace io::parquet::experimental {
  *                 `extract_variant_field` fills its own. Each must be non-nullable, `UINT8`, and
  *                 have the same row count as `variant_column`. Any incoming values are overwritten
  * @param stream CUDA stream
- * @param mr Memory resources for the returned table and for temporary allocations
+ * @param mr Memory resources used for the returned table and temporary allocations
  * @return Table of one column per path, in the order the paths were given
  *
  * @throws std::invalid_argument if any path is empty or malformed, if `paths` and `desired_types`
