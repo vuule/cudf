@@ -418,14 +418,17 @@ std::vector<uint8_t> build_flat_object(int num_fields,
                                        int target_fid,
                                        std::span<uint8_t const> inner)
 {
-  static constexpr uint8_t dummy =
+  // The fields that are not the lookup target only pad the object out to num_fields, so they hold
+  // BOOLEAN_TRUE: the one VARIANT value whose header byte is the whole encoding. Every such field
+  // shares this byte, since build_object only reads it.
+  static constexpr uint8_t filler_value =
     make_variant_primitive_header(variant_primitive_type::BOOLEAN_TRUE);
 
   std::vector<object_field> fields;
   fields.reserve(num_fields);
   for (int i = 0; i < num_fields; ++i) {
     fields.emplace_back(static_cast<uint8_t>(i),
-                        i == target_fid ? inner : std::span<uint8_t const>{&dummy, 1});
+                        i == target_fid ? inner : std::span<uint8_t const>{&filler_value, 1});
   }
   return build_object(fields);
 }
