@@ -107,11 +107,14 @@ std::string field_key(int i)
   return std::format("f{:02}", i);
 }
 
+// A field of an object under construction: its dictionary id and its already-encoded value bytes,
+// which the caller keeps alive.
+using object_field = std::pair<uint8_t, std::span<uint8_t const>>;
+
 // Build a VARIANT object from (field id, value) pairs. Ids must be ascending, which for a
 // name-sorted dictionary is also name order, as the spec requires. Field offsets widen to 2 bytes
 // once the values region outgrows a single byte.
-std::vector<uint8_t> build_object(
-  std::vector<std::pair<uint8_t, std::vector<uint8_t>>> const& fields)
+std::vector<uint8_t> build_object(std::vector<object_field> const& fields)
 {
   constexpr std::size_t max_single_byte_offset = 255;
   CUDF_EXPECTS(fields.size() <= max_single_byte_offset + 1,
@@ -194,7 +197,7 @@ std::vector<uint8_t> build_metadata(std::vector<std::string> const& keys, bool s
 // Wrap `inner` as the sole field (field id `fid`) of a 1-field VARIANT object.
 std::vector<uint8_t> wrap_in_object(uint8_t fid, std::span<uint8_t const> inner)
 {
-  return build_object({{fid, {inner.begin(), inner.end()}}});
+  return build_object({{fid, inner}});
 }
 
 // Build the leaf VARIANT value blob for the requested type.
@@ -415,13 +418,14 @@ std::vector<uint8_t> build_flat_object(int num_fields,
                                        int target_fid,
                                        std::span<uint8_t const> inner)
 {
-  std::vector<std::pair<uint8_t, std::vector<uint8_t>>> fields;
+  static constexpr uint8_t dummy =
+    make_variant_primitive_header(variant_primitive_type::BOOLEAN_TRUE);
+
+  std::vector<object_field> fields;
   fields.reserve(num_fields);
   for (int i = 0; i < num_fields; ++i) {
     fields.emplace_back(static_cast<uint8_t>(i),
-                        i == target_fid ? std::vector<uint8_t>{inner.begin(), inner.end()}
-                                        : std::vector<uint8_t>{make_variant_primitive_header(
-                                            variant_primitive_type::BOOLEAN_TRUE)});
+                        i == target_fid ? inner : std::span<uint8_t const>{&dummy, 1});
   }
   return build_object(fields);
 }
@@ -740,7 +744,7 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
   auto const meta_blob = build_metadata(keys);
 
   auto const leaf = build_leaf_value(bench_variant_type::INT32);
-  std::vector<std::pair<uint8_t, std::vector<uint8_t>>> leaf_fields;
+  std::vector<object_field> leaf_fields;
   for (int i = 0; i < num_fields; ++i) {
     leaf_fields.emplace_back(static_cast<uint8_t>(i + 1), leaf);
   }
