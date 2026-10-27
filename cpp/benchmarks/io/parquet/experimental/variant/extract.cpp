@@ -8,10 +8,8 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
-#include <cudf/filling.hpp>
 #include <cudf/io/experimental/variant.hpp>
 #include <cudf/io/experimental/variant_spec.hpp>
-#include <cudf/scalar/scalar.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
@@ -688,9 +686,8 @@ NVBENCH_BENCH(bench_variant_extract_fields)
   .add_int64_axis("hit_rate", {20, 80})
   .add_string_axis("sorted", {"true", "false"});
 
-// One status column per path, for the benchmarks' `status` axis, or none when it is off. The
-// extraction APIs read a status buffer as incoming status before overwriting it, so the buffers
-// start at SUCCESS.
+// One status column per path, for the benchmarks' `status` axis, or none when it is off: an empty
+// `views` is how the batched API spells "no status wanted".
 struct status_columns {
   std::vector<std::unique_ptr<cudf::column>> columns;
   std::vector<cudf::mutable_column_view> views;
@@ -704,16 +701,11 @@ status_columns make_status_columns(std::size_t num_paths,
   status_columns out;
   out.columns.reserve(num_paths);
   out.views.reserve(num_paths);
-  cudf::numeric_scalar<uint8_t> const success{
-    static_cast<uint8_t>(cudf::io::parquet::experimental::variant_operation_status::SUCCESS),
-    true,
-    stream};
+  // Left uninitialized: the extraction APIs write every row's status before their cast reads it.
   for (std::size_t path_idx = 0; path_idx < num_paths; ++path_idx) {
     out.columns.push_back(cudf::make_numeric_column(
       cudf::data_type{cudf::type_id::UINT8}, num_rows, cudf::mask_state::UNALLOCATED, stream, mr));
-    auto view = out.columns.back()->mutable_view();
-    cudf::fill_in_place(view, 0, num_rows, success, stream);
-    out.views.push_back(view);
+    out.views.push_back(out.columns.back()->mutable_view());
   }
   CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
   return out;
