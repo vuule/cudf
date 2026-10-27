@@ -747,9 +747,9 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
       std::ignore = cudf::io::parquet::experimental::extract_variant_fields(
         col->view(), paths, target_types, {}, stream, mr);
     } else {
-      for (std::size_t path_idx = 0; path_idx < path_strings.size(); ++path_idx) {
+      for (auto const& path : path_strings) {
         std::ignore = cudf::io::parquet::experimental::extract_variant_field(
-          col->view(), path_strings[path_idx], target_type, std::nullopt, stream, mr);
+          col->view(), path, target_type, std::nullopt, stream, mr);
       }
     }
   });
