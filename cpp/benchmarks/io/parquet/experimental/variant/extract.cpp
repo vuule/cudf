@@ -695,7 +695,7 @@ status_columns make_status_columns(std::size_t num_paths,
     static_cast<uint8_t>(cudf::io::parquet::experimental::variant_operation_status::SUCCESS),
     true,
     stream};
-  for (std::size_t p = 0; p < num_paths; ++p) {
+  for (std::size_t path_idx = 0; path_idx < num_paths; ++path_idx) {
     out.columns.push_back(cudf::make_numeric_column(
       cudf::data_type{cudf::type_id::UINT8}, num_rows, cudf::mask_state::UNALLOCATED, stream, mr));
     auto view = out.columns.back()->mutable_view();
@@ -770,12 +770,12 @@ static void bench_variant_extract_multi_field(nvbench::state& state)
       std::ignore = cudf::io::parquet::experimental::extract_variant_fields(
         col->view(), paths, target_types, status.views, stream, mr);
     } else {
-      for (std::size_t p = 0; p < path_strings.size(); ++p) {
+      for (std::size_t path_idx = 0; path_idx < path_strings.size(); ++path_idx) {
         std::ignore = cudf::io::parquet::experimental::extract_variant_field(
           col->view(),
-          path_strings[p],
+          path_strings[path_idx],
           target_type,
-          with_status ? std::optional{status.views[p]} : std::nullopt,
+          with_status ? std::optional{status.views[path_idx]} : std::nullopt,
           stream,
           mr);
       }

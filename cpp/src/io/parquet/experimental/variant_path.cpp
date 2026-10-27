@@ -120,9 +120,9 @@ variant_path_trie build_variant_path_trie(std::span<std::string_view const> path
   std::vector<trie_builder_node> nodes(1);
   std::vector<std::size_t> path_end_node(paths.size());
 
-  for (std::size_t p = 0; p < paths.size(); ++p) {
+  for (std::size_t path_idx = 0; path_idx < paths.size(); ++path_idx) {
     std::size_t node = 0;
-    for (auto const& step : parse_variant_path(paths[p])) {
+    for (auto const& step : parse_variant_path(paths[path_idx])) {
       auto const child = nodes[node].children.find(step);
       if (child != nodes[node].children.end()) {
         node = child->second;
@@ -134,7 +134,7 @@ variant_path_trie build_variant_path_trie(std::span<std::string_view const> path
       }
     }
     nodes[node].ends_a_path = true;
-    path_end_node[p]        = node;
+    path_end_node[path_idx] = node;
   }
 
   variant_path_trie trie;

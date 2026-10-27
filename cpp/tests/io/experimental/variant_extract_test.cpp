@@ -1339,7 +1339,7 @@ struct status_buffers {
   {
     columns.reserve(num_paths);
     views.reserve(num_paths);
-    for (std::size_t p = 0; p < num_paths; ++p) {
+    for (std::size_t path_idx = 0; path_idx < num_paths; ++path_idx) {
       columns.push_back(make_status_buffer(num_rows));
       views.push_back(columns.back()->mutable_view());
     }
@@ -1361,13 +1361,14 @@ void expect_matches_looped_get(cudf::column_view const& variant,
     cudf::io::parquet::experimental::get_variant_fields(variant, path_views, status.views, stream);
   ASSERT_EQ(got->num_columns(), static_cast<cudf::size_type>(paths.size()));
 
-  for (std::size_t p = 0; p < paths.size(); ++p) {
-    SCOPED_TRACE(std::string{"path: "} + paths[p]);
+  for (std::size_t path_idx = 0; path_idx < paths.size(); ++path_idx) {
+    SCOPED_TRACE(std::string{"path: "} + paths[path_idx]);
     auto const expected_status = make_status_buffer(variant.size());
     auto const expected        = cudf::io::parquet::experimental::get_variant_field(
-      variant, paths[p], expected_status->mutable_view(), stream);
-    CUDF_TEST_EXPECT_COLUMNS_EQUAL(got->get_column(static_cast<cudf::size_type>(p)), *expected);
-    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*status.columns[p], *expected_status);
+      variant, paths[path_idx], expected_status->mutable_view(), stream);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(got->get_column(static_cast<cudf::size_type>(path_idx)),
+                                   *expected);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*status.columns[path_idx], *expected_status);
   }
 }
 
@@ -3383,13 +3384,14 @@ TEST_F(ExtractVariantFieldsStatusTest, MatchesLoopedExtractStatus)
   auto const got = expns::extract_variant_fields(col, paths, types, status.views, stream, cmr());
 
   ASSERT_EQ(got->num_columns(), 3);
-  for (std::size_t p = 0; p < paths.size(); ++p) {
-    SCOPED_TRACE(std::string{"path: "} + std::string{paths[p]});
+  for (std::size_t path_idx = 0; path_idx < paths.size(); ++path_idx) {
+    SCOPED_TRACE(std::string{"path: "} + std::string{paths[path_idx]});
     auto const expected_status = make_status_buffer(cudf::column_view{col}.size());
     auto const expected        = expns::extract_variant_field(
-      col, paths[p], types[p], expected_status->mutable_view(), stream, cmr());
-    CUDF_TEST_EXPECT_COLUMNS_EQUAL(got->get_column(static_cast<cudf::size_type>(p)), *expected);
-    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*status.columns[p], *expected_status);
+      col, paths[path_idx], types[path_idx], expected_status->mutable_view(), stream, cmr());
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(got->get_column(static_cast<cudf::size_type>(path_idx)),
+                                   *expected);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*status.columns[path_idx], *expected_status);
   }
   expect_status_values(*status.columns[1], {ST_MISMATCH, ST_MISSING, ST_MISMATCH});
 }

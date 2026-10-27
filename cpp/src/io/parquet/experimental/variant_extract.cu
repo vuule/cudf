@@ -1819,17 +1819,17 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   std::vector<cuda::device_buffer<bitmask_type>> null_masks;
   null_masks.reserve(num_paths);
   auto h_null_masks = cudf::detail::make_pinned_vector_async<bitmask_type*>(num_paths, stream);
-  for (size_type p = 0; p < num_paths; ++p) {
+  for (size_type path_idx = 0; path_idx < num_paths; ++path_idx) {
     null_masks.push_back(cudf::create_null_mask(num_rows, mask_state::ALL_VALID, stream, mr));
-    h_null_masks[p] = null_masks.back().data();
+    h_null_masks[path_idx] = null_masks.back().data();
   }
   auto const d_null_masks = cudf::detail::make_device_uvector_async(h_null_masks, stream, temp_mr);
 
   // One caller-owned status buffer per path, written by the walk
   auto h_statuses =
     cudf::detail::make_pinned_vector_async<op_status*>(want_status ? num_paths : 0, stream);
-  for (size_type p = 0; p < static_cast<size_type>(h_statuses.size()); ++p) {
-    h_statuses[p] = reinterpret_cast<op_status*>(statuses[p].data<uint8_t>());
+  for (size_type path_idx = 0; path_idx < static_cast<size_type>(h_statuses.size()); ++path_idx) {
+    h_statuses[path_idx] = reinterpret_cast<op_status*>(statuses[path_idx].data<uint8_t>());
   }
   auto const d_statuses = cudf::detail::make_device_uvector_async(h_statuses, stream, temp_mr);
 
@@ -1899,10 +1899,10 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   std::vector<std::unique_ptr<column>> offsets_columns;
   offsets_columns.reserve(num_paths);
   auto h_offsets = cudf::detail::make_pinned_vector_async<size_type*>(num_paths, stream);
-  for (size_type p = 0; p < num_paths; ++p) {
+  for (size_type path_idx = 0; path_idx < num_paths; ++path_idx) {
     auto offsets_column = make_numeric_column(
       data_type{type_id::INT32}, num_rows + 1, mask_state::UNALLOCATED, stream, mr);
-    h_offsets[p] = offsets_column->mutable_view().data<size_type>();
+    h_offsets[path_idx] = offsets_column->mutable_view().data<size_type>();
     offsets_columns.push_back(std::move(offsets_column));
   }
   auto const d_offsets = cudf::detail::make_device_uvector_async(h_offsets, stream, temp_mr);
@@ -1910,18 +1910,20 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   // One scan per path rather than a single `exclusive_scan_by_key` over all of them: a plain scan
   // has no segment bookkeeping, and measuring the two showed the extra launches cost far less than
   // the key handling does once the rows per path outnumber the paths.
-  for (size_type p = 0; p < num_paths; ++p) {
+  for (size_type path_idx = 0; path_idx < num_paths; ++path_idx) {
     // The scan takes one input per output; the extra trailing input is never read for its own
     // output element.
     auto const path_sizes = cudf::detail::make_counting_transform_iterator(
       size_type{0},
       cuda::proclaim_return_type<size_type>(
-        [sizes = d_sizes.data(), base = p * num_rows, num_rows] __device__(
+        [sizes = d_sizes.data(), base = path_idx * num_rows, num_rows] __device__(
           size_type row) -> size_type { return row < num_rows ? sizes[base + row] : 0; }));
     // Offsets are narrowed to size_type on the way out while the scan accumulates in 64 bits, so
     // the total still reveals an overflow that the offsets themselves would have wrapped away.
-    auto const offsets_out = cudf::detail::make_sizes_to_offsets_iterator(
-      h_offsets[p], h_offsets[p] + num_rows + 1, d_totals_and_nulls.data() + p);
+    auto const offsets_out =
+      cudf::detail::make_sizes_to_offsets_iterator(h_offsets[path_idx],
+                                                   h_offsets[path_idx] + num_rows + 1,
+                                                   d_totals_and_nulls.data() + path_idx);
     thrust::exclusive_scan(rmm::exec_policy_nosync(stream, temp_mr),
                            path_sizes,
                            path_sizes + num_rows + 1,
@@ -1950,8 +1952,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
       }));
   auto const path_bounds = cudf::detail::make_counting_transform_iterator(
     size_type{0},
-    cuda::proclaim_return_type<size_type>(
-      [words_per_path] __device__(size_type p) -> size_type { return p * words_per_path; }));
+    cuda::proclaim_return_type<size_type>([words_per_path] __device__(size_type path_idx)
+                                            -> size_type { return path_idx * words_per_path; }));
   auto* const d_valid_counts    = d_totals_and_nulls.data() + num_paths;
   std::size_t reduce_temp_bytes = 0;
   CUDF_CUDA_TRY(cub::DeviceSegmentedReduce::Sum(nullptr,
@@ -1980,8 +1982,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   value_children.reserve(num_paths);
   auto h_out              = cudf::detail::make_pinned_vector_async<uint8_t*>(num_paths, stream);
   int64_t all_paths_bytes = 0;
-  for (size_type p = 0; p < num_paths; ++p) {
-    auto const total_bytes = totals_and_nulls[p];
+  for (size_type path_idx = 0; path_idx < num_paths; ++path_idx) {
+    auto const total_bytes = totals_and_nulls[path_idx];
     CUDF_EXPECTS(total_bytes <= std::numeric_limits<size_type>::max(),
                  "VARIANT extracted bytes exceed cudf size_type limit",
                  std::overflow_error);
@@ -1990,7 +1992,7 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
                                            mask_state::UNALLOCATED,
                                            stream,
                                            mr);
-    h_out[p]         = value_child->mutable_view().data<uint8_t>();
+    h_out[path_idx]  = value_child->mutable_view().data<uint8_t>();
     all_paths_bytes += total_bytes;
     value_children.push_back(std::move(value_child));
   }
@@ -2017,14 +2019,15 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
     cudf::detail::batched_memcpy_async(src_iter, dst_iter, d_sizes.begin(), num_outputs, stream);
   }
 
-  for (size_type p = 0; p < num_paths; ++p) {
-    auto const null_count = num_rows - static_cast<size_type>(totals_and_nulls[num_paths + p]);
+  for (size_type path_idx = 0; path_idx < num_paths; ++path_idx) {
+    auto const null_count =
+      num_rows - static_cast<size_type>(totals_and_nulls[num_paths + path_idx]);
     output.push_back(make_lists_column(
       num_rows,
-      std::move(offsets_columns[p]),
-      std::move(value_children[p]),
+      std::move(offsets_columns[path_idx]),
+      std::move(value_children[path_idx]),
       null_count,
-      null_count > 0 ? std::move(null_masks[p])
+      null_count > 0 ? std::move(null_masks[path_idx])
                      : cudf::detail::create_null_mask(0, mask_state::UNALLOCATED, stream, mr)));
   }
 
@@ -2094,10 +2097,10 @@ std::unique_ptr<table> extract_variant_fields(column_view const& variant_column,
 
   std::vector<std::unique_ptr<column>> output;
   output.reserve(paths.size());
-  for (size_type p = 0; p < values->num_columns(); ++p) {
-    output.push_back(cast_variant(values->get_column(p).view(),
-                                  desired_types[p],
-                                  want_status ? std::optional{statuses[p]} : std::nullopt,
+  for (size_type path_idx = 0; path_idx < values->num_columns(); ++path_idx) {
+    output.push_back(cast_variant(values->get_column(path_idx).view(),
+                                  desired_types[path_idx],
+                                  want_status ? std::optional{statuses[path_idx]} : std::nullopt,
                                   stream,
                                   resources.get_output_mr()));
   }
