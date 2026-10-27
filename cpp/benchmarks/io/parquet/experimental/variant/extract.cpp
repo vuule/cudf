@@ -84,12 +84,6 @@ uint8_t make_variant_short_string_header(std::size_t length)
   return make_variant_header(variant_basic_type::SHORT_STRING, static_cast<uint8_t>(length));
 }
 
-// Header byte for an object value with 1-byte field ids and 1-byte offsets (value_header == 0).
-constexpr uint8_t make_variant_object_header()
-{
-  return make_variant_header(variant_basic_type::OBJECT, 0);
-}
-
 // Header byte for an array value with 1-byte count and 1-byte offsets (value_header == 0).
 constexpr uint8_t make_variant_array_header()
 {
@@ -102,6 +96,46 @@ void append_le(std::vector<uint8_t>& out, uint64_t bits, int width)
   for (int i = 0; i < width; ++i) {
     out.push_back(static_cast<uint8_t>((bits >> (8 * i)) & 0xff));
   }
+}
+
+// Dictionary key of the i-th leaf field: "f00", "f01", ... Zero padding makes the numeric order the
+// lexicographic order, which the callers rely on to predict each key's field id.
+std::string field_key(int i)
+{
+  CUDF_EXPECTS(i >= 0 && i < 100, "field key index does not fit the zero-padded key width");
+  return std::format("f{:02}", i);
+}
+
+// Build a VARIANT object from (field id, value) pairs. Ids must be ascending, which for a
+// name-sorted dictionary is also name order, as the spec requires. Field offsets widen to 2 bytes
+// once the values region outgrows a single byte.
+std::vector<uint8_t> build_object(
+  std::vector<std::pair<uint8_t, std::vector<uint8_t>>> const& fields)
+{
+  constexpr std::size_t max_single_byte_offset = 255;
+  auto const values_bytes =
+    std::accumulate(fields.begin(), fields.end(), std::size_t{0}, [](auto acc, auto const& field) {
+      return acc + field.second.size();
+    });
+  int const offset_size = values_bytes > max_single_byte_offset ? 2 : 1;
+
+  // object value_header: | is_large (1) | field_id_size-1 (2) | field_offset_size-1 (2) |
+  std::vector<uint8_t> out{
+    make_variant_header(variant_basic_type::OBJECT, static_cast<uint8_t>(offset_size - 1)),
+    static_cast<uint8_t>(fields.size())};
+  for (auto const& [id, value] : fields) {
+    out.push_back(id);
+  }
+  std::size_t running = 0;
+  for (auto const& [id, value] : fields) {
+    append_le(out, running, offset_size);
+    running += value.size();
+  }
+  append_le(out, running, offset_size);  // sentinel offset after the last field
+  for (auto const& [id, value] : fields) {
+    out.insert(out.end(), value.begin(), value.end());
+  }
+  return out;
 }
 
 // Build a V1 VARIANT metadata blob for a key dictionary. When `sorted` is true, callers must pass
@@ -150,14 +184,9 @@ std::vector<uint8_t> build_metadata(std::vector<std::string> const& keys, bool s
 }
 
 // Wrap `inner` as the sole field (field id `fid`) of a 1-field VARIANT object.
-// Uses 1-byte field_id_size and 1-byte field_offset_size (value_header=0).
 std::vector<uint8_t> wrap_in_object(uint8_t fid, std::span<uint8_t const> inner)
 {
-  // Format: object_header(1) + num_fields(1) + fid(1) + offset[0]=0(1) + offset[1]=size(1) + data
-  std::vector<uint8_t> out{
-    make_variant_object_header(), 0x01, fid, 0x00, static_cast<uint8_t>(inner.size())};
-  out.insert(out.end(), inner.begin(), inner.end());
-  return out;
+  return build_object({{fid, {inner.begin(), inner.end()}}});
 }
 
 // Build the leaf VARIANT value blob for the requested type.
@@ -342,7 +371,7 @@ std::vector<std::string> get_dict_keys_for_fields(int num_fields)
   std::vector<std::string> keys;
   keys.reserve(num_fields + 1);
   for (int i = 0; i < num_fields; ++i) {
-    keys.emplace_back("f" + std::string(i < 10 ? "0" : "") + std::to_string(i));
+    keys.push_back(field_key(i));
   }
   keys.emplace_back("z");
   return keys;
@@ -372,72 +401,21 @@ std::vector<std::string> get_dict_keys_at_rank(int num_fields, int rank)
   return keys;
 }
 
-// Build a flat object with `num_fields` fields using 1-byte field IDs and 1-byte offsets.
+// Build a flat object with `num_fields` fields, field ids 0..num_fields-1.
 // Field `target_fid` holds `inner`; all other fields hold a dummy BOOLEAN_TRUE.
 std::vector<uint8_t> build_flat_object(int num_fields,
                                        int target_fid,
                                        std::span<uint8_t const> inner)
 {
-  // object_header(1) + num_fields(1) + field_ids(num_fields) + offsets(num_fields+1) + data
-  std::vector<uint8_t> out{make_variant_object_header(), static_cast<uint8_t>(num_fields)};
-  out.reserve(out.size() + static_cast<std::size_t>(3 * num_fields) + inner.size());
+  std::vector<std::pair<uint8_t, std::vector<uint8_t>>> fields;
+  fields.reserve(num_fields);
   for (int i = 0; i < num_fields; ++i) {
-    out.push_back(static_cast<uint8_t>(i));
+    fields.emplace_back(static_cast<uint8_t>(i),
+                        i == target_fid ? std::vector<uint8_t>{inner.begin(), inner.end()}
+                                        : std::vector<uint8_t>{make_variant_primitive_header(
+                                            variant_primitive_type::BOOLEAN_TRUE)});
   }
-  uint8_t running = 0;
-  for (int i = 0; i < num_fields; ++i) {
-    out.push_back(running);
-    running += static_cast<uint8_t>(i == target_fid ? inner.size() : 1u);
-  }
-  out.push_back(running);  // sentinel offset after last field
-  for (int i = 0; i < num_fields; ++i) {
-    if (i == target_fid) {
-      out.insert(out.end(), inner.begin(), inner.end());
-    } else {
-      out.push_back(make_variant_primitive_header(variant_primitive_type::BOOLEAN_TRUE));  // dummy
-    }
-  }
-  return out;
-}
-
-// Dictionary key of the i-th leaf field: "f00", "f01", ... Zero padding makes the numeric order the
-// lexicographic order, which the callers rely on to predict each key's field id.
-std::string field_key(int i)
-{
-  CUDF_EXPECTS(i >= 0 && i < 100, "field key index does not fit the zero-padded key width");
-  return std::format("f{:02}", i);
-}
-
-// Build a VARIANT object from (field id, value) pairs. Ids must be ascending, which for a
-// name-sorted dictionary is also name order, as the spec requires. Field offsets widen to 2 bytes
-// once the values region outgrows a single byte.
-std::vector<uint8_t> build_object(
-  std::vector<std::pair<uint8_t, std::vector<uint8_t>>> const& fields)
-{
-  constexpr std::size_t max_single_byte_offset = 255;
-  auto const values_bytes =
-    std::accumulate(fields.begin(), fields.end(), std::size_t{0}, [](auto acc, auto const& field) {
-      return acc + field.second.size();
-    });
-  int const offset_size = values_bytes > max_single_byte_offset ? 2 : 1;
-
-  // object value_header: | is_large (1) | field_id_size-1 (2) | field_offset_size-1 (2) |
-  std::vector<uint8_t> out{
-    make_variant_header(variant_basic_type::OBJECT, static_cast<uint8_t>(offset_size - 1)),
-    static_cast<uint8_t>(fields.size())};
-  for (auto const& [id, value] : fields) {
-    out.push_back(id);
-  }
-  std::size_t running = 0;
-  for (auto const& [id, value] : fields) {
-    append_le(out, running, offset_size);
-    running += value.size();
-  }
-  append_le(out, running, offset_size);  // sentinel offset after the last field
-  for (auto const& [id, value] : fields) {
-    out.insert(out.end(), value.begin(), value.end());
-  }
-  return out;
+  return build_object(fields);
 }
 
 // Build the JSONPath-like extraction path.
@@ -668,7 +646,7 @@ static void bench_variant_extract_fields(nvbench::state& state)
     col            = build_variant_column(meta_spans, val_spans, stream, mr);
     CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
 
-    path      = "f" + std::string(target_fid < 10 ? "0" : "") + std::to_string(target_fid);
+    path      = field_key(target_fid);
     meta_size = meta_blob.size();
     hit_size  = hit_val.size();
   }
