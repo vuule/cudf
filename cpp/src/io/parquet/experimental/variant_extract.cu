@@ -1828,9 +1828,9 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   // One caller-owned status buffer per path, written by the walk
   auto h_statuses =
     cudf::detail::make_pinned_vector_async<op_status*>(want_status ? num_paths : 0, stream);
-  for (size_type path_idx = 0; path_idx < static_cast<size_type>(h_statuses.size()); ++path_idx) {
-    h_statuses[path_idx] = reinterpret_cast<op_status*>(statuses[path_idx].data<uint8_t>());
-  }
+  std::ranges::transform(statuses, h_statuses.begin(), [](mutable_column_view const& status) {
+    return reinterpret_cast<op_status*>(status.data<uint8_t>());
+  });
   auto const d_statuses = cudf::detail::make_device_uvector_async(h_statuses, stream, temp_mr);
 
   // Resolve the whole trie per row and compute the output sizes. The walk keeps one located value

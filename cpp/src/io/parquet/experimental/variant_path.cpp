@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cstddef>
 #include <map>
+#include <numeric>
 #include <ranges>
 #include <stdexcept>
 #include <string>
@@ -188,9 +189,8 @@ variant_path_trie build_variant_path_trie(std::span<std::string_view const> path
     CUDF_EXPECTS(slot_of_node[node] >= 0, "VARIANT path did not reach a trie slot");
     ++trie.output_offsets[slot_of_node[node] + 1];
   }
-  for (std::size_t slot = 0; slot < num_slots; ++slot) {
-    trie.output_offsets[slot + 1] += trie.output_offsets[slot];
-  }
+  std::inclusive_scan(
+    trie.output_offsets.begin(), trie.output_offsets.end(), trie.output_offsets.begin());
   trie.output_paths.resize(paths.size());
   auto fill_position   = trie.output_offsets;
   size_type path_index = 0;
