@@ -723,6 +723,9 @@ status_columns make_status_columns(std::size_t num_paths,
 // and without a prefix shared by all the requested paths. Type is fixed to int32_t; both APIs
 // decode, so the two sides of the comparison are end-to-end equivalent. The `status` axis asks both
 // for per-row status, which the batched walk writes once per path and row.
+// Hit rows hold a real leaf in every field, unlike the single-populated-field objects the other
+// benchmarks use: a path landing on a filler value would fail its cast and skip the copy, leaving
+// most of the per-path work unmeasured.
 static void bench_variant_extract_multi_field(nvbench::state& state)
 {
   auto stream = cudf::get_default_stream();
