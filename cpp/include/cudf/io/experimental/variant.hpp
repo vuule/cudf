@@ -145,8 +145,7 @@ namespace io::parquet::experimental {
  * that prefix once per row instead of once per path, and all paths are located by a single kernel
  * and copied by a single pass.
  *
- * @param variant_column Struct column (VARIANT materialization) with `list<uint8>` children
- *                       (`metadata`, `value`), plus optional shredded siblings
+ * @param variant_column Struct column (VARIANT materialization)
  * @param paths JSONPath-like path strings (see `get_variant_field` for syntax). Duplicate and
  *              overlapping paths are allowed
  * @param statuses Optional. When non-empty, one status column per path, each filled with that
