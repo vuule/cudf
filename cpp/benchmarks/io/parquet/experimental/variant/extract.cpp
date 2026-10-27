@@ -113,6 +113,13 @@ std::vector<uint8_t> build_object(
   std::vector<std::pair<uint8_t, std::vector<uint8_t>>> const& fields)
 {
   constexpr std::size_t max_single_byte_offset = 255;
+  CUDF_EXPECTS(fields.size() <= max_single_byte_offset + 1,
+               "object field count must fit the 1-byte num_fields this writes");
+  CUDF_EXPECTS(std::ranges::adjacent_find(
+                 fields, [](auto const& lhs, auto const& rhs) { return lhs.first >= rhs.first; }) ==
+                 fields.end(),
+               "object field ids must be unique and ascending");
+
   auto const values_bytes =
     std::accumulate(fields.begin(), fields.end(), std::size_t{0}, [](auto acc, auto const& field) {
       return acc + field.second.size();
