@@ -70,14 +70,11 @@ namespace {
 struct trie_builder_node {
   std::map<std::string, std::size_t> children;
   bool ends_a_path = false;
-};
 
-// A prefix is worth caching only if more than one path continues past it, or a path ends there.
-// Any other prefix is folded into its single descendant's step range.
-[[nodiscard]] bool needs_slot(trie_builder_node const& node)
-{
-  return node.ends_a_path || node.children.size() > 1;
-}
+  // A prefix is worth caching only if more than one path continues past it, or a path ends there.
+  // Any other prefix is folded into its single descendant's step range.
+  [[nodiscard]] bool needs_slot() const { return ends_a_path || children.size() > 1; }
+};
 
 }  // namespace
 
@@ -162,7 +159,7 @@ variant_path_trie build_variant_path_trie(std::span<std::string_view const> path
     // The root is the value blob itself and never becomes a slot.
     auto child_depth = state.depth;
     std::vector<std::string> child_pending;
-    if (state.node != 0 && needs_slot(nodes[state.node])) {
+    if (state.node != 0 && nodes[state.node].needs_slot()) {
       slot_of_node[state.node] = static_cast<size_type>(trie.slot_depth.size());
       trie.steps.insert(trie.steps.end(), state.pending.begin(), state.pending.end());
       trie.slot_steps.push_back(static_cast<size_type>(trie.steps.size()));

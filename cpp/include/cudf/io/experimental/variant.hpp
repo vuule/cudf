@@ -152,7 +152,7 @@ namespace io::parquet::experimental {
  * @param statuses Optional. When non-empty, one status column per path, each filled with that
  *                 path's `variant_operation_status` values, one per row, as `get_variant_field`
  *                 fills its own. Each must be non-nullable, `UINT8`, and have the same row count as
- *                 `variant_column`
+ *                 `variant_column`. Any incoming values are overwritten
  * @param stream CUDA stream
  * @param mr Memory resources for the returned table and for temporary allocations
  * @return Table of one `list<uint8>` column per path, in the order the paths were given. Row
@@ -177,9 +177,10 @@ namespace io::parquet::experimental {
  * path prefixes.
  *
  * @param variant_column Struct column (VARIANT materialization)
- * @param paths JSONPath-like path strings (see `get_variant_field` for syntax)
- * @param desired_types Target type of each path's output column; parallels `paths`. Supported types
- *        are those of `cast_variant`
+ * @param paths JSONPath-like path strings (see `get_variant_fields` for syntax and for which path
+ *              sets are allowed)
+ * @param desired_types Target type of each path's output column; parallels `paths` (see
+ *                      `cast_variant` for the supported types)
  * @param statuses Optional. When non-empty, one status column per path, each filled with that
  *                 path's `variant_operation_status` values, one per row, as
  *                 `extract_variant_field` fills its own. Each must be non-nullable, `UINT8`, and

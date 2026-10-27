@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <format>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -399,8 +400,13 @@ std::vector<uint8_t> build_flat_object(int num_fields,
   return out;
 }
 
-// Dictionary key of the i-th leaf field: "f00", "f01", ...
-std::string field_key(int i) { return "f" + std::string(i < 10 ? "0" : "") + std::to_string(i); }
+// Dictionary key of the i-th leaf field: "f00", "f01", ... Zero padding makes the numeric order the
+// lexicographic order, which the callers rely on to predict each key's field id.
+std::string field_key(int i)
+{
+  CUDF_EXPECTS(i >= 0 && i < 100, "field key index does not fit the zero-padded key width");
+  return std::format("f{:02}", i);
+}
 
 // Build a VARIANT object from (field id, value) pairs. Ids must be ascending, which for a
 // name-sorted dictionary is also name order, as the spec requires. Field offsets widen to 2 bytes
