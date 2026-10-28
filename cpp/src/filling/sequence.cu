@@ -103,7 +103,7 @@ struct sequence_functor {
 
   template <typename T, typename... Args>
   std::unique_ptr<column> operator()(Args&&...)
-    requires(not cudf::concepts::arithmetic<T> or cudf::concepts::boolean<T>)
+    requires(not cudf::concepts::arithmetic_not_bool<T>)
   {
     CUDF_FAIL("Unsupported sequence scalar type", cudf::data_type_error);
   }

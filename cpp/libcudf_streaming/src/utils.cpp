@@ -71,7 +71,8 @@ struct cudf_column_data_size_fn {
     return rapidsmpf::safe_cast<std::size_t>(sv.chars_size(stream)) + bitmask_size(col);
   }
 
-  // compound type specialization except string
+  // compound type specialization except string; `string_view` also satisfies `compound`, but
+  // the more constrained `string_view` overload above is selected for it
   template <cudf::concepts::compound T>
   std::size_t operator()(cudf::column_view const& col, cuda::stream_ref)
   {
