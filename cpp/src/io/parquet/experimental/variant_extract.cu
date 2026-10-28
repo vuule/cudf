@@ -641,30 +641,22 @@ __device__ cuda::std::optional<size_type> parse_index_step(cudf::string_view ste
   return index;
 }
 
-// Walk the steps `path[step_begin : step_end]` level by level starting at `val` and return the span
-// of the final value (subspan of `val`). Returns an empty span on failure.
+// Walk a path of object-key or array-index steps level by level starting at `val` and return
+// the span of the final value (subspan of `val`). Returns an empty span on failure.
 //
 // Each path step is encoded in the `path` strings column as either:
 //   - "<name>"  -> descend into an object by dictionary key, or
 //   - "[<N>]"   -> descend into an array by zero-based integer index.
 // The step kind is inferred from the first byte (`'['` means index).
-__device__ cuda::std::pair<device_span<uint8_t const>, op_status> resolve_steps(
-  device_span<uint8_t const> meta,
-  device_span<uint8_t const> val,
-  column_device_view path,
-  size_type step_begin,
-  size_type step_end)
+__device__ cuda::std::pair<device_span<uint8_t const>, op_status> resolve_path(
+  device_span<uint8_t const> meta, device_span<uint8_t const> val, column_device_view path)
 {
-  // An empty starting value cannot resolve anything, and checking up front keeps a failed shared
-  // prefix from paying for a metadata lookup once per path below it.
-  if (val.empty()) { return {{}, op_status::MALFORMED_VARIANT}; }
-
   device_span<uint8_t const> sub_val = val;
   // The metadata dictionary is a per-row property shared by every object-key step of the path, so
-  // it is parsed and validated at most once per walk (lazily, on the first object-key step) rather
+  // it is parsed and validated at most once per row (lazily, on the first object-key step) rather
   // than being re-parsed on each step -- a path with only array-index steps never touches it.
   cuda::std::optional<metadata_dictionary> dict;
-  for (size_type i = step_begin; i < step_end; ++i) {
+  for (size_type i = 0; i < path.size(); ++i) {
     auto const step = path.element<cudf::string_view>(i);
     if (step.size_bytes() >= 1 && step.data()[0] == '[') {
       auto const index = parse_index_step(step);
@@ -684,7 +676,7 @@ __device__ cuda::std::pair<device_span<uint8_t const>, op_status> resolve_steps(
     }
 
     // VARIANT null before the end of the path is missing_path per spec.
-    if (i + 1 < step_end && is_variant_null(sub_val)) { return {{}, op_status::MISSING_PATH}; }
+    if (i + 1 < path.size() && is_variant_null(sub_val)) { return {{}, op_status::MISSING_PATH}; }
     // A zero-length resolved value is not decodable; the value-only path drops the row.
     if (sub_val.empty()) { return {{}, op_status::MALFORMED_VARIANT}; }
   }
@@ -692,13 +684,6 @@ __device__ cuda::std::pair<device_span<uint8_t const>, op_status> resolve_steps(
   // Terminal VARIANT null: return the bytes with variant_null status.
   if (is_variant_null(sub_val)) { return {sub_val, op_status::VARIANT_NULL}; }
   return {sub_val, op_status::SUCCESS};
-}
-
-// Walk every step of `path` starting at `val`.
-__device__ cuda::std::pair<device_span<uint8_t const>, op_status> resolve_path(
-  device_span<uint8_t const> meta, device_span<uint8_t const> val, column_device_view path)
-{
-  return resolve_steps(meta, val, path, 0, path.size());
 }
 
 __device__ cuda::std::optional<device_span<uint8_t const>> decode_string(
@@ -1138,8 +1123,8 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
       if (parent.empty()) {
         result = {0, invalid_slot_size, parent_status};
       } else {
-        auto const [field, status] =
-          resolve_steps(meta, parent, steps, slot_steps[slot], slot_steps[slot + 1]);
+        auto const [field, status] = resolve_path(
+          meta, parent, steps.slice(slot_steps[slot], slot_steps[slot + 1] - slot_steps[slot]));
         result = make_slot_result(field, val.data(), status);
       }
 
