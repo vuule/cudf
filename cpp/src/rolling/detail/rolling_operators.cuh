@@ -26,7 +26,6 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/iterator>
-#include <cuda/std/concepts>
 #include <cuda/std/limits>
 #include <cuda/stream>
 #include <thrust/count.h>
@@ -746,7 +745,7 @@ struct create_rolling_operator<InputType, aggregation::Kind::LAG> {
 };
 
 template <typename InputType, aggregation::Kind k>
-  requires(cuda::std::same_as<InputType, cudf::string_view> &&
+  requires(cudf::concepts::string_view<InputType> &&
            (k == aggregation::Kind::ARGMIN || k == aggregation::Kind::ARGMAX))
 struct create_rolling_operator<InputType, k> {
   auto operator()(size_type min_periods, rolling_aggregation const&)
@@ -756,7 +755,7 @@ struct create_rolling_operator<InputType, k> {
 };
 
 template <typename InputType, aggregation::Kind k>
-  requires(cuda::std::same_as<InputType, cudf::dictionary32> &&
+  requires(cudf::concepts::dictionary<InputType> &&
            (k == aggregation::Kind::ARGMIN || k == aggregation::Kind::ARGMAX))
 struct create_rolling_operator<InputType, k> {
   auto operator()(size_type min_periods, rolling_aggregation const&)
@@ -766,7 +765,7 @@ struct create_rolling_operator<InputType, k> {
 };
 
 template <typename InputType, aggregation::Kind k>
-  requires(cuda::std::same_as<InputType, cudf::struct_view> &&
+  requires(cudf::concepts::struct_view<InputType> &&
            (k == aggregation::Kind::ARGMIN || k == aggregation::Kind::ARGMAX))
 struct create_rolling_operator<InputType, k> {
   template <typename Comparator>

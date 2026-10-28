@@ -37,7 +37,7 @@ struct rolling_store_output_functor<_T, true> {
   // undefined behaviour. The caller must ensure that the relevant row is
   // marked as invalid with a null.
 
-  // SFINAE for non-bool, non-timestamp types
+  // Non-bool, non-timestamp types
   template <typename T = _T>
   CUDF_HOST_DEVICE inline void operator()(T& out, T& val, size_type count)
     requires(!(cudf::concepts::boolean<T> || cudf::concepts::timestamp<T>))
@@ -45,7 +45,7 @@ struct rolling_store_output_functor<_T, true> {
     if (count > 0) { out = val / count; }
   }
 
-  // SFINAE for timestamp types
+  // Timestamp types
   template <cudf::concepts::timestamp T = _T>
   CUDF_HOST_DEVICE inline void operator()(T& out, T& val, size_type count)
   {
