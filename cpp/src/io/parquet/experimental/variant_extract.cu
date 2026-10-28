@@ -56,6 +56,7 @@
 #include <thrust/scan.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <iterator>
 #include <limits>
@@ -1129,6 +1130,24 @@ CUDF_KERNEL __launch_bounds__(block_size) void count_valid_rows_kernel(
   }
 }
 
+// Every mask's valid count in one launch. Each mask is its own allocation, so this counts through
+// the pointer array rather than with `segmented_count_set_bits`, which needs one contiguous
+// bitmask.
+void count_valid_rows(device_span<bitmask_type* const> d_null_masks,
+                      size_type num_rows,
+                      int64_t* d_valid_counts,
+                      cuda::stream_ref stream)
+{
+  constexpr size_type words_per_thread = 8;
+  auto const words_per_path            = static_cast<size_type>(num_bitmask_words(num_rows));
+  auto const blocks_per_path =
+    cuda::ceil_div(words_per_path, static_cast<size_type>(block_size) * words_per_thread);
+  auto const num_paths = static_cast<size_type>(d_null_masks.size());
+  count_valid_rows_kernel<<<num_paths * blocks_per_path, block_size, 0, stream.get()>>>(
+    d_null_masks, num_rows, words_per_path, blocks_per_path, d_valid_counts);
+  CUDF_CUDA_TRY(cudaGetLastError());
+}
+
 /**
  * @brief Per-row kernel: decode each VARIANT value blob into a fixed-width primitive of type `T`.
  *
@@ -1363,24 +1382,6 @@ void validate_cast_type(data_type desired_type)
   }
 }
 
-// Copy a host array to the device, staging it in pinned memory first.
-//
-// `cuda_memcpy_async` does not necessarily read its source during the call: for a pinned source it
-// launches a copy kernel, and on CUDA 13+ a pageable one goes through `cudaMemcpyBatchAsync` with
-// `cudaMemcpySrcAccessOrderStream`. A pageable `std::vector` that dies when the caller returns is
-// therefore not a safe source. Pinned memory from cudf's pool is released stream-ordered, so a
-// staging buffer stays valid for the copy that reads it even once this function has returned.
-template <typename Container>
-auto stage_to_device_async(Container const& source,
-                           cuda::stream_ref stream,
-                           rmm::device_async_resource_ref mr)
-{
-  auto staged =
-    cudf::detail::make_pinned_vector_async<typename Container::value_type>(source.size(), stream);
-  std::ranges::copy(source, staged.begin());
-  return cudf::detail::make_device_uvector_async(staged, stream, mr);
-}
-
 // Copies the located value of every (path, row) pair, `Index` being wide enough to count them all
 template <typename Index>
 void copy_located_values(cudf::lists_column_device_view const& values,
@@ -1581,15 +1582,17 @@ std::unique_ptr<column> build_path_column(cudf::host_span<std::string const> ste
 {
   auto const depth = steps.size();
 
-  std::string host_chars;
-  std::vector<size_type> host_offsets(depth + 1);
+  auto host_offsets = cudf::detail::make_pinned_vector_async<size_type>(depth + 1, stream);
+  host_offsets[0]   = 0;
   for (size_t i = 0; i < depth; ++i) {
-    host_offsets[i] = static_cast<size_type>(host_chars.size());
-    host_chars.append(steps[i]);
+    host_offsets[i + 1] = host_offsets[i] + static_cast<size_type>(steps[i].size());
   }
-  host_offsets[depth] = host_chars.size();
+  auto host_chars = cudf::detail::make_pinned_vector_async<char>(host_offsets[depth], stream);
+  for (size_t i = 0; i < depth; ++i) {
+    std::ranges::copy(steps[i], host_chars.begin() + host_offsets[i]);
+  }
 
-  auto d_offsets = stage_to_device_async(host_offsets, stream, mr);
+  auto d_offsets = cudf::detail::make_device_uvector_async(host_offsets, stream, mr);
   auto offsets_col =
     std::make_unique<column>(data_type{type_id::INT32},
                              static_cast<size_type>(host_offsets.size()),
@@ -1597,8 +1600,7 @@ std::unique_ptr<column> build_path_column(cudf::host_span<std::string const> ste
                              cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
                              0);
 
-  auto d_chars = cudf::detail::make_device_uvector(
-    host_span<char const>{host_chars.data(), host_chars.size()}, stream, mr);
+  auto d_chars = cudf::detail::make_device_uvector_async(host_chars, stream, mr);
   return cudf::make_strings_column(depth,
                                    std::move(offsets_col),
                                    d_chars.release(),
@@ -1658,14 +1660,19 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   auto steps_column      = build_path_column(trie.steps, stream, temp_mr);
   auto steps_device_view = column_device_view::create(steps_column->view(), stream);
   // The trie arrays are staged with a single copy, since each transfer costs more than its contents
-  std::vector<size_type> h_trie_arrays;
+  auto h_trie_arrays = cudf::detail::make_pinned_vector_async<size_type>(
+    trie.slot_steps.size() + trie.slot_depth.size() + trie.output_offsets.size() +
+      trie.output_paths.size(),
+    stream);
+  auto next_host = h_trie_arrays.begin();
   for (auto const* array :
        {&trie.slot_steps, &trie.slot_depth, &trie.output_offsets, &trie.output_paths}) {
-    h_trie_arrays.insert(h_trie_arrays.end(), array->begin(), array->end());
+    next_host = std::ranges::copy(*array, next_host).out;
   }
-  auto const d_trie_arrays = stage_to_device_async(h_trie_arrays, stream, temp_mr);
-  auto const* next_array   = d_trie_arrays.data();
-  auto const next_span     = [&](std::vector<size_type> const& array) {
+  auto const d_trie_arrays =
+    cudf::detail::make_device_uvector_async(h_trie_arrays, stream, temp_mr);
+  auto const* next_array = d_trie_arrays.data();
+  auto const next_span   = [&](std::vector<size_type> const& array) {
     auto const span = device_span<size_type const>{next_array, array.size()};
     next_array += array.size();
     return span;
@@ -1772,10 +1779,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   }
   CUDF_CUDA_TRY(cudaGetLastError());
 
-  // Convert each path's sizes to offsets. Every path's total byte count and null count is left on
-  // the device and read back together below: going through the host once per path instead would
-  // cost two blocking transfers per path, which is the one cost that would still scale with the
-  // number of paths.
+  // Convert each path's sizes to offsets. All byte totals and null counts are read back in a single
+  // transfer below, rather than with two blocking transfers per path.
   auto d_totals_and_nulls = cudf::detail::make_zeroed_device_uvector_async<int64_t>(
     2 * static_cast<std::size_t>(num_paths), stream, temp_mr);
   std::vector<std::unique_ptr<column>> offsets_columns;
@@ -1789,9 +1794,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   }
   auto const d_offsets = cudf::detail::make_device_uvector_async(h_offsets, stream, temp_mr);
 
-  // One scan per path rather than a single `exclusive_scan_by_key` over all of them: a plain scan
-  // has no segment bookkeeping, and measuring the two showed the extra launches cost far less than
-  // the key handling does once the rows per path outnumber the paths.
+  // One plain scan per path, since `exclusive_scan_by_key` measured slower once rows outnumber
+  // paths
   for (size_type path_idx = 0; path_idx < num_paths; ++path_idx) {
     // The scan takes one input per output; the extra trailing input is never read for its own
     // output element.
@@ -1813,16 +1817,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
                            int64_t{0});
   }
 
-  // Every path's valid count in one launch, into the second half of the same buffer. Each path's
-  // mask is its own allocation, so this counts through the pointer array rather than with
-  // `segmented_count_set_bits`, which needs one contiguous bitmask.
-  constexpr size_type words_per_thread = 8;
-  auto const words_per_path            = static_cast<size_type>(num_bitmask_words(num_rows));
-  auto const blocks_per_path =
-    cuda::ceil_div(words_per_path, static_cast<size_type>(block_size) * words_per_thread);
-  count_valid_rows_kernel<<<num_paths * blocks_per_path, block_size, 0, stream.get()>>>(
-    d_null_masks, num_rows, words_per_path, blocks_per_path, d_totals_and_nulls.data() + num_paths);
-  CUDF_CUDA_TRY(cudaGetLastError());
+  // Every path's valid count, into the second half of the same buffer
+  count_valid_rows(d_null_masks, num_rows, d_totals_and_nulls.data() + num_paths, stream);
 
   // The only transfer back to the host, and the only synchronization, in the batched path
   auto const totals_and_nulls = cudf::detail::make_pinned_vector(d_totals_and_nulls, stream);
@@ -1881,7 +1877,7 @@ std::unique_ptr<column> get_variant_field(column_view const& variant_column,
                                           cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
-  std::string_view const paths[] = {path};
+  std::array const paths{path};
   std::vector<mutable_column_view> statuses;
   if (status.has_value()) { statuses.push_back(*status); }
   return std::move(
@@ -1937,8 +1933,6 @@ std::unique_ptr<table> extract_variant_fields(column_view const& variant_column,
                "VARIANT paths and desired types must have the same size",
                std::invalid_argument);
 
-  // Validate every desired type before extracting anything, so that an unsupported type on the
-  // last path does not throw only after the whole extraction has been paid for
   for (auto const desired_type : desired_types) {
     validate_cast_type(desired_type);
   }
