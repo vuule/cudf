@@ -94,7 +94,7 @@ std::unique_ptr<scalar> reduce(InputIterator d_in,
 // @brief string_view specialization of simple reduction
 template <typename Op,
           typename InputIterator,
-          cuda::std::same_as<string_view> OutputType = cuda::std::iter_value_t<InputIterator>>
+          cudf::concepts::string_view OutputType = cuda::std::iter_value_t<InputIterator>>
 std::unique_ptr<scalar> reduce(InputIterator d_in,
                                cudf::size_type num_items,
                                op::simple_op<Op> op,

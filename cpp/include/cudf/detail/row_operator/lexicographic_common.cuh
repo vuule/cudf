@@ -9,7 +9,6 @@
 #include <cudf/utilities/export.hpp>
 
 #include <cuda/std/concepts>
-#include <cuda/std/type_traits>
 
 #include <cmath>
 

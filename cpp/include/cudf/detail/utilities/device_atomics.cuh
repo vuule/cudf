@@ -23,14 +23,12 @@
 #include <cudf/detail/utilities/device_operators.cuh>
 #include <cudf/types.hpp>
 #include <cudf/utilities/concepts.hpp>
-#include <cudf/utilities/traits.hpp>
 #include <cudf/wrappers/durations.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
 #include <cuda/atomic>
 #include <cuda/std/concepts>
 #include <cuda/std/limits>
-#include <cuda/std/type_traits>
 
 namespace cudf {
 namespace detail {
@@ -58,14 +56,14 @@ struct genericAtomicOperationImpl {
 template <typename T>
 struct genericAtomicOperationImpl<T, DeviceSum> {
   __forceinline__ __device__ T operator()(T* addr, T const& update_value, DeviceSum op)
-    requires(cudf::concepts::arithmetic<T> && !cuda::std::same_as<T, bool>)
+    requires(cudf::concepts::arithmetic_not_bool<T>)
   {
     cuda::atomic_ref<T> atomic_addr(*addr);
     return atomic_addr.fetch_add(update_value, cuda::memory_order_relaxed);
   }
 
   __forceinline__ __device__ T operator()(T* addr, T const& update_value, DeviceSum op)
-    requires(!cudf::concepts::arithmetic<T> || cuda::std::same_as<T, bool>)
+    requires(!cudf::concepts::arithmetic_not_bool<T>)
   {
     cuda::atomic_ref<T> atomic_addr(*addr);
     T old_value = atomic_addr.load(cuda::memory_order_relaxed);
@@ -82,14 +80,14 @@ struct genericAtomicOperationImpl<T, DeviceSum> {
 template <typename T>
 struct genericAtomicOperationImpl<T, DeviceMin> {
   __forceinline__ __device__ T operator()(T* addr, T const& update_value, DeviceMin op)
-    requires(cuda::std::integral<T> && !cuda::std::same_as<T, bool>)
+    requires(cudf::concepts::integral_not_bool<T>)
   {
     cuda::atomic_ref<T> atomic_addr(*addr);
     return atomic_addr.fetch_min(update_value, cuda::memory_order_relaxed);
   }
 
   __forceinline__ __device__ T operator()(T* addr, T const& update_value, DeviceMin op)
-    requires(!cuda::std::integral<T> || cuda::std::same_as<T, bool>)
+    requires(!cudf::concepts::integral_not_bool<T>)
   {
     cuda::atomic_ref<T> atomic_addr(*addr);
     T old_value = atomic_addr.load(cuda::memory_order_relaxed);
@@ -106,14 +104,14 @@ struct genericAtomicOperationImpl<T, DeviceMin> {
 template <typename T>
 struct genericAtomicOperationImpl<T, DeviceMax> {
   __forceinline__ __device__ T operator()(T* addr, T const& update_value, DeviceMax op)
-    requires(cuda::std::integral<T> && !cuda::std::same_as<T, bool>)
+    requires(cudf::concepts::integral_not_bool<T>)
   {
     cuda::atomic_ref<T> atomic_addr(*addr);
     return atomic_addr.fetch_max(update_value, cuda::memory_order_relaxed);
   }
 
   __forceinline__ __device__ T operator()(T* addr, T const& update_value, DeviceMax op)
-    requires(!cuda::std::integral<T> || cuda::std::same_as<T, bool>)
+    requires(!cudf::concepts::integral_not_bool<T>)
   {
     cuda::atomic_ref<T> atomic_addr(*addr);
     T old_value = atomic_addr.load(cuda::memory_order_relaxed);

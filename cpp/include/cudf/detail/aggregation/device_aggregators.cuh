@@ -19,7 +19,6 @@
 
 #include <cuda/numeric>
 #include <cuda/std/concepts>
-#include <cuda/std/type_traits>
 
 namespace cudf::detail {
 
@@ -132,7 +131,7 @@ struct update_target_element<Source, aggregation::SUM> {
 };
 
 template <typename Source>
-  requires((cudf::concepts::integral_not_bool<Source> && cudf::is_signed<Source>()) ||
+  requires(cuda::std::signed_integral<Source> ||
            (cudf::concepts::fixed_point<Source> &&
             cudf::has_atomic_support<device_storage_type_t<Source>>()) ||
            cuda::std::same_as<Source, numeric::decimal128>)

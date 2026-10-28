@@ -20,7 +20,6 @@
 
 #include <cuda/std/concepts>
 #include <cuda/std/functional>
-#include <cuda/std/type_traits>
 
 #include <type_traits>
 
@@ -150,7 +149,7 @@ struct DeviceMin {
   // chrono types do not have std::numeric_limits specializations and should use T::max()
   // https://eel.is/c++draft/numeric.limits.general#6
   template <typename T>
-    requires(cuda::std::same_as<T, cudf::string_view> or cudf::concepts::chrono<T>)
+    requires(cudf::concepts::string_view<T> or cudf::concepts::chrono<T>)
   CUDF_HOST_DEVICE inline static constexpr T identity()
   {
     return T::max();
@@ -207,7 +206,7 @@ struct DeviceMax {
   // chrono types do not have std::numeric_limits specializations and should use T::min()
   // https://eel.is/c++draft/numeric.limits.general#6
   template <typename T>
-    requires(cuda::std::same_as<T, cudf::string_view> or cudf::concepts::chrono<T>)
+    requires(cudf::concepts::string_view<T> or cudf::concepts::chrono<T>)
   CUDF_HOST_DEVICE inline static constexpr T identity()
   {
     return T::min();

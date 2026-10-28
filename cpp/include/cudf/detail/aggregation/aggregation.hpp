@@ -1040,13 +1040,13 @@ struct target_type_impl<Source, aggregation::LAG> {
 };
 
 // Always use list for MERGE_LISTS
-template <cuda::std::same_as<cudf::list_view> Source>
+template <cudf::concepts::list_view Source>
 struct target_type_impl<Source, aggregation::MERGE_LISTS> {
   using type = list_view;
 };
 
 // Always use list for MERGE_SETS
-template <cuda::std::same_as<cudf::list_view> Source>
+template <cudf::concepts::list_view Source>
 struct target_type_impl<Source, aggregation::MERGE_SETS> {
   using type = list_view;
 };
@@ -1085,7 +1085,7 @@ struct target_type_impl<Source, aggregation::TDIGEST> {
 // TDIGEST_MERGE. The root column type for a tdigest column is a list_view. Strictly
 // speaking, this check is not sufficient to guarantee we are actually being given a
 // real tdigest column, but we will do further verification inside the aggregation code.
-template <cuda::std::same_as<cudf::struct_view> Source>
+template <cudf::concepts::struct_view Source>
 struct target_type_impl<Source, aggregation::MERGE_TDIGEST> {
   using type = struct_view;
 };

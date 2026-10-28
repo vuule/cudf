@@ -10,7 +10,6 @@
 #include <cudf/strings/string_view.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/concepts.hpp>
-#include <cudf/utilities/traits.hpp>
 
 #include <cuda/std/array>
 #include <cuda/std/bit>
