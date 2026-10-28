@@ -1614,8 +1614,7 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   auto const num_paths = static_cast<size_type>(paths.size());
   auto const num_rows  = variant_column.size();
 
-  // Validate the status columns even for empty inputs, so that a caller always hears about a
-  // malformed one
+  // Validate the status columns even for empty inputs
   auto const want_status = !statuses.empty();
   CUDF_EXPECTS(!want_status || statuses.size() == paths.size(),
                "status columns must be empty or one per path",
@@ -1624,15 +1623,14 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
     validate_status_column(status, num_rows, "variant_column");
   }
 
-  std::vector<std::unique_ptr<column>> output;
-  output.reserve(num_paths);
-  if (num_paths == 0) { return std::make_unique<table>(std::move(output)); }
+  if (num_paths == 0) { return std::make_unique<table>(std::vector<std::unique_ptr<column>>{}); }
 
   // Validate and merge the paths even for empty input columns
   auto const trie = build_variant_path_trie(paths);
 
   if (num_rows == 0) {
-    std::generate_n(std::back_inserter(output), num_paths, [] {
+    std::vector<std::unique_ptr<column>> output(num_paths);
+    std::ranges::generate(output, [] {
       return cudf::make_lists_column(0,
                                      make_empty_column(type_id::INT32),
                                      make_empty_column(type_id::UINT8),
@@ -1722,11 +1720,9 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   auto const num_blocks =
     use_local_scratch ? grid.num_blocks
                       : std::min(grid.num_blocks, static_cast<thread_index_type>(scratch_blocks));
-  cuda::device_buffer<slot_result> d_scratch(
-    stream,
-    temp_mr,
-    use_local_scratch ? 0 : static_cast<std::size_t>(num_blocks) * block_size * trie_depth,
-    cuda::no_init);
+  auto const scratch_size =
+    use_local_scratch ? 0 : static_cast<std::size_t>(num_blocks) * block_size * trie_depth;
+  cuda::device_buffer<slot_result> d_scratch(stream, temp_mr, scratch_size, cuda::no_init);
 
   // Room for the trie arrays in shared memory, kept within the default per-block limit so that the
   // launch needs no opt-in; a trie too large for it is read from global memory instead
@@ -1763,7 +1759,7 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   }
   CUDF_CUDA_TRY(cudaGetLastError());
 
-  rmm::device_uvector<int64_t> d_byte_totals(num_paths, stream, temp_mr);
+  // Allocate each path's output offsets column; the copy below finds them through `d_offsets`
   std::vector<std::unique_ptr<column>> offsets_columns;
   offsets_columns.reserve(num_paths);
   auto h_offsets = cudf::detail::make_pinned_vector_async<size_type*>(num_paths, stream);
@@ -1775,8 +1771,13 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   }
   auto const d_offsets = cudf::detail::make_device_uvector_async(h_offsets, stream, temp_mr);
 
-  // One plain scan per path, since `exclusive_scan_by_key` measured slower once rows outnumber
-  // paths
+  // Byte totals and valid counts share a buffer, since each extra readback costs a synchronization
+  auto d_path_counts = cudf::detail::make_zeroed_device_uvector_async<int64_t>(
+    2 * static_cast<std::size_t>(num_paths), stream, temp_mr);
+  auto const d_byte_totals  = device_span<int64_t>{d_path_counts}.first(num_paths);
+  auto const d_valid_counts = device_span<int64_t>{d_path_counts}.last(num_paths);
+
+  // One scan per path; `exclusive_scan_by_key` was slower once rows outnumber paths
   for (size_type path_idx = 0; path_idx < num_paths; ++path_idx) {
     // The scan takes one input per output; the extra trailing input is never read for its own
     // output element.
@@ -1796,12 +1797,11 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
                            int64_t{0});
   }
 
-  auto d_valid_counts =
-    cudf::detail::make_zeroed_device_uvector_async<int64_t>(num_paths, stream, temp_mr);
   count_valid_rows(d_null_masks, num_rows, d_valid_counts, stream);
 
-  auto const byte_totals  = cudf::detail::make_pinned_vector(d_byte_totals, stream);
-  auto const valid_counts = cudf::detail::make_pinned_vector(d_valid_counts, stream);
+  auto const path_counts  = cudf::detail::make_pinned_vector(d_path_counts, stream);
+  auto const byte_totals  = host_span<int64_t const>{path_counts}.first(num_paths);
+  auto const valid_counts = host_span<int64_t const>{path_counts}.last(num_paths);
 
   // Allocate each path's output bytes now that its total is known
   std::vector<std::unique_ptr<column>> value_children;
@@ -1836,6 +1836,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
     }
   }
 
+  std::vector<std::unique_ptr<column>> output;
+  output.reserve(num_paths);
   for (size_type path_idx = 0; path_idx < num_paths; ++path_idx) {
     auto const null_count = num_rows - static_cast<size_type>(valid_counts[path_idx]);
     output.push_back(make_lists_column(
