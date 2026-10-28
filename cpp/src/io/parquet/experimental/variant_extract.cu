@@ -1034,7 +1034,6 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
   device_span<size_type const> output_offsets,
   device_span<size_type const> output_paths,
   bitmask_type const* d_row_valid,
-  size_type num_rows,
   size_type trie_depth,
   bool stage_trie,
   device_span<size_type> d_sizes,
@@ -1043,6 +1042,7 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
   device_span<op_status* const> d_statuses,  // empty when no status was requested
   device_span<slot_result> d_scratch)
 {
+  auto const num_rows  = values.size();
   auto const num_slots = static_cast<size_type>(slot_depth.size());
   auto const num_paths = static_cast<size_type>(d_null_masks.size());
   auto const tid       = cudf::detail::grid_1d::global_thread_id<block_size>();
@@ -1846,7 +1846,6 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
         d_output_offsets,
         d_output_paths,
         d_row_valid,
-        num_rows,
         trie_depth,
         stage_trie,
         d_sizes,
