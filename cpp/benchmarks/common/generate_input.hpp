@@ -11,7 +11,6 @@
 #include <cudf/utilities/traits.hpp>
 
 #include <cuda/std/concepts>
-#include <cuda/std/type_traits>
 
 #include <map>
 #include <optional>

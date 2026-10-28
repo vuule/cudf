@@ -17,8 +17,6 @@
 #include <cudf/utilities/concepts.hpp>
 #include <cudf/utilities/span.hpp>
 
-#include <cuda/std/type_traits>
-
 #include <random>
 #include <string>
 #include <string_view>
