@@ -121,6 +121,8 @@ variant_path_trie build_variant_path_trie(std::span<std::string_view const> path
   std::vector<trie_builder_node> nodes(1);
   std::vector<std::size_t> path_end_node(paths.size());
 
+  // Merge the paths into the tree, one step at a time, reusing the nodes of any prefix already
+  // inserted. Parsing every path here validates them all before a slot is emitted.
   for (std::size_t path_idx = 0; path_idx < paths.size(); ++path_idx) {
     std::size_t node = 0;
     for (auto const& step : parse_variant_path(paths[path_idx])) {
