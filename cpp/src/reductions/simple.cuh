@@ -272,7 +272,7 @@ struct same_element_type_dispatcher {
     return !cudf::is_dictionary<ElementType>() && !std::is_same_v<ElementType, void>;
   }
 
-  template <cudf::concepts::integral_not_bool IndexType>
+  template <cudf::concepts::index_type IndexType>
   std::unique_ptr<scalar> resolve_key(column_view const& keys,
                                       scalar const& keys_index,
                                       cuda::stream_ref stream,
