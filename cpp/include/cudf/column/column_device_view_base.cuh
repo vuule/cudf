@@ -467,7 +467,7 @@ class alignas(16) column_device_view_core : public detail::column_device_view_ba
    * @param element_index Position of the desired string element
    * @return string_view instance representing this element at this index
    */
-  template <cuda::std::same_as<string_view> T>
+  template <cudf::concepts::string_view T>
   [[nodiscard]] __device__ T element(size_type element_index) const noexcept
   {
     size_type index       = element_index + offset();  // account for this view's _offset
@@ -701,7 +701,7 @@ class alignas(16) mutable_column_device_view_core : public detail::column_device
    * @param element_index Position of the desired string element
    * @return string_view instance representing this element at this index
    */
-  template <cuda::std::same_as<string_view> T>
+  template <cudf::concepts::string_view T>
   [[nodiscard]] __device__ T element(size_type element_index) const noexcept
   {
     size_type index       = element_index + offset();  // account for this view's _offset
