@@ -186,7 +186,8 @@ variant_path_trie build_variant_path_trie(std::span<std::string_view const> path
     ++trie.output_offsets[slot_of_node[node] + 1];
   }
   std::inclusive_scan(
-    trie.output_offsets.begin(), trie.output_offsets.end(), trie.output_offsets.begin());
+    trie.output_offsets.cbegin(), trie.output_offsets.cend(), trie.output_offsets.begin());
+  // Place each path at its slot's next free position, using a copy of the offsets as cursors
   trie.output_paths.resize(paths.size());
   auto fill_position   = trie.output_offsets;
   size_type path_index = 0;

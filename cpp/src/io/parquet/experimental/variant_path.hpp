@@ -50,20 +50,17 @@ namespace cudf::io::parquet::experimental::detail {
  * for a slot that only exists as a shared prefix.
  */
 struct variant_path_trie {
-  // What each slot applies
   std::vector<std::string> steps;     ///< Step tokens of every slot, concatenated in slot order
   std::vector<size_type> slot_steps;  ///< Size `num_slots + 1`; each slot's range in `steps`
 
-  // Where each slot starts from
   std::vector<size_type> slot_depth;  ///< Depth of each slot; 0 starts from the value blob
 
-  // Where each slot's value goes
   std::vector<size_type> output_offsets;  ///< Size `num_slots + 1`; CSR offsets into `output_paths`
   std::vector<size_type> output_paths;    ///< Input paths that each slot's value is the output of
 };
 
 /**
- * @brief Merge VARIANT paths into a `variant_path_trie` so shared prefixes resolve once per row.
+ * @brief Merge VARIANT paths into a `variant_path_trie`.
  *
  * Each path is parsed with `parse_variant_path`, so every path is validated before any of them is
  * used.
