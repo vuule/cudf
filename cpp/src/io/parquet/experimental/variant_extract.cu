@@ -39,6 +39,7 @@
 #include <cub/device/device_segmented_reduce.cuh>
 #include <cuda/bit>
 #include <cuda/buffer>
+#include <cuda/cmath>
 #include <cuda/functional>
 #include <cuda/iterator>
 #include <cuda/numeric>
@@ -732,50 +733,6 @@ metadata_and_value_at(cudf::lists_column_device_view const& metadata,
 
 constexpr int block_size = 256;
 
-/**
- * @brief Resolves `path` in each VARIANT row and record the located field's size and source offset.
- *
- * For each non-null row, walks `path` to the target value and writes its byte length to
- * `d_sizes[row]` and its offset within the row's value blob to `d_src_offsets[row]`. Rows that are
- * null, or whose path does not resolve, are marked null in `d_null_mask` with a size of 0.
- */
-CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_fields_kernel(
-  cudf::lists_column_device_view metadata,
-  cudf::lists_column_device_view values,
-  column_device_view path,
-  device_span<size_type> d_sizes,
-  device_span<size_type> d_src_offsets,
-  bitmask_type* d_null_mask,
-  device_span<op_status> d_status)  // empty when no status was requested
-{
-  auto const num_rows = static_cast<size_type>(d_sizes.size());
-  auto const tid      = cudf::detail::grid_1d::global_thread_id<block_size>();
-  auto const stride   = cudf::detail::grid_1d::grid_stride<block_size>();
-
-  for (auto row = tid; row < num_rows; row += stride) {
-    if (!cudf::bit_is_set(d_null_mask, row)) {
-      d_sizes[row]       = 0;
-      d_src_offsets[row] = 0;
-      if (!d_status.empty()) { d_status[row] = op_status::ROW_NULL; }
-      continue;
-    }
-
-    auto const [meta, val] = metadata_and_value_at(metadata, values, row);
-    auto const [field, st] = resolve_path(meta, val, path);
-
-    if (!d_status.empty()) { d_status[row] = st; }
-
-    if (field.empty()) {
-      d_sizes[row]       = 0;
-      d_src_offsets[row] = 0;
-      cudf::clear_bit(d_null_mask, row);
-    } else {
-      d_sizes[row]       = static_cast<size_type>(field.size());
-      d_src_offsets[row] = static_cast<size_type>(field.data() - val.data());
-    }
-  }
-}
-
 // Returns true for every primitive_type ID that variant_value_length maps to a known payload
 // size in its `basic_type::PRIMITIVE` switch, i.e. every ID other than its `default` case.
 __device__ bool is_recognized_primitive_type(primitive_type ptype)
@@ -1384,14 +1341,6 @@ auto stage_to_device_async(Container const& source,
   return cudf::detail::make_device_uvector_async(staged, stream, mr);
 }
 
-// The device view of a status buffer, empty when the caller asked for no status.
-device_span<op_status> status_span(std::optional<mutable_column_view> const& status)
-{
-  if (!status.has_value()) { return {}; }
-  return {reinterpret_cast<op_status*>(status->data<uint8_t>()),
-          static_cast<std::size_t>(status->size())};
-}
-
 struct cast_variant_fn {
   cudf::lists_column_device_view values;
   size_type num_rows;
@@ -1593,110 +1542,6 @@ std::unique_ptr<column> build_path_column(cudf::host_span<std::string const> ste
 
 namespace detail {
 
-std::unique_ptr<column> get_variant_field(column_view const& variant_column,
-                                          std::string_view path,
-                                          std::optional<mutable_column_view> status,
-                                          cuda::stream_ref stream,
-                                          rmm::device_async_resource_ref mr)
-{
-  CUDF_EXPECTS(variant_column.type().id() == type_id::STRUCT,
-               "VARIANT column must be struct type",
-               std::invalid_argument);
-  CUDF_EXPECTS(variant_column.num_children() >= 2,
-               "VARIANT struct must have at least two children",
-               std::invalid_argument);
-  validate_variant_child(variant_column.child(0));
-  validate_variant_child(variant_column.child(1));
-
-  // Validate the path even for empty input columns
-  auto const steps = parse_variant_path(path);
-
-  auto const num_rows = variant_column.size();
-
-  validate_status_column(status, num_rows, "variant_column");
-
-  if (num_rows == 0) { return make_empty_variant_value_column(); }
-
-  auto const temp_mr = cudf::get_current_device_resource_ref();
-
-  auto path_column      = build_path_column(steps, stream, temp_mr);
-  auto path_device_view = column_device_view::create(path_column->view(), stream);
-
-  // Resolve children with respect to any slice/offset on the parent struct
-  structs_column_view const variant_struct{variant_column};
-  auto const meta_view = variant_struct.get_sliced_child(0, stream);
-  auto const val_view  = variant_struct.get_sliced_child(1, stream);
-
-  auto meta_device_view = column_device_view::create(meta_view, stream);
-  auto val_device_view  = column_device_view::create(val_view, stream);
-  cudf::lists_column_device_view meta_lists_device_view(*meta_device_view);
-  cudf::lists_column_device_view val_lists_device_view(*val_device_view);
-
-  cuda::device_buffer<size_type> d_sizes(stream, temp_mr, num_rows, cuda::no_init);
-  // Caches the per-row intra-value byte offset
-  cuda::device_buffer<size_type> d_src_offsets(stream, temp_mr, num_rows, cuda::no_init);
-  auto null_mask =
-    variant_column.nullable()
-      ? cudf::detail::copy_bitmask(variant_column, stream, mr)
-      : cudf::create_null_mask(variant_column.size(), mask_state::ALL_VALID, stream, mr);
-  auto* d_null_mask = null_mask.data();
-
-  auto grid = cudf::detail::grid_1d{num_rows, block_size};
-
-  auto const d_status = status_span(status);
-  locate_variant_fields_kernel<<<grid.num_blocks, block_size, 0, stream.get()>>>(
-    meta_lists_device_view,
-    val_lists_device_view,
-    *path_device_view,
-    d_sizes,
-    d_src_offsets,
-    d_null_mask,
-    d_status);
-  CUDF_CUDA_TRY(cudaGetLastError());
-
-  auto [offsets_column, total_bytes] =
-    cudf::strings::detail::make_offsets_child_column(d_sizes, stream, mr);
-  CUDF_EXPECTS(total_bytes <= std::numeric_limits<size_type>::max(),
-               "VARIANT extracted bytes exceed cudf size_type limit",
-               std::overflow_error);
-  // Past the large-strings threshold the offsets come back as INT64, which a LIST column cannot
-  // use and which the size_type span below would misread
-  CUDF_EXPECTS(offsets_column->type().id() == type_id::INT32,
-               "VARIANT extracted bytes exceed the list offset limit",
-               std::overflow_error);
-  device_span<size_type const> d_offsets{offsets_column->view().data<size_type>(),
-                                         static_cast<std::size_t>(num_rows + 1)};
-
-  auto val_child = make_numeric_column(
-    data_type{type_id::UINT8}, total_bytes, mask_state::UNALLOCATED, stream, mr);
-  if (total_bytes > 0) {
-    auto const out_base = val_child->mutable_view().data<uint8_t>();
-    auto src_iter       = cudf::detail::make_counting_transform_iterator(
-      size_type{0},
-      cuda::proclaim_return_type<uint8_t const*>(
-        [vlv   = val_lists_device_view,
-         d_src = d_src_offsets.data()] __device__(size_type row) -> uint8_t const* {
-          return vlv.child().template data<uint8_t>() + vlv.offset_at(row) + d_src[row];
-        }));
-    auto dst_iter = cudf::detail::make_counting_transform_iterator(
-      size_type{0},
-      cuda::proclaim_return_type<uint8_t*>(
-        [out_base, d_off = d_offsets.data()] __device__(size_type row) -> uint8_t* {
-          return out_base + d_off[row];
-        }));
-    cudf::detail::batched_memcpy_async(src_iter, dst_iter, d_sizes.begin(), num_rows, stream);
-  }
-
-  auto const null_count = num_rows - cudf::detail::count_set_bits(d_null_mask, 0, num_rows, stream);
-  return make_lists_column(num_rows,
-                           std::move(offsets_column),
-                           std::move(val_child),
-                           null_count,
-                           null_count > 0
-                             ? std::move(null_mask)
-                             : cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
-}
-
 std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
                                           std::span<std::string_view const> paths,
                                           std::span<mutable_column_view const> statuses,
@@ -1733,17 +1578,6 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   output.reserve(num_paths);
   if (num_paths == 0) { return std::make_unique<table>(std::move(output)); }
 
-  // A single path has no prefixes to share, so it is exactly the single-path entry point; the
-  // batched setup would only add fixed overhead.
-  if (num_paths == 1) {
-    output.push_back(get_variant_field(variant_column,
-                                       paths.front(),
-                                       want_status ? std::optional{statuses.front()} : std::nullopt,
-                                       stream,
-                                       mr));
-    return std::make_unique<table>(std::move(output));
-  }
-
   // Validate and merge the paths even for empty input columns
   auto const trie = build_variant_path_trie(paths);
 
@@ -1753,12 +1587,25 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
     return std::make_unique<table>(std::move(output));
   }
 
-  auto steps_column           = build_path_column(trie.steps, stream, temp_mr);
-  auto steps_device_view      = column_device_view::create(steps_column->view(), stream);
-  auto const d_slot_steps     = stage_to_device_async(trie.slot_steps, stream, temp_mr);
-  auto const d_slot_depth     = stage_to_device_async(trie.slot_depth, stream, temp_mr);
-  auto const d_output_offsets = stage_to_device_async(trie.output_offsets, stream, temp_mr);
-  auto const d_output_paths   = stage_to_device_async(trie.output_paths, stream, temp_mr);
+  auto steps_column      = build_path_column(trie.steps, stream, temp_mr);
+  auto steps_device_view = column_device_view::create(steps_column->view(), stream);
+  // The trie arrays are staged with a single copy, since each transfer costs more than its contents
+  std::vector<size_type> h_trie_arrays;
+  for (auto const* array :
+       {&trie.slot_steps, &trie.slot_depth, &trie.output_offsets, &trie.output_paths}) {
+    h_trie_arrays.insert(h_trie_arrays.end(), array->begin(), array->end());
+  }
+  auto const d_trie_arrays = stage_to_device_async(h_trie_arrays, stream, temp_mr);
+  auto const* next_array   = d_trie_arrays.data();
+  auto const next_span     = [&](std::vector<size_type> const& array) {
+    auto const span = device_span<size_type const>{next_array, array.size()};
+    next_array += array.size();
+    return span;
+  };
+  auto const d_slot_steps     = next_span(trie.slot_steps);
+  auto const d_slot_depth     = next_span(trie.slot_depth);
+  auto const d_output_offsets = next_span(trie.output_offsets);
+  auto const d_output_paths   = next_span(trie.output_paths);
 
   // Resolve children with respect to any slice/offset on the parent struct
   structs_column_view const variant_struct{variant_column};
@@ -1972,21 +1819,21 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   if (all_paths_bytes > 0) {
     auto const d_out = cudf::detail::make_device_uvector_async(h_out, stream, temp_mr);
 
-    auto src_iter = cudf::detail::make_counting_transform_iterator(
+    auto const rows = cuda::fast_mod_div<size_type>{num_rows};
+    auto src_iter   = cudf::detail::make_counting_transform_iterator(
       size_type{0},
-      cuda::proclaim_return_type<uint8_t const*>(
-        [vlv = val_lists_device_view, d_src = d_src_offsets.data(), num_rows] __device__(
-          size_type i) -> uint8_t const* {
-          auto const row = i % num_rows;
-          return vlv.child().template data<uint8_t>() + vlv.offset_at(row) + d_src[i];
-        }));
+      cuda::proclaim_return_type<uint8_t const*>([vlv   = val_lists_device_view,
+                                                  d_src = d_src_offsets.data(),
+                                                  rows] __device__(size_type i) -> uint8_t const* {
+        return vlv.child().template data<uint8_t>() + vlv.offset_at(i % rows) + d_src[i];
+      }));
     auto dst_iter = cudf::detail::make_counting_transform_iterator(
       size_type{0},
-      cuda::proclaim_return_type<uint8_t*>([d_off = d_offsets.data(),
-                                            d_dst = d_out.data(),
-                                            num_rows] __device__(size_type i) -> uint8_t* {
-        return d_dst[i / num_rows] + d_off[i / num_rows][i % num_rows];
-      }));
+      cuda::proclaim_return_type<uint8_t*>(
+        [d_off = d_offsets.data(), d_dst = d_out.data(), rows] __device__(size_type i) -> uint8_t* {
+          auto const path = i / rows;
+          return d_dst[path] + d_off[path][i - path * static_cast<size_type>(rows)];
+        }));
     cudf::detail::batched_memcpy_async(src_iter, dst_iter, d_sizes.begin(), num_outputs, stream);
   }
 
@@ -2003,6 +1850,19 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   }
 
   return std::make_unique<table>(std::move(output));
+}
+
+std::unique_ptr<column> get_variant_field(column_view const& variant_column,
+                                          std::string_view path,
+                                          std::optional<mutable_column_view> status,
+                                          cuda::stream_ref stream,
+                                          rmm::device_async_resource_ref mr)
+{
+  std::string_view const paths[] = {path};
+  std::vector<mutable_column_view> statuses;
+  if (status.has_value()) { statuses.push_back(*status); }
+  return std::move(
+    get_variant_fields(variant_column, paths, statuses, stream, mr)->release().front());
 }
 
 std::unique_ptr<column> cast_variant(column_view const& values,
