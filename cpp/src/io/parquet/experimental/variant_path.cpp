@@ -143,8 +143,7 @@ variant_path_trie build_variant_path_trie(std::span<std::string_view const> path
   std::vector<size_type> slot_of_node(nodes.size(), -1);
 
   // Depth-first descent from the root, emitting slots in pre-order. `pending` carries the steps of
-  // the collapsed single-child chain walked since the last slot, and becomes that slot's step
-  // range.
+  // the collapsed single-child chain since the last slot, and becomes that slot's step range.
   struct descent_state {
     std::size_t node;
     size_type depth;
