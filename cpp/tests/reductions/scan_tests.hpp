@@ -45,7 +45,7 @@ struct TypeParam_to_host_type<numeric::decimal128> {
   using type = numeric::decimal128::rep;
 };
 
-template <cuda::std::same_as<cudf::string_view> TypeParam, typename T>
+template <cudf::concepts::string_view TypeParam, typename T>
 thrust::host_vector<std::string> make_vector(std::initializer_list<T> const& init)
 {
   return cudf::test::make_type_param_vector<std::string, T>(init);

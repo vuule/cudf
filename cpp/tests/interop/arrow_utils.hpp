@@ -87,7 +87,7 @@ std::shared_ptr<arrow::Array> to_arrow_array(cudf::type_id id, Ts&&... args)
 template <typename T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::vector<T> const& data,
                                               std::vector<uint8_t> const& mask = {})
-  requires(cudf::concepts::fixed_width<T> and !cuda::std::same_as<T, bool>)
+  requires(cudf::concepts::fixed_width<T> and !cudf::concepts::boolean<T>)
 {
   std::shared_ptr<arrow::Buffer> data_buffer;
   arrow::BufferBuilder buff_builder;
@@ -105,7 +105,7 @@ std::shared_ptr<arrow::Array> get_arrow_array(std::vector<T> const& data,
 template <typename T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::initializer_list<T> elements,
                                               std::initializer_list<uint8_t> validity = {})
-  requires(cudf::concepts::fixed_width<T> and !cuda::std::same_as<T, bool>)
+  requires(cudf::concepts::fixed_width<T> and !cudf::concepts::boolean<T>)
 {
   std::vector<T> data(elements);
   std::vector<uint8_t> mask(validity);
@@ -113,7 +113,7 @@ std::shared_ptr<arrow::Array> get_arrow_array(std::initializer_list<T> elements,
   return get_arrow_array<T>(data, mask);
 }
 
-template <cuda::std::same_as<bool> T>
+template <cudf::concepts::boolean T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::vector<bool> const& data,
                                               std::vector<bool> const& mask = {})
 {
@@ -133,7 +133,7 @@ std::shared_ptr<arrow::Array> get_arrow_array(std::vector<bool> const& data,
   return boolean_array;
 }
 
-template <cuda::std::same_as<bool> T>
+template <cudf::concepts::boolean T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::initializer_list<bool> elements,
                                               std::initializer_list<bool> validity = {})
 {
@@ -143,7 +143,7 @@ std::shared_ptr<arrow::Array> get_arrow_array(std::initializer_list<bool> elemen
   return get_arrow_array<T>(data, mask);
 }
 
-template <cuda::std::same_as<cudf::string_view> T>
+template <cudf::concepts::string_view T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::vector<std::string> const& data,
                                               std::vector<uint8_t> const& mask = {})
 {
@@ -158,7 +158,7 @@ std::shared_ptr<arrow::Array> get_arrow_array(std::vector<std::string> const& da
   return string_array;
 }
 
-template <cuda::std::same_as<cudf::string_view> T>
+template <cudf::concepts::string_view T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::initializer_list<std::string> elements,
                                               std::initializer_list<uint8_t> validity = {})
 {

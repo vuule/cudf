@@ -205,7 +205,7 @@ void populate_from_col(ArrowArray* arr,
 // populate an ArrowArray with the string data buffers of a cudf column_view
 // using no-op allocator so the ArrowArray knows it doesn't have ownership
 // of the device buffers.
-template <cuda::std::same_as<cudf::string_view> T>
+template <cudf::concepts::string_view T>
 void populate_from_col(ArrowArray* arr,
                        cudf::column_view view,
                        cuda::stream_ref stream   = cudf::get_default_stream(),
@@ -394,7 +394,7 @@ nanoarrow::UniqueArray get_nanoarrow_array(std::initializer_list<T> elements,
   return get_nanoarrow_array<T>(data, mask);
 }
 
-template <cuda::std::same_as<cudf::string_view> T>
+template <cudf::concepts::string_view T>
 nanoarrow::UniqueArray get_nanoarrow_array(std::vector<std::string> const& data,
                                            std::vector<uint8_t> const& mask = {})
 {

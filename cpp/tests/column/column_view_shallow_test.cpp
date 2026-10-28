@@ -41,7 +41,7 @@ std::unique_ptr<cudf::column> example_column()
 template <typename T>
 std::unique_ptr<cudf::column> example_column()
 
-  requires(cuda::std::same_as<T, std::string> or cuda::std::same_as<T, cudf::string_view>)
+  requires(cuda::std::same_as<T, std::string> or cudf::concepts::string_view<T>)
 {
   return cudf::test::strings_column_wrapper(
            {"fff", "aaa", "ddd", "bbb", "ccc", "ccc", "ccc", "", ""})
