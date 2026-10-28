@@ -1377,18 +1377,6 @@ void expect_matches_looped_get(cudf::column_view const& variant,
 
 struct GetVariantFieldsTest : public cudf::test::BaseFixture {};
 
-TEST_F(GetVariantFieldsTest, SharedPrefixes)
-{
-  auto const col = make_apache_variant(avf::object_nested);
-  expect_matches_looped_get(col,
-                            {"$.observation.location",
-                             "$.observation.time",
-                             "$.observation.value.temperature",
-                             "$.species.name",
-                             "$.species.population",
-                             "$.id"});
-}
-
 TEST_F(GetVariantFieldsTest, DuplicateAndPrefixPaths)
 {
   // "$.observation" is both a requested output and the prefix of another path, and appears twice.
@@ -1410,23 +1398,12 @@ TEST_F(GetVariantFieldsTest, TrieTooLargeForSharedMemory)
   expect_matches_looped_get(make_xyz_three_row_variant(), paths);
 }
 
-TEST_F(GetVariantFieldsTest, DeepTrieUsesGlobalScratch)
-{
-  // Every path extends the previous one, so the trie is a chain deeper than the per-thread stack
-  // the walk normally uses, which pushes it onto global scratch. Only "x" resolves.
-  std::vector<std::string> paths{"x"};
-  for (int i = 0; i < 20; ++i) {
-    paths.push_back(std::format("{}.s{}", paths.back(), i));
-  }
-  expect_matches_looped_get(make_xyz_three_row_variant(), paths);
-}
-
 TEST_F(GetVariantFieldsTest, WideAndDeepTrieUsesGlobalScratch)
 {
-  // Global scratch again, but over a trie whose slots mostly resolve: a 20-level nest of
+  // Global scratch over a trie whose slots mostly resolve: a 20-level nest of
   // single-field objects, where each level is both a requested output and the parent of a sibling
   // path that misses. Several slots therefore share a depth and each has to find its own parent,
-  // which the chain in DeepTrieUsesGlobalScratch cannot check because nothing below "x" resolves.
+  // which the chain in LargeMixedInputUsesGlobalScratch cannot check because none of it resolves.
   constexpr int depth = 20;
   auto const keys     = make_numeric_keys(depth + 1);
   auto value          = enc_int32(7);
@@ -1455,7 +1432,8 @@ namespace {
 // not a multiple of 32, and it exceeds both one counting block's share of a mask and the thread
 // count of the capped global-scratch grid. Rows cycle through: null, an empty value blob,
 // `{k00: row}`, and twice `{k00: row, k01: {k02: -row}}`. Every path in `chain` extends
-// `$.k01.k02`, which holds an INT32, so none of them resolves.
+// `$.k01.k02`, which holds an INT32, so none of them resolves. The paths are listed out of trie
+// order, so outputs are not in slot order.
 void expect_large_mixed_input(std::vector<std::string> const& chain)
 {
   constexpr cudf::size_type num_rows = 100'003;
@@ -1488,7 +1466,7 @@ void expect_large_mixed_input(std::vector<std::string> const& chain)
   auto const col =
     wrap_multi_row_variant(std::vector<std::vector<uint8_t>>(num_rows, meta), val_rows, row_valid);
 
-  std::vector<std::string> paths{"k00", "$.k01.k02", "$.k01.k03"};
+  std::vector<std::string> paths{"$.k01.k03", "$.k01.k02", "k00"};
   paths.insert(paths.end(), chain.begin(), chain.end());
   std::vector<std::string_view> const path_views(paths.begin(), paths.end());
   status_buffers status{paths.size(), num_rows};
@@ -1502,8 +1480,8 @@ void expect_large_mixed_input(std::vector<std::string> const& chain)
     std::vector<uint8_t> statuses(num_rows);
     for (cudf::size_type row = 0; row < num_rows; ++row) {
       auto const kind = row % 5;
-      auto const hit  = path_idx == 0 ? kind >= 2 : path_idx == 1 && kind >= 3;
-      values[row]     = path_idx == 0 ? row : -row;
+      auto const hit  = path_idx == 2 ? kind >= 2 : path_idx == 1 && kind >= 3;
+      values[row]     = path_idx == 2 ? row : -row;
       valid[row]      = hit;
       statuses[row]   = kind == 0   ? ST_ROW_NULL
                         : kind == 1 ? ST_MALFORMED
@@ -2810,10 +2788,6 @@ TEST_F(GetVariantTypeIdTest, MultiWordNullMask)
             static_cast<cudf::size_type>(list_null_rows.size() + unknown_header_rows.size()));
 }
 
-// ---------------------------------------------------------------------------
-// GetVariantField status tests
-// ---------------------------------------------------------------------------
-
 struct GetVariantFieldStatusTest : public cudf::test::BaseFixture {};
 
 TEST_F(GetVariantFieldStatusTest, SqlNullInputProducesRowNullStatus)
@@ -2990,10 +2964,6 @@ TEST_F(GetVariantFieldStatusTest, EmptyInput)
   EXPECT_EQ(status->size(), 0);
   EXPECT_EQ(got->size(), 0);
 }
-
-// ---------------------------------------------------------------------------
-// CastVariant status tests
-// ---------------------------------------------------------------------------
 
 struct CastVariantStatusTest : public cudf::test::BaseFixture {};
 
@@ -3253,10 +3223,6 @@ TEST_F(CastVariantStatusTest, EmptyInput)
   EXPECT_EQ(got->size(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// ExtractVariantField status tests (end-to-end: extraction + decode)
-// ---------------------------------------------------------------------------
-
 struct ExtractVariantFieldStatusTest : public cudf::test::BaseFixture {};
 
 TEST_F(ExtractVariantFieldStatusTest, SuccessStatus)
@@ -3342,9 +3308,6 @@ TEST_F(ExtractVariantFieldStatusTest, MissingNestedPathStatus)
   EXPECT_EQ(got->null_count(), 1);
 }
 
-// ---------------------------------------------------------------------------
-// GetVariantFields / ExtractVariantFields status tests
-// ---------------------------------------------------------------------------
 // The batched status columns are checked against the single-path ones for every path of every case
 // in expect_matches_looped_get; the cases here pin down the values that agreement rests on.
 
