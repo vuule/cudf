@@ -173,9 +173,8 @@ variant_path_trie build_variant_path_trie(std::span<std::string_view const> path
 
     // Pushed in reverse so popping visits children in order, keeping each subtree contiguous.
     for (auto const& [step, child] : std::ranges::reverse_view(nodes[state.node].children)) {
-      auto pending = child_pending;
-      pending.push_back(step);
-      stack.push_back({child, child_depth, std::move(pending)});
+      stack.emplace_back(child, child_depth, child_pending);
+      stack.back().pending.push_back(step);
     }
   }
 
