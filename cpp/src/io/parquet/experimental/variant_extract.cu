@@ -972,13 +972,15 @@ __device__ bool should_decode_row(size_type row, bitmask_type* d_null_mask, op_s
  * `status` records why, so the slots below it report their parent's reason instead of what probing
  * an empty value would say.
  */
+constexpr size_type invalid_slot_size = -1;
+
 struct slot_result {
   size_type src_offset;
   size_type size;
   op_status status;
-};
 
-constexpr size_type invalid_slot_size = -1;
+  [[nodiscard]] __device__ bool is_valid() const { return size != invalid_slot_size; }
+};
 
 __device__ slot_result make_slot_result(device_span<uint8_t const> field,
                                         uint8_t const* val_base,
@@ -989,16 +991,11 @@ __device__ slot_result make_slot_result(device_span<uint8_t const> field,
     static_cast<size_type>(field.data() - val_base), static_cast<size_type>(field.size()), status};
 }
 
-__device__ bool slot_is_valid(slot_result const& result)
-{
-  return result.size != invalid_slot_size;
-}
-
 // The span a slot located, or an empty span if it did not resolve.
 __device__ device_span<uint8_t const> slot_span(device_span<uint8_t const> val,
                                                 slot_result const& result)
 {
-  if (!slot_is_valid(result)) { return {}; }
+  if (!result.is_valid()) { return {}; }
   return val.subspan(result.src_offset, result.size);
 }
 
@@ -1132,7 +1129,7 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
         auto const path = output_paths[out_idx];
         auto const out  = path * num_rows + static_cast<size_type>(row);
         if (!d_statuses.empty()) { d_statuses[path][row] = result.status; }
-        if (slot_is_valid(result)) {
+        if (result.is_valid()) {
           d_sizes[out]       = result.size;
           d_src_offsets[out] = result.src_offset;
         } else {
