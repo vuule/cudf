@@ -25,7 +25,6 @@
 
 #include <numeric>
 #include <sstream>
-#include <type_traits>
 
 namespace cudf_streaming {
 

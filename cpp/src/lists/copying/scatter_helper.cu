@@ -134,7 +134,7 @@ struct list_child_constructor {
   };
 
  public:
-  // SFINAE catch-all, for unsupported child column types.
+  // Catch-all for unsupported child column types.
   template <typename T, typename... Args>
   std::unique_ptr<column> operator()(Args&&... args)
     requires(!is_supported_child_type<T>::value)
