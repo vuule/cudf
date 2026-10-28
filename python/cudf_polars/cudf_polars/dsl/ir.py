@@ -23,7 +23,6 @@ import pickle
 import random
 import reprlib
 import sys
-import time
 import uuid
 from collections.abc import Sized
 from dataclasses import dataclass, field
@@ -46,7 +45,7 @@ import cudf_polars.dsl.expr as expr
 from cudf_polars.containers import Column, DataFrame, DataType
 from cudf_polars.containers.dataframe import NamedColumn
 from cudf_polars.containers.datatype import _contains_dtype
-from cudf_polars.dsl.expressions import rolling, unary
+from cudf_polars.dsl.expressions import rolling
 from cudf_polars.dsl.expressions.base import ExecutionContext
 from cudf_polars.dsl.nodebase import Node
 from cudf_polars.dsl.to_ast import _DECIMAL_IDS, to_ast, to_parquet_filter
@@ -63,11 +62,6 @@ from cudf_polars.utils.cuda_stream import (
     get_cuda_stream,
     stream_ordered_after,
 )
-from cudf_polars.utils.versions import (
-    POLARS_VERSION_LT_136,
-    POLARS_VERSION_LT_137,
-    POLARS_VERSION_LT_138,
-)
 
 if TYPE_CHECKING:
     import concurrent.futures
@@ -81,7 +75,7 @@ if TYPE_CHECKING:
     )
     from typing import Literal, Self
 
-    from polars import polars  # type: ignore[attr-defined]
+    from polars import _plr as polars
 
     from rmm.pylibrmm.stream import Stream
 
@@ -95,7 +89,6 @@ if TYPE_CHECKING:
     from cudf_polars.streaming.rank_aware_source import RankAwareSource
     from cudf_polars.typing import CSECache, ClosedInterval, Schema, Slice as Zlice
     from cudf_polars.utils.config import ParquetOptions
-    from cudf_polars.utils.timer import Timer
 
 __all__ = [
     "IR",
@@ -340,9 +333,7 @@ class IR(Node["IR"]):
         translation phase should fail earlier.
     """
 
-    def evaluate(
-        self, *, cache: CSECache, timer: Timer | None, context: IRExecutionContext
-    ) -> DataFrame:
+    def evaluate(self, *, cache: CSECache, context: IRExecutionContext) -> DataFrame:
         """
         Evaluate the node (recursively) and return a dataframe.
 
@@ -351,9 +342,6 @@ class IR(Node["IR"]):
         cache
             Mapping from cached node ids to constructed DataFrames.
             Used to implement evaluation of the `Cache` node.
-        timer
-            If not None, a Timer object to record timings for the
-            evaluation of the node.
         context
             The execution context for the node.
 
@@ -375,18 +363,9 @@ class IR(Node["IR"]):
             translation phase should fail earlier.
         """
         children = [
-            child.evaluate(cache=cache, timer=timer, context=context)
-            for child in self.children
+            child.evaluate(cache=cache, context=context) for child in self.children
         ]
-        if timer is not None:
-            start = time.monotonic_ns()
-            result = self.do_evaluate(*self._non_child_args, *children, context=context)
-            end = time.monotonic_ns()
-            # TODO: Set better names on each class object.
-            timer.store(start, end, type(self).__name__)
-            return result
-        else:
-            return self.do_evaluate(*self._non_child_args, *children, context=context)
+        return self.do_evaluate(*self._non_child_args, *children, context=context)
 
 
 class ErrorNode(IR):
@@ -692,6 +671,23 @@ def _prepare_parquet_predicate(
     return predicate
 
 
+def _has_nested_narrow_decimal(
+    dtype: pl.DataType | pl.datatypes.DataTypeClass, *, nested: bool = False
+) -> bool:
+    """Whether ``dtype`` has a Decimal(precision <= 18) inside a List/Array/Struct."""
+    if isinstance(dtype, type):
+        dtype = dtype()
+    if isinstance(dtype, pl.Decimal):
+        return nested and (dtype.precision or 38) <= 18
+    if isinstance(dtype, (pl.List, pl.Array)):
+        return _has_nested_narrow_decimal(dtype.inner, nested=True)
+    if isinstance(dtype, pl.Struct):
+        return any(
+            _has_nested_narrow_decimal(f.dtype, nested=True) for f in dtype.fields
+        )
+    return False
+
+
 class Scan(IR):
     """Input from files."""
 
@@ -813,6 +809,17 @@ class Scan(IR):
             # This line is unhittable ATM since IPC/Anonymous scan raise
             # on the polars side
             raise NotImplementedError(f"Unhandled scan type: {self.typ}")
+        if self.typ == "parquet" and any(
+            _has_nested_narrow_decimal(dtype.polars_type)
+            for dtype in self.schema.values()
+        ):
+            # libcudf's decimal_width option only widens top-level columns, so
+            # nested Decimal(p <= 18) children come back as DECIMAL32/64 and
+            # break the conversion to polars.
+            # See https://github.com/NVIDIA/cudf/issues/24838
+            raise NotImplementedError(
+                "Nested Decimal with precision <= 18 in parquet scan"
+            )
         if self.typ == "ndjson" and (self.n_rows != -1 or self.skip_rows != 0):
             raise NotImplementedError("row limit in scan for json reader")
         if self.skip_rows < 0:
@@ -843,6 +850,11 @@ class Scan(IR):
             if self.reader_options["skip_rows_after_header"] != 0:
                 raise NotImplementedError("Skipping rows after header in CSV reader")
             parse_options = self.reader_options["parse_options"]
+            if parse_options.get("encoding", "Utf8") != "Utf8":
+                # libcudf does not repair invalid UTF-8 (polars' "utf8-lossy")
+                raise NotImplementedError(
+                    f"CSV encoding {parse_options['encoding']!r} is not supported"
+                )
             if (
                 null_values := parse_options["null_values"]
             ) is not None and "Named" in null_values:
@@ -866,9 +878,9 @@ class Scan(IR):
                         and isinstance(schema, dict)
                         and "fields" in reader_schema
                     )
-                    # polars 1.43 added a separate "column_names_overwrite"
-                    # for headerless new_columns; "schema" still covers other
-                    # renaming mechanisms (e.g. with_column_names) unchanged.
+                    # "column_names_overwrite" holds headerless new_columns;
+                    # "schema" covers other renaming mechanisms
+                    # (e.g. with_column_names).
                     or self.reader_options.get("column_names_overwrite")
                 )
                 if not has_new_columns:
@@ -1168,15 +1180,15 @@ class Scan(IR):
 
             parse_options = reader_options["parse_options"]
             sep = chr(parse_options["separator"])
-            quote = chr(parse_options["quote_char"])
+            quote_char = parse_options["quote_char"]
             eol = chr(parse_options["eol_char"])
             if reader_options["schema"] is not None:
                 # Reader schema provides names
                 column_names = list(reader_options["schema"]["fields"].keys())
             elif reader_options.get("column_names_overwrite"):
-                # polars 1.43 added "column_names_overwrite" for headerless
-                # new_columns; "schema" (above) still covers other renaming
-                # mechanisms (e.g. with_column_names) unchanged.
+                # "column_names_overwrite" holds headerless new_columns;
+                # "schema" (above) covers other renaming mechanisms
+                # (e.g. with_column_names).
                 # "column_names_overwrite" only lists the overridden names,
                 # not any trailing columns padded with polars' default
                 # "column_N" names. Read the full, resolved set of names from
@@ -1189,6 +1201,13 @@ class Scan(IR):
                 # file provides column names
                 column_names = None
             usecols = with_columns
+            if usecols is None and reader_options.get("extra_columns") == "ignore":
+                # Files may have columns beyond the schema (extra_columns="ignore");
+                # read only the schema's columns so the pieces concatenate.
+                generated = {include_file_paths}
+                if row_index is not None:
+                    generated.add(row_index[0])
+                usecols = [name for name in schema if name not in generated]
             has_header = reader_options["has_header"]
             header = 0 if has_header else -1
 
@@ -1213,24 +1232,30 @@ class Scan(IR):
             seen_paths = []
             read_partial = n_rows != -1
             for p in paths:
-                skiprows = reader_options["skip_rows"]
+                # skip_lines skips raw lines (ignoring quoting) before anything else
+                skiprows = reader_options["skip_rows"] + reader_options["skip_lines"]
                 path = Path(p)
                 with path.open(encoding="utf-8") as f:
+                    for _ in range(reader_options["skip_lines"]):
+                        f.readline()
                     while f.readline() == "\n":
                         skiprows += 1
-                options = (
+                csv_builder = (
                     plc.io.csv.CsvReaderOptions.builder(plc.io.SourceInfo([path]))
                     .nrows(n_rows)
                     .skiprows(skiprows + skip_rows)
                     .skip_blank_lines(skip_blank_lines=False)
                     .lineterminator(str(eol))
-                    .quotechar(str(quote))
                     .decimal(decimal)
                     .keep_default_na(keep_default_na=False)
                     .na_filter(na_filter=True)
                     .delimiter(str(sep))
-                    .build()
                 )
+                if quote_char is None:
+                    csv_builder = csv_builder.quoting(plc.io.types.QuoteStyle.NONE)
+                else:
+                    csv_builder = csv_builder.quotechar(chr(quote_char))
+                options = csv_builder.build()
                 if column_names is not None:
                     options.set_names([str(name) for name in column_names])
                 else:
@@ -1243,7 +1268,12 @@ class Scan(IR):
                     {name: dtype.plc_type for name, dtype in schema.items()}
                 )
                 if usecols is not None:
-                    options.set_use_cols_names([str(name) for name in usecols])
+                    if usecols:
+                        options.set_use_cols_names([str(name) for name in usecols])
+                    else:
+                        # An empty selection means "all columns" to libcudf, so
+                        # read one column and discard it below to get the row count.
+                        options.set_use_cols_indexes([0])
                 options.set_na_values(null_values)
                 if comment is not None:
                     options.set_comment(comment)
@@ -1262,8 +1292,14 @@ class Scan(IR):
                 ),
                 strict=True,
             )
+            if usecols == []:
+                # Only the number of rows is needed.
+                table = plc.Table([], num_rows=sum(t.num_rows() for t in tables))
+                colnames = []
+            else:
+                table = plc.concatenate.concatenate(list(tables), stream=stream)
             df = DataFrame.from_table(
-                plc.concatenate.concatenate(list(tables), stream=stream),
+                table,
                 colnames,
                 [schema[colname] for colname in colnames],
                 stream=stream,
@@ -1457,8 +1493,25 @@ class Scan(IR):
             if filters is not None and effective_predicate is None:
                 return df
         elif typ == "ndjson":
+
+            def _json_dtype(name: str, dtype: DataType) -> plc.io.json.NameAndType:
+                # libcudf needs the names of nested children; lists use "element".
+                if dtype.id() == plc.TypeId.STRUCT:
+                    assert isinstance(dtype.polars_type, pl.Struct)
+                    children = [
+                        _json_dtype(f.name, c)
+                        for f, c in zip(
+                            dtype.polars_type.fields, dtype.children, strict=True
+                        )
+                    ]
+                elif dtype.id() == plc.TypeId.LIST:
+                    children = [_json_dtype("element", dtype.children[0])]
+                else:
+                    children = []
+                return (name, dtype.plc_type, children)
+
             json_schema: list[plc.io.json.NameAndType] = [
-                (name, typ.plc_type, []) for name, typ in schema.items()
+                _json_dtype(name, dtype) for name, dtype in schema.items()
             ]
             json_reader_options = (
                 plc.io.json.JsonReaderOptions.builder(plc.io.SourceInfo(paths))
@@ -1480,6 +1533,20 @@ class Scan(IR):
             col_order = list(schema.keys())
             if row_index is not None:
                 col_order.remove(row_index[0])
+            if missing := [name for name in col_order if name not in df.column_map]:
+                # The reader drops columns that are not in the data; polars
+                # fills the columns of a user-provided schema with nulls.
+                nulls = pl.DataFrame(
+                    {
+                        name: pl.Series(
+                            name, [None] * df.num_rows, dtype=schema[name].polars_type
+                        )
+                        for name in missing
+                    }
+                )
+                df = df.with_columns(
+                    DataFrame.from_polars(nulls, stream=stream).columns, stream=stream
+                )
             df = df.select(col_order)
         else:
             raise NotImplementedError(
@@ -1673,8 +1740,8 @@ class Sink(IR):
                 raise NotImplementedError(
                     f"Compression type '{compression}' is not supported."
                 )
-        elif kind == (
-            "Json" if POLARS_VERSION_LT_137 else "NDJson"
+        elif (
+            kind == "NDJson"
         ):  # pragma: no cover; options are validated on the polars side
             if not all(
                 plc.io.json.is_supported_write_json(dtype.plc_type)
@@ -1858,13 +1925,11 @@ class Sink(IR):
         """Write the dataframe to a file."""
         target = plc.io.SinkInfo([path])
 
-        if POLARS_VERSION_LT_136 and options.get("mkdir", False):
-            Path(path).parent.mkdir(parents=True, exist_ok=True)  # pragma: no cover
         if kind == "Csv":
             cls._write_csv(target, options, df)
         elif kind == "Parquet":
             cls._write_parquet(target, parquet_options, options, df)
-        elif kind == ("Json" if POLARS_VERSION_LT_137 else "NDJson"):
+        elif kind == "NDJson":
             cls._write_json(target, df)
 
         return DataFrame([], stream=df.stream)
@@ -1921,9 +1986,7 @@ class Cache(IR):
         # return it.
         return df
 
-    def evaluate(
-        self, *, cache: CSECache, timer: Timer | None, context: IRExecutionContext
-    ) -> DataFrame:
+    def evaluate(self, *, cache: CSECache, context: IRExecutionContext) -> DataFrame:
         """Evaluate and return a dataframe."""
         # We must override the recursion scheme because we don't want
         # to recurse if we're in the cache.
@@ -1931,7 +1994,7 @@ class Cache(IR):
             (result, hits) = cache[self.key]
         except KeyError:
             (value,) = self.children
-            result = value.evaluate(cache=cache, timer=timer, context=context)
+            result = value.evaluate(cache=cache, context=context)
             cache[self.key] = (result, 0)
             return result
         else:
@@ -2138,9 +2201,7 @@ class Select(IR):
             columns = broadcast(*columns, stream=df.stream)
         return DataFrame(columns, stream=df.stream)
 
-    def evaluate(
-        self, *, cache: CSECache, timer: Timer | None, context: IRExecutionContext
-    ) -> DataFrame:
+    def evaluate(self, *, cache: CSECache, context: IRExecutionContext) -> DataFrame:
         """
         Evaluate the Select node with special handling for fast count queries.
 
@@ -2149,9 +2210,6 @@ class Select(IR):
         cache
             Mapping from cached node ids to constructed DataFrames.
             Used to implement evaluation of the `Cache` node.
-        timer
-            If not None, a Timer object to record timings for the
-            evaluation of the node.
         context
             The execution context for the node.
 
@@ -2195,7 +2253,7 @@ class Select(IR):
             )
             return DataFrame([col], stream=stream)
 
-        return super().evaluate(cache=cache, timer=timer, context=context)
+        return super().evaluate(cache=cache, context=context)
 
 
 class Reduce(IR):
@@ -2465,16 +2523,6 @@ class GroupBy(IR):
         for dtype in schema.values():
             if _has_struct_in_list(dtype.polars_type):
                 raise NotImplementedError("Nested list[struct] types not supported")
-        for request in agg_requests:
-            expr = request.value
-            if (
-                POLARS_VERSION_LT_136
-                and isinstance(expr, unary.UnaryFunction)
-                and expr.name == "value_counts"
-            ):
-                raise NotImplementedError(
-                    "value_counts is not supported in groupby"
-                )  # pragma: no cover; Nested list[struct] types not supported
         self.agg_requests = tuple(agg_requests)
         self.maintain_order = maintain_order
         self.zlice = zlice
@@ -2633,14 +2681,20 @@ class GroupBy(IR):
                     (child,) = value.children
                 # libcudf will return int64 when summing integers
                 # but the schema may be a lower bit width
-                col = child.evaluate(df, context=ExecutionContext.GROUPBY).obj
+                child_col = child.evaluate(df, context=ExecutionContext.GROUPBY)
+                if child_col.size != keys[0].size:
+                    # e.g. an aggregation over a literal
+                    child_col = broadcast(
+                        child_col, target_length=keys[0].size, stream=df.stream
+                    )[0]
+                col = child_col.obj
                 should_cast = value.name == "sum" and plc.traits.is_integral_not_bool(
                     col.type()
                 )
             else:
                 # Anything else, we pre-evaluate
                 column = value.evaluate(df, context=ExecutionContext.GROUPBY)
-                if column.size != keys[0].size:
+                if column.size != keys[0].size:  # pragma: no cover; polars 2.0 only
                     column = broadcast(
                         column, target_length=keys[0].size, stream=df.stream
                     )[0]
@@ -3392,21 +3446,27 @@ class Join(IR):
                         left=False,
                         stream=stream,
                     )
-                    return DataFrame([*left_cols, *right_cols], stream=stream).slice(
-                        zlice
-                    )
+                    return DataFrame(
+                        [*left_cols, *right_cols],
+                        stream=stream,
+                        num_rows=left.num_rows * right.num_rows,
+                    ).slice(zlice)
         else:
             # how != "Cross"
             # TODO: Waiting on clarity based on https://github.com/pola-rs/polars/issues/17184
             left_on = DataFrame(
                 broadcast(
-                    *(e.evaluate(left) for e in left_on_exprs), stream=left.stream
+                    *(e.evaluate(left) for e in left_on_exprs),
+                    target_length=left.num_rows,
+                    stream=left.stream,
                 ),
                 stream=left.stream,
             )
             right_on = DataFrame(
                 broadcast(
-                    *(e.evaluate(right) for e in right_on_exprs), stream=right.stream
+                    *(e.evaluate(right) for e in right_on_exprs),
+                    target_length=right.num_rows,
+                    stream=right.stream,
                 ),
                 stream=right.stream,
             )
@@ -3555,7 +3615,9 @@ class HStack(IR):
         if should_broadcast:
             columns = broadcast(
                 *columns,
-                target_length=df.num_rows if df.num_columns != 0 else None,
+                target_length=(
+                    df.num_rows if df.num_columns != 0 or df.num_rows != 0 else None
+                ),
                 stream=df.stream,
             )
         else:  # pragma: no cover; streaming rewrites HStack(False)
@@ -3629,6 +3691,10 @@ class Distinct(IR):
         context: IRExecutionContext,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
+        if df.num_columns == 0:
+            return DataFrame([], stream=df.stream, num_rows=min(df.num_rows, 1)).slice(
+                zlice
+            )
         if subset is None:
             indices = list(range(df.num_columns))
             keys_sorted = all(c.is_sorted for c in df.column_map.values())
@@ -3934,11 +4000,11 @@ class MapFunction(IR):
                 f"{self.name} with Categorical/Enum columns is not supported"
             )
         if self.name == "explode":
-            if POLARS_VERSION_LT_136 or len(self.options) == 1:
+            if len(self.options) == 1:
                 (to_explode,) = self.options
             else:
-                (to_explode, empty_as_null, keep_nulls) = self.options
-                if (POLARS_VERSION_LT_136 and not empty_as_null) or not keep_nulls:
+                (to_explode, _, keep_nulls) = self.options
+                if not keep_nulls:
                     raise NotImplementedError(
                         "Explode an empty or null list/array"
                     )  # pragma: no cover
@@ -3956,9 +4022,6 @@ class MapFunction(IR):
             indices, pivotees, variable_name, value_name = self.options
             value_name = "value" if value_name is None else value_name
             variable_name = "variable" if variable_name is None else variable_name
-            if POLARS_VERSION_LT_136 and len(pivotees) == 0:  # pragma: no cover
-                index = frozenset(indices)
-                pivotees = [name for name in df.schema if name not in index]
             if not all(
                 dtypes.can_cast(df.schema[p].plc_type, self.schema[value_name].plc_type)
                 for p in pivotees
@@ -3975,8 +4038,6 @@ class MapFunction(IR):
             )
         elif self.name == "row_index":
             col_name, offset = options
-            if POLARS_VERSION_LT_138 and col_name in df.schema:  # pragma: no cover
-                raise NotImplementedError("Duplicate row index name")
             self.options = (col_name, offset)
         elif self.name == "fast_count":
             # TODO: Remove this once all scan types support projections
@@ -4135,13 +4196,11 @@ class MapFunction(IR):
                 num_keys=len(column_names),
             )
             result = DataFrame([col.copy() for col in df.columns], stream=df.stream)
-            for column_name, order, null_order in zip(
-                column_names, orders, null_orders, strict=True
-            ):
-                result.column_map[column_name].set_sorted(
+            if column_names:
+                result.column_map[column_names[0]].set_sorted(
                     is_sorted=plc.types.Sorted.YES,
-                    order=order,
-                    null_order=null_order,
+                    order=orders[0],
+                    null_order=null_orders[0],
                 )
             return result
         else:
@@ -4311,21 +4370,12 @@ class Empty(IR):
     @classmethod
     @log_do_evaluate
     @nvtx_annotate_cudf_polars(message="Empty")
-    def do_evaluate(
-        cls, schema: Schema, *, context: IRExecutionContext
-    ) -> DataFrame:  # pragma: no cover
+    def do_evaluate(cls, schema: Schema, *, context: IRExecutionContext) -> DataFrame:
         """Evaluate and return a dataframe."""
-        stream = context.get_cuda_stream()
-        return DataFrame(
-            [
-                Column(
-                    plc.column_factories.make_empty_column(
-                        dtype.plc_type, stream=stream
-                    ),
-                    dtype=dtype,
-                    name=name,
-                )
-                for name, dtype in schema.items()
-            ],
-            stream=stream,
+        # libcudf cannot make an empty column of a nested type directly.
+        return DataFrame.from_polars(
+            pl.DataFrame(
+                schema={name: dtype.polars_type for name, dtype in schema.items()}
+            ),
+            stream=context.get_cuda_stream(),
         )

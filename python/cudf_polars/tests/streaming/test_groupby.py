@@ -15,7 +15,11 @@ import polars as pl
 from polars.testing import assert_frame_equal
 
 import pylibcudf as plc
-from cudf_streaming.channel_metadata import OrderScheme
+from cudf_streaming.channel_metadata import (
+    OrderScheme,
+    RowOrdering,
+    RowOrderingScope,
+)
 from cudf_streaming.table_chunk import TableChunk
 
 from cudf_polars import Translator
@@ -28,7 +32,6 @@ from cudf_polars.streaming.actor_graph.collectives.shuffle import ShuffleManager
 from cudf_polars.streaming.actor_graph.core import evaluate_logical_plan
 from cudf_polars.testing.asserts import assert_gpu_result_equal
 from cudf_polars.utils.config import ConfigOptions
-from cudf_polars.utils.versions import POLARS_VERSION_LT_138
 
 
 @pytest.fixture(scope="module")
@@ -188,7 +191,9 @@ def test_groupby_adjusts_truncated_ordering_with_maintain_order(
     (ordering,) = scheme.orderings
     assert tuple(key.column_index for key in ordering.keys) == (0,)
     assert ordering.strict_boundaries is True
-    assert ordering.locally_ordered is True
+    assert metadata.partitioning.row_orderings == (
+        RowOrdering(ordering.keys, RowOrderingScope.GLOBAL),
+    )
 
 
 @pytest.mark.parametrize("keys", [("key",), ("key", "key2")])
@@ -312,13 +317,11 @@ def test_groupby_order_sensitive_aggs(streaming_engine_factory):
             "value": [None, 10, 20, None, 30, 40],
         }
     )
-    aggs = [
+    q = df.group_by("key").agg(
         pl.col("value").first(),
         pl.col("value").last().alias("last"),
-    ]
-    if not POLARS_VERSION_LT_138:
-        aggs.append(pl.col("value").first(ignore_nulls=True).alias("first_non_null"))
-    q = df.group_by("key").agg(*aggs)
+        pl.col("value").first(ignore_nulls=True).alias("first_non_null"),
+    )
     assert_gpu_result_equal(q, engine=streaming_engine, check_row_order=False)
 
 
@@ -357,8 +360,8 @@ def test_groupby_sort_by_first_last(streaming_engine_factory):
 
     q = df.group_by("g").agg(
         pl.col("val").sum().alias("volume"),
-        pl.col("val").sort_by("idx").first().alias("open"),
-        pl.col("val").sort_by("idx").last().alias("close"),
+        pl.col("val").sort_by("idx", maintain_order=True).first().alias("open"),
+        pl.col("val").sort_by("idx", maintain_order=True).last().alias("close"),
     )
     assert_gpu_result_equal(q, engine=streaming_engine, check_row_order=False)
 
@@ -406,9 +409,6 @@ def test_groupby_sort_by_stable_ties_with_preshuffle_fallback(
         q.collect(engine=streaming_engine)
 
 
-@pytest.mark.skipif(
-    POLARS_VERSION_LT_138, reason="set_sorted lowers to unsupported hint ir"
-)
 def test_groupby_first_non_null_sorted_keys(spmd_engine_factory):
     streaming_engine = spmd_engine_factory(
         StreamingOptions(
@@ -455,8 +455,8 @@ def test_groupby_sort_by_preserves_sorted_key_order(streaming_engine_factory):
         df.sort("g", descending=True)
         .group_by("g", maintain_order=True)
         .agg(
-            pl.col("val").sort_by("idx").first().alias("open"),
-            pl.col("val").sort_by("idx").last().alias("close"),
+            pl.col("val").sort_by("idx", maintain_order=True).first().alias("open"),
+            pl.col("val").sort_by("idx", maintain_order=True).last().alias("close"),
         )
     )
     assert_gpu_result_equal(q, engine=streaming_engine, check_row_order=True)
