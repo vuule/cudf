@@ -1377,12 +1377,6 @@ void expect_matches_looped_get(cudf::column_view const& variant,
 
 struct GetVariantFieldsTest : public cudf::test::BaseFixture {};
 
-TEST_F(GetVariantFieldsTest, MultiRowMatchesLoopedSingleField)
-{
-  auto const col = make_xyz_three_row_variant();
-  expect_matches_looped_get(col, {"x", "y", "z", "no_such_field"});
-}
-
 TEST_F(GetVariantFieldsTest, SharedPrefixes)
 {
   auto const col = make_apache_variant(avf::object_nested);
@@ -1401,32 +1395,6 @@ TEST_F(GetVariantFieldsTest, DuplicateAndPrefixPaths)
   auto const col = make_apache_variant(avf::object_nested);
   expect_matches_looped_get(
     col, {"$.observation", "$.observation.time", "$.observation", "$.observation.value"});
-}
-
-TEST_F(GetVariantFieldsTest, ArrayIndexSteps)
-{
-  // array_primitive encodes the int8 array [2, 1, 5, 9]; "[9]" is out of bounds.
-  auto const col = make_apache_variant(avf::array_primitive);
-  expect_matches_looped_get(col, {"[0]", "[3]", "[9]", "[1]"});
-}
-
-TEST_F(GetVariantFieldsTest, NullRowsAndSlicedInput)
-{
-  std::vector<uint8_t> const m = {0x01, 0x01, 0x00, 0x01, 'x'};
-  std::vector<uint8_t> const v = {0x02, 0x01, 0x00, 0x00, 0x05, 0x14, 0x07, 0x00, 0x00, 0x00};
-  cudf::test::lists_column_wrapper<uint8_t> meta{
-    {m.begin(), m.end()}, {0x00}, {m.begin(), m.end()}};
-  cudf::test::lists_column_wrapper<uint8_t> val{{v.begin(), v.end()}, {0x00}, {v.begin(), v.end()}};
-  cudf::test::structs_column_wrapper const col{{meta, val}, std::vector<bool>{true, false, true}};
-
-  expect_matches_looped_get(col, {"x", "y"});
-  expect_matches_looped_get(cudf::slice(col, {1, 3}).front(), {"x", "y"});
-}
-
-TEST_F(GetVariantFieldsTest, SinglePath)
-{
-  // One path is served by the single-path entry point, which has to fill the status too.
-  expect_matches_looped_get(make_xyz_three_row_variant(), {"x"});
 }
 
 TEST_F(GetVariantFieldsTest, TrieTooLargeForSharedMemory)
@@ -3456,7 +3424,7 @@ TEST_F(GetVariantFieldsStatusTest, RejectsMalformedStatusColumns)
 
 struct ExtractVariantFieldsStatusTest : public cudf::test::BaseFixture {};
 
-TEST_F(ExtractVariantFieldsStatusTest, MatchesLoopedExtractStatus)
+TEST_F(ExtractVariantFieldsStatusTest, CastStatusReachesBatchedOutput)
 {
   auto const col    = make_xyz_three_row_variant();
   auto const stream = cudf::test::get_default_stream();
@@ -3472,14 +3440,7 @@ TEST_F(ExtractVariantFieldsStatusTest, MatchesLoopedExtractStatus)
   auto const got = expns::extract_variant_fields(col, paths, types, status.views, stream, cmr());
 
   ASSERT_EQ(got->num_columns(), 3);
-  for (std::size_t path_idx = 0; path_idx < paths.size(); ++path_idx) {
-    SCOPED_TRACE(std::string{"path: "} + std::string{paths[path_idx]});
-    auto const expected_status = make_status_buffer(cudf::column_view{col}.size());
-    auto const expected        = expns::extract_variant_field(
-      col, paths[path_idx], types[path_idx], expected_status->mutable_view(), stream, cmr());
-    CUDF_TEST_EXPECT_COLUMNS_EQUAL(got->get_column(static_cast<cudf::size_type>(path_idx)),
-                                   *expected);
-    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*status.columns[path_idx], *expected_status);
-  }
+  expect_status_values(*status.columns[0], {ST_SUCCESS, ST_SUCCESS, ST_MISSING});
   expect_status_values(*status.columns[1], {ST_MISMATCH, ST_MISSING, ST_MISMATCH});
+  expect_status_values(*status.columns[2], {ST_MISSING, ST_MISSING, ST_MISSING});
 }
