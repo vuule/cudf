@@ -776,7 +776,7 @@ struct dispatch_map_type {
    * fit in L2.
    *
    */
-  template <cudf::concepts::integral_not_bool MapType>
+  template <cudf::concepts::index_type MapType>
   std::pair<std::unique_ptr<table>, std::vector<size_type>> operator()(
     table_view const& t,
     column_view const& partition_map,
@@ -845,7 +845,7 @@ struct dispatch_map_type {
 
   template <typename MapType, typename... Args>
   std::pair<std::unique_ptr<table>, std::vector<size_type>> operator()(Args&&...) const
-    requires(not cudf::concepts::integral_not_bool<MapType>)
+    requires(not cudf::concepts::index_type<MapType>)
   {
     CUDF_FAIL("Unexpected, non-integral partition map.");
   }
