@@ -178,10 +178,7 @@ variant_path_trie build_variant_path_trie(std::span<std::string_view const> path
     }
   }
 
-  // Invert the path-to-slot mapping into CSR form, counting then filling. Every path's end node
-  // got a slot above: `ends_a_path` implies `needs_slot`, and `parse_variant_path` rejects the
-  // step-less path that would otherwise end on the slot-less root. Checked rather than assumed
-  // because a missing slot would index `slot_of_node` at -1 below.
+  // Invert the path-to-slot mapping into CSR form, counting then filling.
   auto const num_slots = trie.slot_depth.size();
   trie.output_offsets.assign(num_slots + 1, 0);
   for (auto const node : path_end_node) {
