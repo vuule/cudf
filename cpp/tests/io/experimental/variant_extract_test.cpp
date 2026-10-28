@@ -620,7 +620,8 @@ inline std::vector<std::string> make_numeric_keys(int n)
 // self-contained within this test file for dynamic row counts.
 inline cudf::test::structs_column_wrapper wrap_multi_row_variant(
   std::vector<std::vector<uint8_t>> const& meta_rows,
-  std::vector<std::vector<uint8_t>> const& val_rows)
+  std::vector<std::vector<uint8_t>> const& val_rows,
+  std::vector<bool> const& validity = {})
 {
   auto build_list = [](std::vector<std::vector<uint8_t>> const& rows) {
     auto const n = static_cast<cudf::size_type>(rows.size());
@@ -642,7 +643,7 @@ inline cudf::test::structs_column_wrapper wrap_multi_row_variant(
   std::vector<std::unique_ptr<cudf::column>> children;
   children.emplace_back(build_list(meta_rows));
   children.emplace_back(build_list(val_rows));
-  return cudf::test::structs_column_wrapper{std::move(children)};
+  return cudf::test::structs_column_wrapper{std::move(children), validity};
 }
 
 // Build a V1 VARIANT metadata blob for the given ordered string dictionary.
@@ -1477,6 +1478,93 @@ TEST_F(GetVariantFieldsTest, WideAndDeepTrieUsesGlobalScratch)
     paths.push_back(prefix + missing_key);
   }
   expect_matches_looped_get(col, paths);
+}
+
+namespace {
+
+// Checks the batched outputs against values derived on the host, over enough rows that the walk,
+// the valid-row count and the fused copy all span many blocks and bitmask words. The row count is
+// not a multiple of 32, and it exceeds both one counting block's share of a mask and the thread
+// count of the capped global-scratch grid. Rows cycle through: null, an empty value blob,
+// `{k00: row}`, and twice `{k00: row, k01: {k02: -row}}`. Every path in `chain` extends
+// `$.k01.k02`, which holds an INT32, so none of them resolves.
+void expect_large_mixed_input(std::vector<std::string> const& chain)
+{
+  constexpr cudf::size_type num_rows = 100'003;
+  auto const stream                  = cudf::test::get_default_stream();
+
+  auto const meta = build_metadata(make_numeric_keys(4), /*sorted=*/true);
+  std::vector<std::vector<uint8_t>> val_rows(num_rows);
+  std::vector<bool> row_valid(num_rows, true);
+  for (cudf::size_type row = 0; row < num_rows; ++row) {
+    auto const k00 = enc_int32(row);
+    switch (row % 5) {
+      case 0: row_valid[row] = false; break;
+      case 1: break;
+      case 2: val_rows[row] = build_single_field_object(0, k00); break;
+      default: {
+        auto const k01 = build_single_field_object(2, enc_int32(-row));
+        auto& out      = val_rows[row];
+        out            = {make_variant_object_header(),
+                          0x02,
+                          0x00,
+                          0x01,
+                          0x00,
+                          static_cast<uint8_t>(k00.size()),
+                          static_cast<uint8_t>(k00.size() + k01.size())};
+        out.insert(out.end(), k00.begin(), k00.end());
+        out.insert(out.end(), k01.begin(), k01.end());
+      }
+    }
+  }
+  auto const col =
+    wrap_multi_row_variant(std::vector<std::vector<uint8_t>>(num_rows, meta), val_rows, row_valid);
+
+  std::vector<std::string> paths{"k00", "$.k01.k02", "$.k01.k03"};
+  paths.insert(paths.end(), chain.begin(), chain.end());
+  std::vector<std::string_view> const path_views(paths.begin(), paths.end());
+  status_buffers status{paths.size(), num_rows};
+  auto const got =
+    cudf::io::parquet::experimental::get_variant_fields(col, path_views, status.views, stream);
+
+  for (std::size_t path_idx = 0; path_idx < paths.size(); ++path_idx) {
+    SCOPED_TRACE(std::string{"path: "} + paths[path_idx]);
+    std::vector<int32_t> values(num_rows);
+    std::vector<bool> valid(num_rows);
+    std::vector<uint8_t> statuses(num_rows);
+    for (cudf::size_type row = 0; row < num_rows; ++row) {
+      auto const kind = row % 5;
+      auto const hit  = path_idx == 0 ? kind >= 2 : path_idx == 1 && kind >= 3;
+      values[row]     = path_idx == 0 ? row : -row;
+      valid[row]      = hit;
+      statuses[row]   = kind == 0   ? ST_ROW_NULL
+                        : kind == 1 ? ST_MALFORMED
+                        : hit       ? ST_SUCCESS
+                                    : ST_MISSING;
+    }
+    auto const got_column = got->get_column(static_cast<cudf::size_type>(path_idx)).view();
+    EXPECT_EQ(got_column.null_count(), std::count(valid.begin(), valid.end(), false));
+    auto const casted = cudf::io::parquet::experimental::cast_variant(
+      got_column, cudf::data_type{cudf::type_id::INT32}, std::nullopt, stream);
+    cudf::test::fixed_width_column_wrapper<int32_t> const expected(
+      values.begin(), values.end(), valid.begin());
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(*casted, expected);
+    expect_status_values(*status.columns[path_idx], statuses);
+  }
+}
+
+}  // namespace
+
+TEST_F(GetVariantFieldsTest, LargeMixedInput) { expect_large_mixed_input({}); }
+
+TEST_F(GetVariantFieldsTest, LargeMixedInputUsesGlobalScratch)
+{
+  // A chain deeper than the per-thread stack, so the walk runs on the capped global-scratch grid
+  std::vector<std::string> chain{"$.k01.k02.s0"};
+  for (int i = 1; i < 20; ++i) {
+    chain.push_back(std::format("{}.s{}", chain.back(), i));
+  }
+  expect_large_mixed_input(chain);
 }
 
 TEST_F(GetVariantFieldsTest, NoPathsYieldsNoColumns)

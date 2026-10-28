@@ -45,6 +45,7 @@
 #include <cuda/iterator>
 #include <cuda/numeric>
 #include <cuda/std/array>
+#include <cuda/std/bit>
 #include <cuda/std/concepts>
 #include <cuda/std/cstring>
 #include <cuda/std/limits>
@@ -1044,7 +1045,7 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
 
     if (!row_valid) {
       for (size_type path = 0; path < num_paths; ++path) {
-        auto const out     = path * num_rows + static_cast<size_type>(row);
+        auto const out     = static_cast<int64_t>(path) * num_rows + row;
         d_sizes[out]       = 0;
         d_src_offsets[out] = 0;
         cudf::clear_bit(d_null_masks[path], row);
@@ -1075,7 +1076,7 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
 
       for (auto out_idx = output_offsets[slot]; out_idx < output_offsets[slot + 1]; ++out_idx) {
         auto const path = output_paths[out_idx];
-        auto const out  = path * num_rows + static_cast<size_type>(row);
+        auto const out  = static_cast<int64_t>(path) * num_rows + row;
         if (!d_statuses.empty()) { d_statuses[path][row] = result.status; }
         if (result.is_valid()) {
           d_sizes[out]       = result.size;
@@ -1116,7 +1117,7 @@ CUDF_KERNEL __launch_bounds__(block_size) void count_valid_rows_kernel(
     // so those have to come off before they are counted as valid rows
     auto const rows_in_word = num_rows - word_idx * bits_per_word;
     if (rows_in_word < bits_per_word) { word &= cuda::bitmask<bitmask_type>(0, rows_in_word); }
-    num_valid += __popc(word);
+    num_valid += cuda::std::popcount(word);
   }
 
   using block_reduce = cub::BlockReduce<size_type, block_size>;
@@ -1380,6 +1381,34 @@ auto stage_to_device_async(Container const& source,
   return cudf::detail::make_device_uvector_async(staged, stream, mr);
 }
 
+// Copies the located value of every (path, row) pair, `Index` being wide enough to count them all
+template <typename Index>
+void copy_located_values(cudf::lists_column_device_view const& values,
+                         device_span<size_type const> d_src_offsets,
+                         device_span<size_type const> d_sizes,
+                         device_span<size_type* const> d_offsets,
+                         device_span<uint8_t* const> d_out,
+                         size_type num_rows,
+                         cuda::stream_ref stream)
+{
+  auto const rows     = cuda::fast_mod_div<Index>{num_rows};
+  auto const src_iter = cuda::make_transform_iterator(
+    cuda::counting_iterator<Index>{0},
+    cuda::proclaim_return_type<uint8_t const*>(
+      [values, d_src = d_src_offsets.data(), rows] __device__(Index i) -> uint8_t const* {
+        return values.child().template data<uint8_t>() +
+               values.offset_at(static_cast<size_type>(i % rows)) + d_src[i];
+      }));
+  auto const dst_iter = cuda::make_transform_iterator(
+    cuda::counting_iterator<Index>{0},
+    cuda::proclaim_return_type<uint8_t*>(
+      [d_off = d_offsets.data(), d_dst = d_out.data(), rows] __device__(Index i) -> uint8_t* {
+        auto const path = i / rows;
+        return d_dst[path] + d_off[path][i - path * static_cast<Index>(rows)];
+      }));
+  cudf::detail::batched_memcpy_async(src_iter, dst_iter, d_sizes.begin(), d_sizes.size(), stream);
+}
+
 struct cast_variant_fn {
   cudf::lists_column_device_view values;
   size_type num_rows;
@@ -1560,7 +1589,7 @@ std::unique_ptr<column> build_path_column(cudf::host_span<std::string const> ste
   }
   host_offsets[depth] = host_chars.size();
 
-  auto d_offsets = cudf::detail::make_device_uvector_async(host_offsets, stream, mr);
+  auto d_offsets = stage_to_device_async(host_offsets, stream, mr);
   auto offsets_col =
     std::make_unique<column>(data_type{type_id::INT32},
                              static_cast<size_type>(host_offsets.size()),
@@ -1663,13 +1692,9 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
       : cudf::detail::create_null_mask(0, mask_state::UNALLOCATED, stream, temp_mr);
   auto const* d_row_valid = reinterpret_cast<bitmask_type const*>(row_mask.data());
 
-  // Per-path outputs are contiguous, so each path's sizes can be scanned on their own. The scan
-  // below runs over one extra element per path, so bound that rather than just the output count.
-  CUDF_EXPECTS(static_cast<int64_t>(num_paths) * (static_cast<int64_t>(num_rows) + 1) <=
-                 std::numeric_limits<size_type>::max(),
-               "VARIANT paths times rows exceeds cudf size_type limit",
-               std::overflow_error);
-  auto const num_outputs = num_paths * num_rows;
+  // Per-path outputs are contiguous, so each path's sizes can be scanned on their own. Only each
+  // path has to fit in size_type, so the (path, row) index across all of them is 64-bit.
+  auto const num_outputs = static_cast<int64_t>(num_paths) * num_rows;
   cuda::device_buffer<size_type> d_sizes(stream, temp_mr, num_outputs, cuda::no_init);
   cuda::device_buffer<size_type> d_src_offsets(stream, temp_mr, num_outputs, cuda::no_init);
 
@@ -1773,8 +1798,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
     auto const path_sizes = cudf::detail::make_counting_transform_iterator(
       size_type{0},
       cuda::proclaim_return_type<size_type>(
-        [sizes = d_sizes.data(), base = path_idx * num_rows, num_rows] __device__(
-          size_type row) -> size_type { return row < num_rows ? sizes[base + row] : 0; }));
+        [sizes = d_sizes.data() + static_cast<int64_t>(path_idx) * num_rows, num_rows] __device__(
+          size_type row) -> size_type { return row < num_rows ? sizes[row] : 0; }));
     // Offsets are narrowed to size_type on the way out while the scan accumulates in 64 bits, so
     // the total still reveals an overflow that the offsets themselves would have wrapped away.
     auto const offsets_out =
@@ -1800,7 +1825,7 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   CUDF_CUDA_TRY(cudaGetLastError());
 
   // The only transfer back to the host, and the only synchronization, in the batched path
-  auto const totals_and_nulls = cudf::detail::make_host_vector(d_totals_and_nulls, stream);
+  auto const totals_and_nulls = cudf::detail::make_pinned_vector(d_totals_and_nulls, stream);
 
   // Allocate each path's output bytes now that its total is known
   std::vector<std::unique_ptr<column>> value_children;
@@ -1825,23 +1850,14 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   // Copy the located values of every (path, row) pair in one pass
   if (all_paths_bytes > 0) {
     auto const d_out = cudf::detail::make_device_uvector_async(h_out, stream, temp_mr);
-
-    auto const rows = cuda::fast_mod_div<size_type>{num_rows};
-    auto src_iter   = cudf::detail::make_counting_transform_iterator(
-      size_type{0},
-      cuda::proclaim_return_type<uint8_t const*>([vlv   = val_lists_device_view,
-                                                  d_src = d_src_offsets.data(),
-                                                  rows] __device__(size_type i) -> uint8_t const* {
-        return vlv.child().template data<uint8_t>() + vlv.offset_at(i % rows) + d_src[i];
-      }));
-    auto dst_iter = cudf::detail::make_counting_transform_iterator(
-      size_type{0},
-      cuda::proclaim_return_type<uint8_t*>(
-        [d_off = d_offsets.data(), d_dst = d_out.data(), rows] __device__(size_type i) -> uint8_t* {
-          auto const path = i / rows;
-          return d_dst[path] + d_off[path][i - path * static_cast<size_type>(rows)];
-        }));
-    cudf::detail::batched_memcpy_async(src_iter, dst_iter, d_sizes.begin(), num_outputs, stream);
+    // 64-bit division costs the copy a few percent, so it is only paid when the index needs it
+    if (num_outputs <= std::numeric_limits<size_type>::max()) {
+      copy_located_values<size_type>(
+        val_lists_device_view, d_src_offsets, d_sizes, d_offsets, d_out, num_rows, stream);
+    } else {
+      copy_located_values<int64_t>(
+        val_lists_device_view, d_src_offsets, d_sizes, d_offsets, d_out, num_rows, stream);
+    }
   }
 
   for (size_type path_idx = 0; path_idx < num_paths; ++path_idx) {
