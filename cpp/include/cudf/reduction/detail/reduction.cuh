@@ -21,7 +21,6 @@
 
 #include <cub/device/device_reduce.cuh>
 #include <cuda/execution>
-#include <cuda/std/concepts>
 #include <cuda/std/execution>
 #include <cuda/std/iterator>
 #include <cuda/stream>

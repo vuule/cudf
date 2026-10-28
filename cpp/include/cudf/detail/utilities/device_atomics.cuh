@@ -27,7 +27,6 @@
 #include <cudf/wrappers/timestamps.hpp>
 
 #include <cuda/atomic>
-#include <cuda/std/concepts>
 #include <cuda/std/limits>
 
 namespace cudf {
