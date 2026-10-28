@@ -23,7 +23,6 @@
 
 #include <array>
 #include <tuple>
-#include <type_traits>
 
 /**
  * @file type_lists.hpp

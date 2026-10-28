@@ -32,7 +32,6 @@
 #include <cuda/std/concepts>
 
 #include <string>
-#include <type_traits>
 
 struct BinaryOperationTest : public cudf::test::BaseFixture {
   BinaryOperationTest() {}

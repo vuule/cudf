@@ -21,7 +21,6 @@
 #include <cudf/utilities/concepts.hpp>
 
 #include <cuda/iterator>
-#include <cuda/std/concepts>
 
 #include <array>
 #include <cstdint>

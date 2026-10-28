@@ -7,7 +7,6 @@
 
 #include <cudf/utilities/concepts.hpp>
 #include <cudf/utilities/export.hpp>
-#include <cudf/utilities/traits.hpp>
 
 #include <cuda/std/concepts>
 

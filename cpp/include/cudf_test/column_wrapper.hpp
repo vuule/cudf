@@ -38,7 +38,6 @@
 #include <thrust/host_vector.h>
 
 #include <algorithm>
-#include <concepts>
 #include <initializer_list>
 #include <iterator>
 #include <memory>

@@ -14,7 +14,6 @@
 #include <cudf/utilities/span.hpp>
 #include <cudf/utilities/traits.hpp>
 
-#include <cuda/std/concepts>
 #include <thrust/host_vector.h>
 
 #include <initializer_list>

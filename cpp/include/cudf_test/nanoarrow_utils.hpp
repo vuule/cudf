@@ -17,7 +17,6 @@
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
-#include <cudf/utilities/traits.hpp>
 #include <cudf/wrappers/durations.hpp>
 
 #include <cuda/std/concepts>
