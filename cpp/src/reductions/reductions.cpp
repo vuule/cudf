@@ -21,7 +21,6 @@
 #include <cudf/utilities/type_checks.hpp>
 
 #include <cuda/std/concepts>
-#include <cuda/std/type_traits>
 #include <cuda/stream>
 
 #include <utility>

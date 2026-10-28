@@ -13,7 +13,6 @@
 
 #include <cuda/atomic>
 #include <cuda/iterator>
-#include <cuda/std/type_traits>
 #include <thrust/for_each.h>
 
 namespace cudf {

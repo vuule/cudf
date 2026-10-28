@@ -20,7 +20,6 @@
 
 #include <cuda/buffer>
 #include <cuda/iterator>
-#include <cuda/std/type_traits>
 #include <cuda/stream>
 #include <thrust/transform.h>
 

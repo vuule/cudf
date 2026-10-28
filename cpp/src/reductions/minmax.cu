@@ -27,8 +27,6 @@
 #include <cuda/std/utility>
 #include <cuda/stream>
 
-#include <type_traits>
-
 namespace cudf {
 namespace reduction {
 namespace detail {

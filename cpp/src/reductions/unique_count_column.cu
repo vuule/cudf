@@ -18,7 +18,6 @@
 #include <cuda/iterator>
 #include <cuda/std/cmath>
 #include <cuda/std/concepts>
-#include <cuda/std/type_traits>
 #include <cuda/stream>
 #include <thrust/count.h>
 

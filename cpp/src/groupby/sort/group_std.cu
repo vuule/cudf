@@ -22,7 +22,6 @@
 
 #include <cuda/buffer>
 #include <cuda/iterator>
-#include <cuda/std/type_traits>
 #include <cuda/stream>
 #include <thrust/for_each.h>
 #include <thrust/transform.h>

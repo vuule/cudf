@@ -21,7 +21,6 @@
 #include <cuda/iterator>
 #include <cuda/std/concepts>
 #include <cuda/std/functional>
-#include <cuda/std/type_traits>
 #include <cuda/stream>
 
 namespace cudf::groupby::detail {
