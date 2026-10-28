@@ -1004,13 +1004,9 @@ __device__ device_span<uint8_t const> slot_span(device_span<uint8_t const> val,
 // hardware coalesces it across a warp. A deeper trie uses a global scratch allocation instead.
 constexpr size_type max_local_trie_depth = 16;
 
-// Global scratch is allocated per thread, so the grid has to be capped for the allocation to stay
-// independent of the row count. This many blocks still saturates the walk.
-constexpr int max_global_scratch_blocks = 256;
-
-// The block cap alone still scales the allocation with the trie depth, which is bounded only by the
-// number of paths, so the total is capped as well. A trie deep enough to hit this is pathological,
-// and running it on fewer threads is a fair price for a bounded temporary.
+// Global scratch is per thread, so its grid is capped to keep the allocation independent of the row
+// count, and its total is capped because the trie depth is bounded only by the number of paths.
+constexpr int max_global_scratch_blocks        = 256;
 constexpr std::size_t max_global_scratch_bytes = std::size_t{32} * 1024 * 1024;
 
 // Dynamic shared memory up to this size needs no opt-in on any supported architecture
@@ -1019,20 +1015,14 @@ constexpr std::size_t max_shared_trie_bytes = std::size_t{48} * 1024;
 /**
  * @brief Resolves a whole trie of VARIANT paths in each row, recording each path's result.
  *
- * Slots are visited in index order, which is depth-first pre-order, so the walk only has to
- * remember one located value per depth: a slot's parent is the entry one level up, still untouched
- * from when the walk descended. A shared prefix is therefore resolved once per row and reused by
- * every path below it, and a prefix that fails leaves an empty span behind that makes its whole
- * subtree fail at its first step.
+ * Slots are visited in pre-order keeping one located value per depth, so a shared prefix resolves
+ * once per row and a failed prefix fails its whole subtree.
  *
- * For each path `p` and row, the located field's byte length is written to
- * `d_sizes[p * num_rows + row]` and its offset within the row's value blob to `d_src_offsets`, so
- * each path's outputs are contiguous. Rows that are null in `d_row_valid`, or whose path does not
- * resolve, get a size of 0 and are marked null in that path's mask in `d_null_masks`. When
- * `d_statuses` is not empty it holds one buffer per path, each receiving that path's per-row
- * status.
+ * Path `p`'s size and source offset for each row go to `d_sizes[p * num_rows + row]` and
+ * `d_src_offsets`; null and unresolved rows get size 0 and are cleared in `d_null_masks[p]`.
+ * `d_statuses`, when not empty, receives each path's per-row status.
  *
- * @tparam UseLocalScratch Keep the per-thread depth stack in local memory rather than `d_scratch`
+ * @tparam UseLocalScratch Keep the per-depth values in local memory rather than `d_scratch`
  */
 template <bool UseLocalScratch>
 CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
