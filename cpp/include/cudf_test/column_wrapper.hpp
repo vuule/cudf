@@ -1625,8 +1625,7 @@ class lists_column_wrapper : public detail::column_wrapper {
   lists_column_wrapper(std::initializer_list<Element> elements,
                        cuda::stream_ref stream   = cudf::test::get_default_stream(),
                        cudf::memory_resources mr = cudf::get_current_device_resource_ref())
-    requires(cudf::concepts::string_view<T> &&
-             std::is_constructible_v<std::string, Element>)
+    requires(cudf::concepts::string_view<T> && std::is_constructible_v<std::string, Element>)
     : lists_column_wrapper(elements.begin(), elements.end(), stream, mr)
   {
   }
@@ -1652,8 +1651,7 @@ class lists_column_wrapper : public detail::column_wrapper {
                        ValidityIterator v,
                        cuda::stream_ref stream   = cudf::test::get_default_stream(),
                        cudf::memory_resources mr = cudf::get_current_device_resource_ref())
-    requires(cudf::concepts::string_view<T> &&
-             std::is_constructible_v<std::string, Element>)
+    requires(cudf::concepts::string_view<T> && std::is_constructible_v<std::string, Element>)
     : lists_column_wrapper(elements.begin(), elements.end(), v, stream, mr)
   {
   }
