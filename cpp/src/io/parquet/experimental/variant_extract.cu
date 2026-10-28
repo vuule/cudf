@@ -36,7 +36,8 @@
 #include <rmm/device_buffer.hpp>
 #include <rmm/exec_policy.hpp>
 
-#include <cub/device/device_segmented_reduce.cuh>
+#include <cub/block/block_reduce.cuh>
+#include <cuda/atomic>
 #include <cuda/bit>
 #include <cuda/buffer>
 #include <cuda/cmath>
@@ -1090,6 +1091,44 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
 }
 
 /**
+ * @brief Adds the number of valid rows in each of `d_null_masks` to `d_valid_counts`.
+ *
+ * Each mask's words are spread over `blocks_per_path` consecutive blocks, so that a few long masks
+ * still fill the GPU. The counts must start at zero, since every block adds its share to them.
+ */
+CUDF_KERNEL __launch_bounds__(block_size) void count_valid_rows_kernel(
+  device_span<bitmask_type* const> d_null_masks,
+  size_type num_rows,
+  size_type words_per_path,
+  size_type blocks_per_path,
+  int64_t* d_valid_counts)
+{
+  auto constexpr bits_per_word = static_cast<size_type>(cudf::detail::size_in_bits<bitmask_type>());
+  auto const block             = static_cast<size_type>(blockIdx.x);
+  auto const path              = block / blocks_per_path;
+  auto const* mask             = d_null_masks[path];
+  size_type num_valid          = 0;
+  for (auto word_idx = (block % blocks_per_path) * block_size + static_cast<size_type>(threadIdx.x);
+       word_idx < words_per_path;
+       word_idx += blocks_per_path * block_size) {
+    auto word = mask[word_idx];
+    // `create_null_mask(ALL_VALID)` sets the whole last word, including the bits past the last row,
+    // so those have to come off before they are counted as valid rows
+    auto const rows_in_word = num_rows - word_idx * bits_per_word;
+    if (rows_in_word < bits_per_word) { word &= cuda::bitmask<bitmask_type>(0, rows_in_word); }
+    num_valid += __popc(word);
+  }
+
+  using block_reduce = cub::BlockReduce<size_type, block_size>;
+  __shared__ typename block_reduce::TempStorage temp_storage;
+  auto const block_valid = block_reduce(temp_storage).Sum(num_valid);
+  if (threadIdx.x == 0) {
+    cuda::atomic_ref<int64_t, cuda::thread_scope_device>{d_valid_counts[path]}.fetch_add(
+      block_valid, cuda::memory_order_relaxed);
+  }
+}
+
+/**
  * @brief Per-row kernel: decode each VARIANT value blob into a fixed-width primitive of type `T`.
  *
  * Writes the decoded value to `d_output[row]` for non-null rows whose blob is a variant primitive
@@ -1712,8 +1751,8 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
   // the device and read back together below: going through the host once per path instead would
   // cost two blocking transfers per path, which is the one cost that would still scale with the
   // number of paths.
-  cuda::device_buffer<int64_t> d_totals_and_nulls(
-    stream, temp_mr, 2 * static_cast<std::size_t>(num_paths), cuda::no_init);
+  auto d_totals_and_nulls = cudf::detail::make_zeroed_device_uvector_async<int64_t>(
+    2 * static_cast<std::size_t>(num_paths), stream, temp_mr);
   std::vector<std::unique_ptr<column>> offsets_columns;
   offsets_columns.reserve(num_paths);
   auto h_offsets = cudf::detail::make_pinned_vector_async<size_type*>(num_paths, stream);
@@ -1749,48 +1788,16 @@ std::unique_ptr<table> get_variant_fields(column_view const& variant_column,
                            int64_t{0});
   }
 
-  // Every path's valid count in one pass, into the second half of the same buffer. Each path's mask
-  // is its own allocation, so this counts through the pointer array rather than with
-  // `segmented_count_set_bits`, which needs one contiguous bitmask. Reducing over whole mask words
-  // rather than over a per-row predicate keeps the pass 32x shorter, which matters because it runs
-  // over every path at once.
-  auto constexpr bits_per_word = static_cast<size_type>(cudf::detail::size_in_bits<bitmask_type>());
-  auto const words_per_path    = static_cast<size_type>(num_bitmask_words(num_rows));
-  auto const set_bits_in_word  = cudf::detail::make_counting_transform_iterator(
-    size_type{0},
-    cuda::proclaim_return_type<int64_t>(
-      [masks = d_null_masks.data(), words_per_path, num_rows] __device__(size_type i) -> int64_t {
-        auto const word_index = i % words_per_path;
-        auto word             = masks[i / words_per_path][word_index];
-        // `create_null_mask(ALL_VALID)` sets the whole last word, including the bits past the last
-        // row, so those have to come off before they are counted as valid rows
-        auto const rows_in_word = num_rows - word_index * bits_per_word;
-        if (rows_in_word < bits_per_word) { word &= cuda::bitmask<bitmask_type>(0, rows_in_word); }
-        return __popc(word);
-      }));
-  auto const path_bounds = cudf::detail::make_counting_transform_iterator(
-    size_type{0},
-    cuda::proclaim_return_type<size_type>([words_per_path] __device__(size_type path_idx)
-                                            -> size_type { return path_idx * words_per_path; }));
-  auto* const d_valid_counts    = d_totals_and_nulls.data() + num_paths;
-  std::size_t reduce_temp_bytes = 0;
-  CUDF_CUDA_TRY(cub::DeviceSegmentedReduce::Sum(nullptr,
-                                                reduce_temp_bytes,
-                                                set_bits_in_word,
-                                                d_valid_counts,
-                                                num_paths,
-                                                path_bounds,
-                                                path_bounds + 1,
-                                                stream.get()));
-  rmm::device_buffer reduce_temp{reduce_temp_bytes, stream, temp_mr};
-  CUDF_CUDA_TRY(cub::DeviceSegmentedReduce::Sum(reduce_temp.data(),
-                                                reduce_temp_bytes,
-                                                set_bits_in_word,
-                                                d_valid_counts,
-                                                num_paths,
-                                                path_bounds,
-                                                path_bounds + 1,
-                                                stream.get()));
+  // Every path's valid count in one launch, into the second half of the same buffer. Each path's
+  // mask is its own allocation, so this counts through the pointer array rather than with
+  // `segmented_count_set_bits`, which needs one contiguous bitmask.
+  constexpr size_type words_per_thread = 8;
+  auto const words_per_path            = static_cast<size_type>(num_bitmask_words(num_rows));
+  auto const blocks_per_path =
+    cuda::ceil_div(words_per_path, static_cast<size_type>(block_size) * words_per_thread);
+  count_valid_rows_kernel<<<num_paths * blocks_per_path, block_size, 0, stream.get()>>>(
+    d_null_masks, num_rows, words_per_path, blocks_per_path, d_totals_and_nulls.data() + num_paths);
+  CUDF_CUDA_TRY(cudaGetLastError());
 
   // The only transfer back to the host, and the only synchronization, in the batched path
   auto const totals_and_nulls = cudf::detail::make_host_vector(d_totals_and_nulls, stream);
