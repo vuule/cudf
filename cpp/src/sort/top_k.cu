@@ -81,9 +81,8 @@ struct dispatch_topk_fn {
       std::move(indices), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
   }
 
-  template <typename T>
-    requires(cudf::concepts::fixed_width<T> and !cuda::std::floating_point<T> and
-             !cudf::concepts::chrono<T>)
+  template <cudf::concepts::fixed_width T>
+    requires(!cuda::std::floating_point<T> and !cudf::concepts::chrono<T>)
   std::unique_ptr<column> operator()()
   {
     return top_k<T>();
