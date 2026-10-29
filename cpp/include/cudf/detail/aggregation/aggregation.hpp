@@ -886,7 +886,7 @@ struct target_type_impl<Source, k> {
 };
 
 template <typename Source, aggregation::Kind k>
-  requires((cudf::concepts::duration<Source> or cudf::concepts::fixed_point<Source>) &&
+  requires((cudf::concepts::duration<Source> or cudf::concepts::fixed_point<Source>) and
            (k == aggregation::MEAN))
 struct target_type_impl<Source, k> {
   using type = Source;
@@ -933,7 +933,7 @@ struct target_type_impl<Source, k> {
  */
 template <typename Source>
 concept sum_overflow_supported =
-  (cudf::concepts::integral_not_bool<Source> && cudf::is_signed<Source>()) ||
+  (cudf::concepts::integral_not_bool<Source> and cudf::is_signed<Source>()) or
   cudf::concepts::fixed_point<Source>;
 
 // SUM_OVERFLOW outputs a struct {sum: Source, overflow: bool} where the sum matches the input
@@ -1076,7 +1076,7 @@ struct target_type_impl<SourceType, aggregation::CORRELATION> {
 
 // Always use numeric types for TDIGEST
 template <typename Source>
-  requires(cudf::concepts::arithmetic<Source> || cudf::concepts::fixed_point<Source>)
+  requires(cudf::concepts::arithmetic<Source> or cudf::concepts::fixed_point<Source>)
 struct target_type_impl<Source, aggregation::TDIGEST> {
   using type = struct_view;
 };

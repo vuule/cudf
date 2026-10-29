@@ -444,7 +444,7 @@ struct expression_evaluator {
   }
 
   template <typename LHS, typename RHS, typename ResultSubclass, typename T, bool result_has_nulls>
-    requires(cuda::std::is_void_v<LHS> || cuda::std::is_void_v<RHS>)
+    requires(cuda::std::is_void_v<LHS> or cuda::std::is_void_v<RHS>)
   __device__ inline void operator()(
     expression_result<ResultSubclass, T, result_has_nulls>& output_object,
     cudf::size_type const left_row_index,

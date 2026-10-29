@@ -34,7 +34,7 @@ struct update_target_element {
 };
 
 template <cudf::concepts::fixed_width Source>
-  requires(cudf::has_atomic_support<Source>() && !cudf::concepts::fixed_point<Source>)
+  requires(cudf::has_atomic_support<Source>() and not cudf::concepts::fixed_point<Source>)
 struct update_target_element<Source, aggregation::MIN> {
   __device__ void operator()(mutable_column_device_view target,
                              size_type target_index,
@@ -65,7 +65,7 @@ struct update_target_element<Source, aggregation::MIN> {
 };
 
 template <cudf::concepts::fixed_width Source>
-  requires(cudf::has_atomic_support<Source>() && !cudf::concepts::fixed_point<Source>)
+  requires(cudf::has_atomic_support<Source>() and not cudf::concepts::fixed_point<Source>)
 struct update_target_element<Source, aggregation::MAX> {
   __device__ void operator()(mutable_column_device_view target,
                              size_type target_index,
@@ -96,8 +96,8 @@ struct update_target_element<Source, aggregation::MAX> {
 };
 
 template <cudf::concepts::fixed_width Source>
-  requires(cudf::has_atomic_support<Source>() && !cudf::concepts::fixed_point<Source> &&
-           !cudf::concepts::timestamp<Source>)
+  requires(cudf::has_atomic_support<Source>() and not cudf::concepts::fixed_point<Source> and
+           not cudf::concepts::timestamp<Source>)
 struct update_target_element<Source, aggregation::SUM> {
   __device__ void operator()(mutable_column_device_view target,
                              size_type target_index,
@@ -127,9 +127,9 @@ struct update_target_element<Source, aggregation::SUM> {
 };
 
 template <typename Source>
-  requires(cuda::std::signed_integral<Source> ||
-           (cudf::concepts::fixed_point<Source> &&
-            cudf::has_atomic_support<device_storage_type_t<Source>>()) ||
+  requires(cuda::std::signed_integral<Source> or
+           (cudf::concepts::fixed_point<Source> and
+            cudf::has_atomic_support<device_storage_type_t<Source>>()) or
            cuda::std::same_as<Source, numeric::decimal128>)
 struct update_target_element<Source, aggregation::SUM_OVERFLOW> {
   using DeviceType = device_storage_type_t<Source>;
