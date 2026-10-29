@@ -60,7 +60,7 @@ void segmented_reduce(InputIterator d_in,
                       BinaryOp op,
                       OutputType initial_value,
                       cuda::stream_ref stream)
-  requires(!cudf::concepts::fixed_point<OutputType>)
+  requires(not cudf::concepts::fixed_point<OutputType>)
 {
   auto const num_segments = static_cast<size_type>(std::distance(d_offset_begin, d_offset_end)) - 1;
   auto const binary_op    = cudf::detail::cast_functor<OutputType>(op);

@@ -62,7 +62,7 @@ struct genericAtomicOperationImpl<T, DeviceSum> {
   }
 
   __forceinline__ __device__ T operator()(T* addr, T const& update_value, DeviceSum op)
-    requires(!cudf::concepts::arithmetic_not_bool<T>)
+    requires(not cudf::concepts::arithmetic_not_bool<T>)
   {
     cuda::atomic_ref<T> atomic_addr(*addr);
     T old_value = atomic_addr.load(cuda::memory_order_relaxed);
@@ -86,7 +86,7 @@ struct genericAtomicOperationImpl<T, DeviceMin> {
   }
 
   __forceinline__ __device__ T operator()(T* addr, T const& update_value, DeviceMin op)
-    requires(!cudf::concepts::integral_not_bool<T>)
+    requires(not cudf::concepts::integral_not_bool<T>)
   {
     cuda::atomic_ref<T> atomic_addr(*addr);
     T old_value = atomic_addr.load(cuda::memory_order_relaxed);
@@ -110,7 +110,7 @@ struct genericAtomicOperationImpl<T, DeviceMax> {
   }
 
   __forceinline__ __device__ T operator()(T* addr, T const& update_value, DeviceMax op)
-    requires(!cudf::concepts::integral_not_bool<T>)
+    requires(not cudf::concepts::integral_not_bool<T>)
   {
     cuda::atomic_ref<T> atomic_addr(*addr);
     T old_value = atomic_addr.load(cuda::memory_order_relaxed);
