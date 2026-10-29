@@ -26,7 +26,7 @@ namespace detail {
  * @return The number of significant bits: the # of bits - # of leading zeroes
  */
 template <typename T>
-  requires(cuda::std::same_as<T, uint32_t> || cuda::std::same_as<T, uint64_t> ||
+  requires(cuda::std::same_as<T, uint32_t> or cuda::std::same_as<T, uint64_t> or
            cuda::std::same_as<T, __uint128_t>)
 CUDF_HOST_DEVICE inline constexpr int count_significant_bits(T value)
 {

@@ -111,7 +111,7 @@ struct host_span {
   // Only supported containers of types convertible to T
   template <typename C>
     requires(
-      is_host_span_supported_container<C>::value &&
+      is_host_span_supported_container<C>::value and
       std::is_convertible_v<std::remove_pointer_t<decltype(thrust::raw_pointer_cast(  // NOLINT
                               std::declval<C&>().data()))> (*)[],  // NOLINT(modernize-type-traits)
                             T (*)[]>)                              // NOLINT
@@ -124,7 +124,7 @@ struct host_span {
   // Only supported containers of types convertible to T
   template <typename C>
     requires(
-      is_host_span_supported_container<C>::value &&
+      is_host_span_supported_container<C>::value and
       std::is_convertible_v<std::remove_pointer_t<decltype(thrust::raw_pointer_cast(  // NOLINT
                               std::declval<C&>().data()))> (*)[],  // NOLINT(modernize-type-traits)
                             T (*)[]>)                              // NOLINT
@@ -135,7 +135,7 @@ struct host_span {
   // Copy construction to support const conversion
   /// @param other The span to copy
   template <typename OtherT, std::size_t OtherExtent>
-    requires((Extent == OtherExtent || Extent == dynamic_extent) &&
+    requires((Extent == OtherExtent or Extent == dynamic_extent) and
              std::is_convertible_v<OtherT (*)[], T (*)[]>)  // NOLINT
   constexpr host_span(host_span<OtherT, OtherExtent> const& other) noexcept
     : _span{other.data(), other.size()}, _is_device_accessible{other.is_device_accessible()}
