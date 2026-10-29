@@ -28,7 +28,7 @@ namespace {
  */
 struct tdigest_gen_grouped {
   template <typename T>
-    requires(cudf::concepts::arithmetic<T> || cudf::concepts::fixed_point<T>)
+    requires(cudf::concepts::arithmetic<T> or cudf::concepts::fixed_point<T>)
   std::unique_ptr<cudf::column> operator()(cudf::column_view const& keys,
                                            cudf::column_view const& values,
                                            int delta)

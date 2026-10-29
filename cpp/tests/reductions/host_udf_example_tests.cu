@@ -64,7 +64,7 @@ struct host_udf_reduction_example : cudf::reduce_host_udf {
     using OutputType = int64_t;
 
     template <typename T, typename U, typename... Args>
-      requires(!cuda::std::same_as<InputType, T> || !cuda::std::same_as<OutputType, U>)
+      requires(not cuda::std::same_as<InputType, T> or not cuda::std::same_as<OutputType, U>)
     std::unique_ptr<cudf::scalar> operator()(Args...) const
     {
       CUDF_FAIL("Unsupported input/output type.");
@@ -203,7 +203,7 @@ struct host_udf_segmented_reduction_example : cudf::segmented_reduce_host_udf {
     using OutputType = int64_t;
 
     template <typename T, typename U, typename... Args>
-      requires(!cuda::std::same_as<InputType, T> || !cuda::std::same_as<OutputType, U>)
+      requires(not cuda::std::same_as<InputType, T> or not cuda::std::same_as<OutputType, U>)
     std::unique_ptr<cudf::column> operator()(Args...) const
     {
       CUDF_FAIL("Unsupported input/output type.");

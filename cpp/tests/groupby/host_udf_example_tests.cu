@@ -69,7 +69,7 @@ struct host_udf_groupby_example : cudf::groupby_host_udf {
     using OutputType = double;
 
     template <typename T, typename... Args>
-      requires(!cuda::std::same_as<InputType, T>)
+      requires(not cuda::std::same_as<InputType, T>)
     std::unique_ptr<cudf::column> operator()(Args...) const
     {
       CUDF_FAIL("Unsupported input type.");
