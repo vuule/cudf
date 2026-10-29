@@ -61,15 +61,15 @@ distribution_id default_distribution_id()
   return distribution_id::GEOMETRIC;
 }
 
-template <typename T>
-  requires(cudf::concepts::arithmetic<T> and not cuda::std::unsigned_integral<T>)
+template <cudf::concepts::arithmetic T>
+  requires(not cuda::std::unsigned_integral<T>)
 distribution_id default_distribution_id()
 {
   return distribution_id::NORMAL;
 }
 
-template <typename T>
-  requires(cuda::std::unsigned_integral<T> and not cudf::concepts::boolean<T>)
+template <cuda::std::unsigned_integral T>
+  requires(not cudf::concepts::boolean<T>)
 distribution_id default_distribution_id()
 {
   return distribution_id::GEOMETRIC;
