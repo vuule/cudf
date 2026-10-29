@@ -233,9 +233,8 @@ struct HasherDispatcher {
   {
   }
 
-  template <typename Element>
-    requires(cudf::concepts::fixed_width<Element> and not cuda::std::floating_point<Element> and
-             not cudf::concepts::chrono<Element>)
+  template <cudf::concepts::fixed_width Element>
+    requires(not cuda::std::floating_point<Element> and not cudf::concepts::chrono<Element>)
   __device__ inline void operator()(size_type row_index)
   {
     Element const& key = input_col.element<Element>(row_index);
