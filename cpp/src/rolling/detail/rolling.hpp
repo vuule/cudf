@@ -40,7 +40,7 @@ struct rolling_store_output_functor<_T, true> {
   // Non-bool, non-timestamp types
   template <typename T = _T>
   CUDF_HOST_DEVICE inline void operator()(T& out, T& val, size_type count)
-    requires(!(cudf::concepts::boolean<T> || cudf::concepts::timestamp<T>))
+    requires(not(cudf::concepts::boolean<T> or cudf::concepts::timestamp<T>))
   {
     if (count > 0) { out = val / count; }
   }

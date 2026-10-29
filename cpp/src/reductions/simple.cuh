@@ -297,7 +297,7 @@ struct same_element_type_dispatcher {
                                      std::optional<std::reference_wrapper<scalar const>> init,
                                      cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
-    requires(cuda::std::same_as<Op, cudf::reduction::detail::op::min> ||
+    requires(cuda::std::same_as<Op, cudf::reduction::detail::op::min> or
              cuda::std::same_as<Op, cudf::reduction::detail::op::max>)
   {
     CUDF_EXPECTS(!init.has_value(), "Initial value not supported for nested type reductions");
@@ -323,8 +323,8 @@ struct same_element_type_dispatcher {
                                      std::optional<std::reference_wrapper<scalar const>> init,
                                      cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
-    requires(is_supported<ElementType>() && !cudf::concepts::nested<ElementType> &&
-             !cudf::concepts::fixed_point<ElementType>)
+    requires(is_supported<ElementType>() and not cudf::concepts::nested<ElementType> and
+             not cudf::concepts::fixed_point<ElementType>)
   {
     if (!cudf::is_dictionary(col.type())) {
       return simple_reduction<ElementType, ElementType, Op>(col, init, stream, mr);

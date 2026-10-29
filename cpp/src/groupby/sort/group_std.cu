@@ -156,7 +156,7 @@ struct var_functor {
 
   template <typename T, typename... Args>
   std::unique_ptr<column> operator()(Args&&...)
-    requires(!cudf::concepts::arithmetic<T>)
+    requires(not cudf::concepts::arithmetic<T>)
   {
     CUDF_FAIL("Only numeric types are supported in std/variance");
   }
