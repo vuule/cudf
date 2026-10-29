@@ -150,7 +150,6 @@ struct fixed_width_type_converter {
  * @return rmm::device_buffer Buffer containing all elements in the range `[begin,end)`
  */
 template <typename ElementTo, typename ElementFrom, typename InputIterator>
-  requires(not cudf::concepts::fixed_point<ElementTo>)
 rmm::device_buffer make_elements(InputIterator begin,
                                  InputIterator end,
                                  cuda::stream_ref stream,
@@ -183,7 +182,6 @@ rmm::device_buffer make_elements(InputIterator begin,
  * @return rmm::device_buffer Buffer containing all elements in the range `[begin,end)`
  */
 template <cudf::concepts::fixed_point ElementTo, typename ElementFrom, typename InputIterator>
-  requires(not cudf::concepts::fixed_point<ElementFrom>)
 rmm::device_buffer make_elements(InputIterator begin,
                                  InputIterator end,
                                  cuda::stream_ref stream,
