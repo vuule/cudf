@@ -653,13 +653,12 @@ __device__ cuda::std::optional<size_type> parse_index_step(cudf::string_view ste
 //   - "[<N>]"   -> descend into an array by zero-based integer index.
 // The step kind is inferred from the first byte (`'['` means index).
 __device__ cuda::std::pair<device_span<uint8_t const>, op_status> resolve_path(
-  device_span<uint8_t const> meta, device_span<uint8_t const> val, column_device_view path)
+  device_span<uint8_t const> meta,
+  device_span<uint8_t const> val,
+  column_device_view path,
+  cuda::std::optional<cuda::std::pair<metadata_dictionary, op_status>>& dict)
 {
   device_span<uint8_t const> sub_val = val;
-  // The metadata dictionary is a per-row property shared by every object-key step of the path, so
-  // it is parsed and validated at most once per row (lazily, on the first object-key step) rather
-  // than being re-parsed on each step -- a path with only array-index steps never touches it.
-  cuda::std::optional<metadata_dictionary> dict;
   for (size_type i = 0; i < path.size(); ++i) {
     auto const step = path.element<cudf::string_view>(i);
     if (step.size_bytes() >= 1 && step.data()[0] == '[') {
@@ -669,12 +668,9 @@ __device__ cuda::std::pair<device_span<uint8_t const>, op_status> resolve_path(
       if (st != op_status::SUCCESS) { return {{}, st}; }
       sub_val = span;
     } else {
-      if (!dict.has_value()) {
-        auto [parsed, st] = parse_metadata_dictionary(meta);
-        if (st != op_status::SUCCESS) { return {{}, st}; }
-        dict = parsed;
-      }
-      auto const [span, st] = locate_object_field(*dict, meta, sub_val, step);
+      if (!dict.has_value()) { dict = parse_metadata_dictionary(meta); }
+      if (dict->second != op_status::SUCCESS) { return {{}, dict->second}; }
+      auto const [span, st] = locate_object_field(dict->first, meta, sub_val, step);
       if (st != op_status::SUCCESS) { return {{}, st}; }
       sub_val = span;
     }
@@ -1049,6 +1045,7 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
     }
 
     auto const [meta, val] = metadata_and_value_at(metadata, values, row);
+    cuda::std::optional<cuda::std::pair<metadata_dictionary, op_status>> dict;
 
     for (size_type slot = 0; slot < num_slots; ++slot) {
       auto const depth = slot_depth[slot];
@@ -1063,8 +1060,11 @@ CUDF_KERNEL __launch_bounds__(block_size) void locate_variant_field_trie_kernel(
       if (parent.empty()) {
         result = {0, invalid_slot_size, parent_status};
       } else {
-        auto const [field, status] = resolve_path(
-          meta, parent, steps.slice(slot_steps[slot], slot_steps[slot + 1] - slot_steps[slot]));
+        auto const [field, status] =
+          resolve_path(meta,
+                       parent,
+                       steps.slice(slot_steps[slot], slot_steps[slot + 1] - slot_steps[slot]),
+                       dict);
         result = make_slot_result(field, val.data(), status);
       }
 
