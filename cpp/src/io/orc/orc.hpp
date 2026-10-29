@@ -181,7 +181,6 @@ int inline constexpr encode_field_number(int field_number, ProtofType field_type
 
 template <typename base_t>
 int static constexpr encode_field_number_base(int field_number) noexcept
-  requires(!cudf::concepts::arithmetic<base_t> and !std::is_enum_v<base_t>)
 {
   return encode_field_number(field_number, ProtofType::FIXEDLEN);
 }
