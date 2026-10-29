@@ -211,8 +211,8 @@ class fixed_point {
    * @param value The value that will be constructed from
    * @param scale The exponent that is applied to Rad to perform shifting
    */
-  template <typename T>
-    requires(cuda::std::integral<T> && is_supported_representation_type<Rep>())
+  template <cuda::std::integral T>
+    requires(is_supported_representation_type<Rep>())
   CUDF_HOST_DEVICE inline explicit fixed_point(T const& value, scale_type const& scale)
     // `value` is cast to `Rep` to avoid overflow in cases where
     // constructing to `Rep` that is wider than `T`
