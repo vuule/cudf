@@ -194,7 +194,6 @@ CUDF_KERNEL void __launch_bounds__(partial_aggregation_block_size)
 
 struct aggregation_dispatch {
   template <typename T>
-    requires(!cudf::concepts::nested<T> && !cudf::concepts::dictionary<T>)
   void operator()(column_view const& input,
                   aggregation_columns outputs,
                   device_span<size_type const> targets,

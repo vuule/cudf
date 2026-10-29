@@ -348,7 +348,6 @@ struct same_element_type_dispatcher {
                                      std::optional<std::reference_wrapper<scalar const>>,
                                      cuda::stream_ref,
                                      rmm::device_async_resource_ref)
-    requires(not is_supported<ElementType>())
   {
     CUDF_FAIL("Reduction operator not supported for this type");
   }
