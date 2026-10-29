@@ -122,8 +122,7 @@ struct DeviceMin {
     return cudf::detail::min(lhs, rhs);
   }
 
-  template <typename T>
-    requires(cudf::concepts::arithmetic<T> and not cudf::concepts::fixed_point<T>)
+  template <cudf::concepts::arithmetic T>
   CUDF_HOST_DEVICE static constexpr T identity()
   {
     if constexpr (cuda::std::numeric_limits<T>::has_infinity) {
@@ -179,8 +178,7 @@ struct DeviceMax {
     return cudf::detail::max(lhs, rhs);
   }
 
-  template <typename T>
-    requires(cudf::concepts::arithmetic<T> and not cudf::concepts::fixed_point<T>)
+  template <cudf::concepts::arithmetic T>
   CUDF_HOST_DEVICE static constexpr T identity()
   {
     if constexpr (cuda::std::numeric_limits<T>::has_infinity) {

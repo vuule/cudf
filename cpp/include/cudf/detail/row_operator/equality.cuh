@@ -239,10 +239,10 @@ class device_row_comparator {
      * @return True if lhs and rhs are equal or if both lhs and rhs are null and nulls are
      * considered equal (`nulls_are_equal` == `null_equality::EQUAL`)
      */
-    template <typename Element>
+    template <cuda::std::equality_comparable Element>
     __device__ bool operator()(size_type const lhs_element_index,
                                size_type const rhs_element_index) const noexcept
-      requires(cuda::std::equality_comparable<Element> and not cudf::concepts::dictionary<Element>)
+      requires(not cudf::concepts::dictionary<Element>)
     {
       if (check_nulls) {
         bool const lhs_is_null{lhs.is_null(lhs_element_index)};
@@ -290,13 +290,13 @@ class device_row_comparator {
       CUDF_UNREACHABLE("Attempted to compare elements of uncomparable types.");
     }
 
-    template <typename Element>
+    template <cudf::concepts::nested Element>
 #ifndef NDEBUG
     __attribute__((noinline))
 #endif
     __device__ bool
     operator()(size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
-      requires(has_nested_columns and cudf::concepts::nested<Element>)
+      requires(has_nested_columns)
     {
       column_device_view lcol = lhs.slice(lhs_element_index, 1);
       column_device_view rcol = rhs.slice(rhs_element_index, 1);

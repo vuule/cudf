@@ -879,9 +879,8 @@ struct target_type_impl<Source, aggregation::ALL> {
 };
 
 // Always use `double` for MEAN except for durations and fixed point types.
-template <typename Source, aggregation::Kind k>
-  requires(cudf::concepts::fixed_width<Source> and not cudf::concepts::chrono<Source> and
-           not cudf::concepts::fixed_point<Source> and (k == aggregation::MEAN))
+template <cudf::concepts::arithmetic Source, aggregation::Kind k>
+  requires(k == aggregation::MEAN)
 struct target_type_impl<Source, k> {
   using type = double;
 };

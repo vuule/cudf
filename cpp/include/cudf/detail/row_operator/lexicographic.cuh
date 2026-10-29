@@ -267,10 +267,10 @@ class device_row_comparator {
      * @return Indicates the relationship between the elements in the `lhs` and `rhs` columns, along
      * with the depth at which a null value was encountered.
      */
-    template <typename Element>
+    template <cuda::std::totally_ordered Element>
     __device__ cuda::std::pair<cudf::detail::weak_ordering, int> operator()(
       size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
-      requires(cuda::std::totally_ordered<Element> and not cudf::concepts::dictionary<Element>)
+      requires(not cudf::concepts::dictionary<Element>)
     {
       if (_check_nulls) {
         bool const lhs_is_null{_lhs.is_null(lhs_element_index)};
@@ -335,13 +335,13 @@ class device_row_comparator {
      * @return Indicates the relationship between the elements in the `lhs` and `rhs` columns, along
      * with the depth at which a null value was encountered.
      */
-    template <typename Element>
+    template <cudf::concepts::struct_view Element>
 #ifndef NDEBUG
     __attribute__((noinline))
 #endif
     __device__ cuda::std::pair<cudf::detail::weak_ordering, int>
     operator()(size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
-      requires(has_nested_columns and cudf::concepts::struct_view<Element>)
+      requires(has_nested_columns)
     {
       column_device_view lcol = _lhs;
       column_device_view rcol = _rhs;
@@ -381,13 +381,13 @@ class device_row_comparator {
      * @return Indicates the relationship between the elements in the `lhs` and `rhs` columns, along
      * with the depth at which a null value was encountered.
      */
-    template <typename Element>
+    template <cudf::concepts::list_view Element>
 #ifndef NDEBUG
     __attribute__((noinline))
 #endif
     __device__ cuda::std::pair<cudf::detail::weak_ordering, int>
     operator()(size_type lhs_element_index, size_type rhs_element_index)
-      requires(has_nested_columns and cudf::concepts::list_view<Element>)
+      requires(has_nested_columns)
     {
       auto const is_l_row_null = _lhs.is_null(lhs_element_index);
       auto const is_r_row_null = _rhs.is_null(rhs_element_index);
