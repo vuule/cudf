@@ -40,7 +40,7 @@ struct percentile_approx_dispatch {
                                            int delta,
                                            std::vector<double> const& percentages,
                                            [[maybe_unused]] cudf::size_type ulps)
-    requires(cudf::concepts::arithmetic<T> || cudf::concepts::fixed_point<T>)
+    requires(cudf::concepts::arithmetic<T> or cudf::concepts::fixed_point<T>)
   {
     // gpu implementation.
     auto agg_result = op(values, delta);

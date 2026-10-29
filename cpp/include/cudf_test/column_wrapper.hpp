@@ -116,8 +116,8 @@ struct fixed_width_type_converter {
    */
   template <typename FromT>
   constexpr To operator()(FromT element) const
-    requires(!cuda::std::same_as<FromT, To> &&
-             (cuda::std::convertible_to<FromT, To> || cuda::std::constructible_from<To, FromT>))
+    requires(not cuda::std::same_as<FromT, To> and
+             (cuda::std::convertible_to<FromT, To> or cuda::std::constructible_from<To, FromT>))
   {
     return static_cast<To>(element);
   }

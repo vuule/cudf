@@ -36,7 +36,7 @@ struct tdigest_gen {
   // @cond
   template <typename T, typename Func>
   std::unique_ptr<column> operator()(Func op, column_view const& values, int delta)
-    requires(cudf::concepts::arithmetic<T> || cudf::concepts::fixed_point<T>)
+    requires(cudf::concepts::arithmetic<T> or cudf::concepts::fixed_point<T>)
   {
     return op(values, delta);
   }

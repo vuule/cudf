@@ -46,7 +46,7 @@ struct BaseToArrowHostFixture : public cudf::test::BaseFixture {
                       ArrowArrayView const* actual,
                       int64_t start_offset_actual,
                       int64_t length)
-    requires(!cudf::concepts::boolean<T>)
+    requires(not cudf::concepts::boolean<T>)
   {
     for (int64_t i = 0; i < length; ++i) {
       bool const is_null = ArrowArrayViewIsNull(expected, start_offset_expected + i);

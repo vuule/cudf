@@ -43,7 +43,7 @@ struct Add {
   // are chronos. Unsupported combinations will fail to compile
   template <cudf::concepts::chrono OutT = TypeOut>
   OutT operator()(TypeLhs lhs, TypeRhs rhs) const
-    requires(cudf::concepts::chrono<TypeLhs> && cudf::concepts::chrono<TypeRhs>)
+    requires(cudf::concepts::chrono<TypeLhs> and cudf::concepts::chrono<TypeRhs>)
   {
     return lhs + rhs;
   }
@@ -62,7 +62,7 @@ struct Sub {
   // are chronos. Unsupported combinations will fail to compile
   template <cudf::concepts::chrono OutT = TypeOut>
   OutT operator()(TypeLhs lhs, TypeRhs rhs) const
-    requires(cudf::concepts::chrono<TypeLhs> && cudf::concepts::chrono<TypeRhs>)
+    requires(cudf::concepts::chrono<TypeLhs> and cudf::concepts::chrono<TypeRhs>)
   {
     return lhs - rhs;
   }
@@ -92,8 +92,8 @@ struct Mul {
 
   template <typename OutT, typename LhsT, typename RhsT>
   [[nodiscard]] OutT DurationProduct(LhsT x, RhsT y) const
-    requires((cudf::concepts::duration<LhsT> && cuda::std::integral<RhsT>) ||
-             (cudf::concepts::duration<RhsT> && cuda::std::integral<LhsT>))
+    requires((cudf::concepts::duration<LhsT> and cuda::std::integral<RhsT>) or
+             (cudf::concepts::duration<RhsT> and cuda::std::integral<LhsT>))
   {
     return x * y;
   }
@@ -103,7 +103,7 @@ template <typename TypeOut, typename TypeLhs, typename TypeRhs>
 struct Div {
   template <typename LhsT = TypeLhs>
   TypeOut operator()(TypeLhs lhs, TypeRhs rhs)
-    requires(!cudf::concepts::duration<LhsT>)
+    requires(not cudf::concepts::duration<LhsT>)
   {
     using TypeCommon = std::common_type_t<TypeOut, TypeLhs, TypeRhs>;
     return static_cast<TypeOut>(static_cast<TypeCommon>(lhs) / static_cast<TypeCommon>(rhs));
@@ -117,7 +117,7 @@ struct Div {
 
   template <typename OutT, typename LhsT, typename RhsT>
   [[nodiscard]] OutT DurationDivide(LhsT x, RhsT y) const
-    requires(cuda::std::integral<RhsT> || cudf::concepts::duration<RhsT>)
+    requires(cuda::std::integral<RhsT> or cudf::concepts::duration<RhsT>)
   {
     return x / y;
   }

@@ -87,7 +87,7 @@ std::shared_ptr<arrow::Array> to_arrow_array(cudf::type_id id, Ts&&... args)
 template <cudf::concepts::fixed_width T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::vector<T> const& data,
                                               std::vector<uint8_t> const& mask = {})
-  requires(!cudf::concepts::boolean<T>)
+  requires(not cudf::concepts::boolean<T>)
 {
   std::shared_ptr<arrow::Buffer> data_buffer;
   arrow::BufferBuilder buff_builder;
@@ -105,7 +105,7 @@ std::shared_ptr<arrow::Array> get_arrow_array(std::vector<T> const& data,
 template <cudf::concepts::fixed_width T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::initializer_list<T> elements,
                                               std::initializer_list<uint8_t> validity = {})
-  requires(!cudf::concepts::boolean<T>)
+  requires(not cudf::concepts::boolean<T>)
 {
   std::vector<T> data(elements);
   std::vector<uint8_t> mask(validity);
@@ -238,7 +238,7 @@ std::shared_ptr<arrow::Array> get_decimal_arrow_array(
   std::optional<std::vector<uint8_t>> const& validity,
   int32_t precision,
   int32_t scale)
-  requires(cuda::std::same_as<T, int32_t> || cuda::std::same_as<T, int64_t> ||
+  requires(cuda::std::same_as<T, int32_t> or cuda::std::same_as<T, int64_t> or
            cuda::std::same_as<T, __int128_t>)
 {
   std::shared_ptr<arrow::Buffer> data_buffer;

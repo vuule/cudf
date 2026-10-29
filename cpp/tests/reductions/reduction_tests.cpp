@@ -3894,7 +3894,7 @@ struct ReduceOverflowTest : public cudf::test::BaseFixture {
   static constexpr numeric::scale_type scale{0};
 
   cudf::test::fixed_width_column_wrapper<T> make_col(std::initializer_list<Rep> values)
-    requires(!cudf::concepts::fixed_point<T>)
+    requires(not cudf::concepts::fixed_point<T>)
   {
     return cudf::test::fixed_width_column_wrapper<T>(values);
   }
@@ -3906,7 +3906,7 @@ struct ReduceOverflowTest : public cudf::test::BaseFixture {
 
   cudf::test::fixed_width_column_wrapper<T> make_null_col(std::initializer_list<Rep> values,
                                                           std::initializer_list<bool> validity)
-    requires(!cudf::concepts::fixed_point<T>)
+    requires(not cudf::concepts::fixed_point<T>)
   {
     return cudf::test::fixed_width_column_wrapper<T>(values, std::cbegin(validity));
   }
@@ -3918,7 +3918,7 @@ struct ReduceOverflowTest : public cudf::test::BaseFixture {
   }
 
   cudf::test::fixed_width_column_wrapper<T> make_col_from_vec(std::vector<Rep> const& values)
-    requires(!cudf::concepts::fixed_point<T>)
+    requires(not cudf::concepts::fixed_point<T>)
   {
     return cudf::test::fixed_width_column_wrapper<T>(values.begin(), values.end());
   }

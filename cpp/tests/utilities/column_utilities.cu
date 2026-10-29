@@ -1031,7 +1031,7 @@ struct strings_to_host_fn {
                   char const* chars,
                   cudf::column_view const& offsets,
                   cuda::stream_ref stream)
-    requires(cuda::std::same_as<OffsetType, int32_t> || cuda::std::same_as<OffsetType, int64_t>)
+    requires(cuda::std::same_as<OffsetType, int32_t> or cuda::std::same_as<OffsetType, int64_t>)
   {
     auto const h_offsets = cudf::detail::make_std_vector(
       cudf::device_span<OffsetType const>(offsets.data<OffsetType>(), offsets.size()), stream);
