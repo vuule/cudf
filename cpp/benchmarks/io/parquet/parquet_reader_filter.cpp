@@ -26,8 +26,8 @@ template <typename DataType>
 struct filter_generator;
 
 template <typename DataType>
-  requires(cuda::std::same_as<DataType, int32_t> || cuda::std::same_as<DataType, int64_t> ||
-           cuda::std::same_as<DataType, float> || cuda::std::same_as<DataType, double>)
+  requires(cuda::std::same_as<DataType, int32_t> or cuda::std::same_as<DataType, int64_t> or
+           cuda::std::same_as<DataType, float> or cuda::std::same_as<DataType, double>)
 struct filter_generator<DataType> {
   decltype(auto) operator()(float selectivity,
                             cudf::size_type num_rows,
