@@ -101,9 +101,8 @@ struct fixed_width_type_converter {
    * @param element Source value
    * @return The converted target value, same as source value
    */
-  template <typename FromT>
+  template <cuda::std::same_as<To> FromT>
   constexpr To operator()(FromT element) const
-    requires(cuda::std::same_as<FromT, To>)
   {
     return element;
   }
@@ -130,9 +129,9 @@ struct fixed_width_type_converter {
    * @param element Source value
    * @return The converted target `timestamp` value
    */
-  template <typename FromT>
+  template <cuda::std::integral FromT>
   constexpr To operator()(FromT element) const
-    requires(cuda::std::integral<FromT> && cudf::concepts::timestamp<To>)
+    requires(cudf::concepts::timestamp<To>)
   {
     return To{typename To::duration{element}};
   }

@@ -84,10 +84,10 @@ std::shared_ptr<arrow::Array> to_arrow_array(cudf::type_id id, Ts&&... args)
   }
 }
 
-template <typename T>
+template <cudf::concepts::fixed_width T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::vector<T> const& data,
                                               std::vector<uint8_t> const& mask = {})
-  requires(cudf::concepts::fixed_width<T> and !cudf::concepts::boolean<T>)
+  requires(!cudf::concepts::boolean<T>)
 {
   std::shared_ptr<arrow::Buffer> data_buffer;
   arrow::BufferBuilder buff_builder;
@@ -102,10 +102,10 @@ std::shared_ptr<arrow::Array> get_arrow_array(std::vector<T> const& data,
   return to_arrow_array(cudf::type_to_id<T>(), data.size(), data_buffer, mask_buffer);
 }
 
-template <typename T>
+template <cudf::concepts::fixed_width T>
 std::shared_ptr<arrow::Array> get_arrow_array(std::initializer_list<T> elements,
                                               std::initializer_list<uint8_t> validity = {})
-  requires(cudf::concepts::fixed_width<T> and !cudf::concepts::boolean<T>)
+  requires(!cudf::concepts::boolean<T>)
 {
   std::vector<T> data(elements);
   std::vector<uint8_t> mask(validity);

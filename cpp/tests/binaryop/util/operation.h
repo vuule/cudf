@@ -41,10 +41,9 @@ template <typename TypeOut, typename TypeLhs, typename TypeRhs>
 struct Add {
   // Allow sum between chronos only when both input and output types
   // are chronos. Unsupported combinations will fail to compile
-  template <typename OutT = TypeOut>
+  template <cudf::concepts::chrono OutT = TypeOut>
   OutT operator()(TypeLhs lhs, TypeRhs rhs) const
-    requires(cudf::concepts::chrono<OutT> && cudf::concepts::chrono<TypeLhs> &&
-             cudf::concepts::chrono<TypeRhs>)
+    requires(cudf::concepts::chrono<TypeLhs> && cudf::concepts::chrono<TypeRhs>)
   {
     return lhs + rhs;
   }
@@ -61,10 +60,9 @@ template <typename TypeOut, typename TypeLhs, typename TypeRhs>
 struct Sub {
   // Allow difference between chronos only when both input and output types
   // are chronos. Unsupported combinations will fail to compile
-  template <typename OutT = TypeOut>
+  template <cudf::concepts::chrono OutT = TypeOut>
   OutT operator()(TypeLhs lhs, TypeRhs rhs) const
-    requires(cudf::concepts::chrono<OutT> && cudf::concepts::chrono<TypeLhs> &&
-             cudf::concepts::chrono<TypeRhs>)
+    requires(cudf::concepts::chrono<TypeLhs> && cudf::concepts::chrono<TypeRhs>)
   {
     return lhs - rhs;
   }

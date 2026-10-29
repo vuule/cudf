@@ -148,13 +148,13 @@ static ArrowBufferAllocator noop_alloc = (struct ArrowBufferAllocator){
 
 // populate an ArrowArray with pointers to the raw device buffers of a cudf::column_view
 // and use the no-op alloc so that the ArrowArray doesn't presume ownership of the data
-template <typename T>
+template <cudf::concepts::fixed_width T>
 void populate_from_col(
   ArrowArray* arr,
   cudf::column_view view,
   [[maybe_unused]] cuda::stream_ref stream   = cudf::get_default_stream(),
   [[maybe_unused]] cudf::memory_resources mr = cudf::get_current_device_resource_ref())
-  requires(cudf::concepts::fixed_width<T> && !cudf::concepts::boolean<T>)
+  requires(!cudf::concepts::boolean<T>)
 {
   arr->length     = view.size();
   arr->null_count = view.null_count();
@@ -316,10 +316,10 @@ struct nanoarrow_decimal_type<__int128_t> {
   static constexpr ArrowType type = NANOARROW_TYPE_DECIMAL128;
 };
 
-template <typename T>
+template <cudf::concepts::fixed_width T>
 nanoarrow::UniqueArray get_nanoarrow_array(std::vector<T> const& data,
                                            std::vector<uint8_t> const& mask = {})
-  requires(cudf::concepts::fixed_width<T> && !cudf::concepts::boolean<T>)
+  requires(!cudf::concepts::boolean<T>)
 {
   nanoarrow::UniqueArray tmp;
   NANOARROW_THROW_NOT_OK(ArrowArrayInitFromType(tmp.get(), nanoarrow_storage_type<T>::type));

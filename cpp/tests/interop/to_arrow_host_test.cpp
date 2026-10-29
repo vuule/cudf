@@ -40,13 +40,13 @@ bool is_valid(void const* validity_buffer, cudf::size_type index)
 }  // namespace
 
 struct BaseToArrowHostFixture : public cudf::test::BaseFixture {
-  template <typename T>
+  template <cudf::concepts::fixed_width T>
   void compare_subset(ArrowArrayView const* expected,
                       int64_t start_offset_expected,
                       ArrowArrayView const* actual,
                       int64_t start_offset_actual,
                       int64_t length)
-    requires(cudf::concepts::fixed_width<T> and !cudf::concepts::boolean<T>)
+    requires(!cudf::concepts::boolean<T>)
   {
     for (int64_t i = 0; i < length; ++i) {
       bool const is_null = ArrowArrayViewIsNull(expected, start_offset_expected + i);
