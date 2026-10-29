@@ -53,7 +53,6 @@ CUDF_HOST_DEVICE inline auto max(LHS const& lhs, RHS const& rhs)
 struct DeviceSum {
   template <typename T>
   CUDF_HOST_DEVICE inline auto operator()(T const& lhs, T const& rhs) -> decltype(lhs + rhs)
-    requires(not cudf::concepts::timestamp<T>)
   {
     return lhs + rhs;
   }
