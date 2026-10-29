@@ -900,29 +900,29 @@ constexpr bool is_sum_product_agg(aggregation::Kind k)
 }
 
 // Summing/Multiplying integers of any type, always use int64_t accumulator
-template <typename Source, aggregation::Kind k>
-  requires(cuda::std::integral<Source> && is_sum_product_agg(k))
+template <cuda::std::integral Source, aggregation::Kind k>
+  requires(is_sum_product_agg(k))
 struct target_type_impl<Source, k> {
   using type = int64_t;
 };
 
 // Summing fixed_point numbers
-template <typename Source, aggregation::Kind k>
-  requires(cudf::concepts::fixed_point<Source> && (k == aggregation::SUM))
+template <cudf::concepts::fixed_point Source, aggregation::Kind k>
+  requires(k == aggregation::SUM)
 struct target_type_impl<Source, k> {
   using type = Source;
 };
 
 // Summing/Multiplying float/doubles, use same type accumulator
-template <typename Source, aggregation::Kind k>
-  requires(cuda::std::floating_point<Source> && is_sum_product_agg(k))
+template <cuda::std::floating_point Source, aggregation::Kind k>
+  requires(is_sum_product_agg(k))
 struct target_type_impl<Source, k> {
   using type = Source;
 };
 
 // Summing duration types, use same type accumulator
-template <typename Source, aggregation::Kind k>
-  requires(cudf::concepts::duration<Source> && (k == aggregation::SUM))
+template <cudf::concepts::duration Source, aggregation::Kind k>
+  requires(k == aggregation::SUM)
 struct target_type_impl<Source, k> {
   using type = Source;
 };

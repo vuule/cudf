@@ -51,14 +51,14 @@ namespace detail {
  */
 template <typename Op,
           typename InputIterator,
-          typename OutputType = cuda::std::iter_value_t<InputIterator>>
+          cudf::concepts::fixed_width OutputType = cuda::std::iter_value_t<InputIterator>>
 std::unique_ptr<scalar> reduce(InputIterator d_in,
                                cudf::size_type num_items,
                                op::simple_op<Op> op,
                                std::optional<OutputType> init,
                                cuda::stream_ref stream,
                                rmm::device_async_resource_ref mr)
-  requires(cudf::concepts::fixed_width<OutputType> && not cudf::concepts::fixed_point<OutputType>)
+  requires(not cudf::concepts::fixed_point<OutputType>)
 {
   auto const binary_op     = cudf::detail::cast_functor<OutputType>(op.get_binary_op());
   auto const initial_value = init.value_or(op.template get_identity<OutputType>());

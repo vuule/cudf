@@ -33,9 +33,8 @@ struct update_target_element {
   }
 };
 
-template <typename Source>
-  requires(cudf::concepts::fixed_width<Source> && cudf::has_atomic_support<Source>() &&
-           !cudf::concepts::fixed_point<Source>)
+template <cudf::concepts::fixed_width Source>
+  requires(cudf::has_atomic_support<Source>() && !cudf::concepts::fixed_point<Source>)
 struct update_target_element<Source, aggregation::MIN> {
   __device__ void operator()(mutable_column_device_view target,
                              size_type target_index,
@@ -48,9 +47,8 @@ struct update_target_element<Source, aggregation::MIN> {
   }
 };
 
-template <typename Source>
-  requires(cudf::concepts::fixed_point<Source> &&
-           cudf::has_atomic_support<device_storage_type_t<Source>>())
+template <cudf::concepts::fixed_point Source>
+  requires(cudf::has_atomic_support<device_storage_type_t<Source>>())
 struct update_target_element<Source, aggregation::MIN> {
   __device__ void operator()(mutable_column_device_view target,
                              size_type target_index,
@@ -66,9 +64,8 @@ struct update_target_element<Source, aggregation::MIN> {
   }
 };
 
-template <typename Source>
-  requires(cudf::concepts::fixed_width<Source> && cudf::has_atomic_support<Source>() &&
-           !cudf::concepts::fixed_point<Source>)
+template <cudf::concepts::fixed_width Source>
+  requires(cudf::has_atomic_support<Source>() && !cudf::concepts::fixed_point<Source>)
 struct update_target_element<Source, aggregation::MAX> {
   __device__ void operator()(mutable_column_device_view target,
                              size_type target_index,
@@ -81,9 +78,8 @@ struct update_target_element<Source, aggregation::MAX> {
   }
 };
 
-template <typename Source>
-  requires(cudf::concepts::fixed_point<Source> &&
-           cudf::has_atomic_support<device_storage_type_t<Source>>())
+template <cudf::concepts::fixed_point Source>
+  requires(cudf::has_atomic_support<device_storage_type_t<Source>>())
 struct update_target_element<Source, aggregation::MAX> {
   __device__ void operator()(mutable_column_device_view target,
                              size_type target_index,
@@ -99,9 +95,9 @@ struct update_target_element<Source, aggregation::MAX> {
   }
 };
 
-template <typename Source>
-  requires(cudf::concepts::fixed_width<Source> && cudf::has_atomic_support<Source>() &&
-           !cudf::concepts::fixed_point<Source> && !cudf::concepts::timestamp<Source>)
+template <cudf::concepts::fixed_width Source>
+  requires(cudf::has_atomic_support<Source>() && !cudf::concepts::fixed_point<Source> &&
+           !cudf::concepts::timestamp<Source>)
 struct update_target_element<Source, aggregation::SUM> {
   __device__ void operator()(mutable_column_device_view target,
                              size_type target_index,

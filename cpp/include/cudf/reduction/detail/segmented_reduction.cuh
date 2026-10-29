@@ -52,7 +52,7 @@ template <typename InputIterator,
           typename OffsetIterator,
           typename OutputIterator,
           typename BinaryOp,
-          typename OutputType = cuda::std::iter_value_t<OutputIterator>>
+          cudf::concepts::fixed_width OutputType = cuda::std::iter_value_t<OutputIterator>>
 void segmented_reduce(InputIterator d_in,
                       OffsetIterator d_offset_begin,
                       OffsetIterator d_offset_end,
@@ -60,7 +60,7 @@ void segmented_reduce(InputIterator d_in,
                       BinaryOp op,
                       OutputType initial_value,
                       cuda::stream_ref stream)
-  requires(cudf::concepts::fixed_width<OutputType> && !cudf::concepts::fixed_point<OutputType>)
+  requires(!cudf::concepts::fixed_point<OutputType>)
 {
   auto const num_segments = static_cast<size_type>(std::distance(d_offset_begin, d_offset_end)) - 1;
   auto const binary_op    = cudf::detail::cast_functor<OutputType>(op);
