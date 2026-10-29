@@ -31,7 +31,7 @@ namespace {
 
 struct get_element_functor {
   template <cudf::concepts::fixed_width T>
-    requires(!cudf::concepts::fixed_point<T>)
+    requires(not cudf::concepts::fixed_point<T>)
   std::unique_ptr<scalar> operator()(column_view const& input,
                                      size_type index,
                                      cuda::stream_ref stream,

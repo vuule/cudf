@@ -82,7 +82,7 @@ struct dispatch_topk_fn {
   }
 
   template <cudf::concepts::fixed_width T>
-    requires(!cuda::std::floating_point<T> and !cudf::concepts::chrono<T>)
+    requires(not cuda::std::floating_point<T> and not cudf::concepts::chrono<T>)
   std::unique_ptr<column> operator()()
   {
     return top_k<T>();

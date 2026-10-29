@@ -109,14 +109,14 @@ struct dispatch_to_arrow_host {
   }
 
   template <typename T>
-    requires(!cudf::concepts::rep_layout_compatible<T> && !cudf::concepts::fixed_point<T>)
+    requires(not cudf::concepts::rep_layout_compatible<T> and not cudf::concepts::fixed_point<T>)
   int operator()(ArrowArray*) const
   {
     CUDF_FAIL("Unsupported type for to_arrow_host", cudf::data_type_error);
   }
 
   template <typename T>
-    requires(cudf::concepts::rep_layout_compatible<T> || cudf::concepts::fixed_point<T>)
+    requires(cudf::concepts::rep_layout_compatible<T> or cudf::concepts::fixed_point<T>)
   int operator()(ArrowArray* out) const
   {
     nanoarrow::UniqueArray tmp;

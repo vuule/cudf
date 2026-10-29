@@ -153,14 +153,14 @@ struct dispatch_copy_from_arrow_host {
   rmm::device_async_resource_ref mr;
 
   template <typename T>
-    requires(not cudf::concepts::rep_layout_compatible<T> && !cudf::concepts::fixed_point<T>)
+    requires(not cudf::concepts::rep_layout_compatible<T> and not cudf::concepts::fixed_point<T>)
   std::unique_ptr<column> operator()(ArrowSchemaView const*, ArrowArray const*, data_type, bool)
   {
     CUDF_FAIL("Unsupported type in copy_from_arrow_host.");
   }
 
   template <typename T>
-    requires(cudf::concepts::rep_layout_compatible<T> || cudf::concepts::fixed_point<T>)
+    requires(cudf::concepts::rep_layout_compatible<T> or cudf::concepts::fixed_point<T>)
   std::unique_ptr<column> operator()(ArrowSchemaView const*,
                                      ArrowArray const* input,
                                      data_type type,

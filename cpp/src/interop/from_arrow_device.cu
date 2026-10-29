@@ -50,7 +50,7 @@ using dispatch_tuple_t = std::tuple<column_view, owned_columns_t>;
 
 struct dispatch_from_arrow_device {
   template <typename T>
-    requires(not cudf::concepts::rep_layout_compatible<T> && !cudf::concepts::fixed_point<T>)
+    requires(not cudf::concepts::rep_layout_compatible<T> and not cudf::concepts::fixed_point<T>)
   dispatch_tuple_t operator()(ArrowSchemaView*,
                               ArrowArray const*,
                               data_type,
@@ -62,7 +62,7 @@ struct dispatch_from_arrow_device {
   }
 
   template <typename T>
-    requires(cudf::concepts::rep_layout_compatible<T> || cudf::concepts::fixed_point<T>)
+    requires(cudf::concepts::rep_layout_compatible<T> or cudf::concepts::fixed_point<T>)
   dispatch_tuple_t operator()(ArrowSchemaView* schema,
                               ArrowArray const* input,
                               data_type type,
