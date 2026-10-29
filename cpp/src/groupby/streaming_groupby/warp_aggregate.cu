@@ -221,7 +221,7 @@ struct aggregation_dispatch {
   }
 
   template <typename T>
-    requires(cudf::concepts::nested<T> || cudf::concepts::dictionary<T>)
+    requires(cudf::concepts::nested<T> or cudf::concepts::dictionary<T>)
   void operator()(column_view const&,
                   aggregation_columns,
                   device_span<size_type const>,

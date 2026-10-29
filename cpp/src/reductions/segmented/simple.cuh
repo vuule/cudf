@@ -147,7 +147,7 @@ std::unique_ptr<column> string_segmented_minmax(column_view const& col,
  * @return Output column in device memory
  */
 template <typename InputType, typename Op>
-  requires(cuda::std::same_as<Op, cudf::reduction::detail::op::min> ||
+  requires(cuda::std::same_as<Op, cudf::reduction::detail::op::min> or
            cuda::std::same_as<Op, cudf::reduction::detail::op::max>)
 std::unique_ptr<column> string_segmented_reduction(column_view const& col,
                                                    device_span<size_type const> offsets,
@@ -297,8 +297,8 @@ struct same_column_type_dispatcher {
 
  public:
   template <typename ElementType>
-    requires(is_supported<ElementType>() && !cudf::concepts::string_view<ElementType> &&
-             !cudf::concepts::fixed_point<ElementType>)
+    requires(is_supported<ElementType>() and not cudf::concepts::string_view<ElementType> and
+             not cudf::concepts::fixed_point<ElementType>)
   std::unique_ptr<column> operator()(column_view const& col,
                                      device_span<size_type const> offsets,
                                      null_policy null_handling,

@@ -873,7 +873,7 @@ struct range_window_clamper {
   }
 
   template <cudf::concepts::string_view OrderbyT>
-    requires(cuda::std::same_as<WindowType, current_row> ||
+    requires(cuda::std::same_as<WindowType, current_row> or
              cuda::std::same_as<WindowType, unbounded>)
   [[nodiscard]] std::unique_ptr<column> operator()(
     column_view const& orderby,
