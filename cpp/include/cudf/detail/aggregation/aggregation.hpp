@@ -933,8 +933,7 @@ struct target_type_impl<Source, k> {
  */
 template <typename Source>
 concept sum_overflow_supported =
-  (cudf::concepts::integral_not_bool<Source> and cudf::is_signed<Source>()) or
-  cudf::concepts::fixed_point<Source>;
+  cuda::std::signed_integral<Source> or cudf::concepts::fixed_point<Source>;
 
 // SUM_OVERFLOW outputs a struct {sum: Source, overflow: bool} where the sum matches the input
 // type
