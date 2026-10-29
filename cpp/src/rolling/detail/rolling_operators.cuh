@@ -744,9 +744,8 @@ struct create_rolling_operator<InputType, aggregation::Kind::LAG> {
   }
 };
 
-template <typename InputType, aggregation::Kind k>
-  requires(cudf::concepts::string_view<InputType> &&
-           (k == aggregation::Kind::ARGMIN || k == aggregation::Kind::ARGMAX))
+template <cudf::concepts::string_view InputType, aggregation::Kind k>
+  requires(k == aggregation::Kind::ARGMIN || k == aggregation::Kind::ARGMAX)
 struct create_rolling_operator<InputType, k> {
   auto operator()(size_type min_periods, rolling_aggregation const&)
   {
@@ -754,9 +753,8 @@ struct create_rolling_operator<InputType, k> {
   }
 };
 
-template <typename InputType, aggregation::Kind k>
-  requires(cudf::concepts::dictionary<InputType> &&
-           (k == aggregation::Kind::ARGMIN || k == aggregation::Kind::ARGMAX))
+template <cudf::concepts::dictionary InputType, aggregation::Kind k>
+  requires(k == aggregation::Kind::ARGMIN || k == aggregation::Kind::ARGMAX)
 struct create_rolling_operator<InputType, k> {
   auto operator()(size_type min_periods, rolling_aggregation const&)
   {
@@ -764,9 +762,8 @@ struct create_rolling_operator<InputType, k> {
   }
 };
 
-template <typename InputType, aggregation::Kind k>
-  requires(cudf::concepts::struct_view<InputType> &&
-           (k == aggregation::Kind::ARGMIN || k == aggregation::Kind::ARGMAX))
+template <cudf::concepts::struct_view InputType, aggregation::Kind k>
+  requires(k == aggregation::Kind::ARGMIN || k == aggregation::Kind::ARGMAX)
 struct create_rolling_operator<InputType, k> {
   template <typename Comparator>
   auto operator()(size_type min_periods, Comparator const& comp)

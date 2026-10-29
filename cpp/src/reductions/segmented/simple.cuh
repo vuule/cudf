@@ -310,8 +310,8 @@ struct same_column_type_dispatcher {
       col, offsets, null_handling, init, stream, mr);
   }
 
-  template <typename ElementType>
-    requires(is_supported<ElementType>() && cudf::concepts::string_view<ElementType>)
+  template <cudf::concepts::string_view ElementType>
+    requires(is_supported<ElementType>())
   std::unique_ptr<column> operator()(column_view const& col,
                                      device_span<size_type const> offsets,
                                      null_policy null_handling,
@@ -324,8 +324,8 @@ struct same_column_type_dispatcher {
     return string_segmented_reduction<ElementType, Op>(col, offsets, null_handling, stream, mr);
   }
 
-  template <typename ElementType>
-    requires(is_supported<ElementType>() && cudf::concepts::fixed_point<ElementType>)
+  template <cudf::concepts::fixed_point ElementType>
+    requires(is_supported<ElementType>())
   std::unique_ptr<column> operator()(column_view const& col,
                                      device_span<size_type const> offsets,
                                      null_policy null_handling,

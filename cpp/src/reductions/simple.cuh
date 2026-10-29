@@ -292,14 +292,13 @@ struct same_element_type_dispatcher {
   }
 
  public:
-  template <typename ElementType>
+  template <cudf::concepts::nested ElementType>
   std::unique_ptr<scalar> operator()(column_view const& input,
                                      std::optional<std::reference_wrapper<scalar const>> init,
                                      cuda::stream_ref stream,
                                      rmm::device_async_resource_ref mr)
-    requires(cudf::concepts::nested<ElementType> &&
-             (cuda::std::same_as<Op, cudf::reduction::detail::op::min> ||
-              cuda::std::same_as<Op, cudf::reduction::detail::op::max>))
+    requires(cuda::std::same_as<Op, cudf::reduction::detail::op::min> ||
+             cuda::std::same_as<Op, cudf::reduction::detail::op::max>)
   {
     CUDF_EXPECTS(!init.has_value(), "Initial value not supported for nested type reductions");
 

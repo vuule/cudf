@@ -174,8 +174,8 @@ struct group_reduction_functor<K, T> {
   }
 };
 
-template <aggregation::Kind K, typename T>
-  requires(is_group_reduction_supported<K, T>() && cudf::concepts::nested<T>)
+template <aggregation::Kind K, cudf::concepts::nested T>
+  requires(is_group_reduction_supported<K, T>())
 struct group_reduction_functor<K, T> {
   static std::unique_ptr<column> invoke(column_view const& values,
                                         size_type num_groups,

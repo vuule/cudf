@@ -872,10 +872,9 @@ struct range_window_clamper {
       orderby, direction, order, grouping, nulls_at_start, delta, stream, mr);
   }
 
-  template <typename OrderbyT>
-    requires(cudf::concepts::string_view<OrderbyT> &&
-             (cuda::std::same_as<WindowType, current_row> ||
-              cuda::std::same_as<WindowType, unbounded>))
+  template <cudf::concepts::string_view OrderbyT>
+    requires(cuda::std::same_as<WindowType, current_row> ||
+             cuda::std::same_as<WindowType, unbounded>)
   [[nodiscard]] std::unique_ptr<column> operator()(
     column_view const& orderby,
     direction direction,
