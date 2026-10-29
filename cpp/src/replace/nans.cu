@@ -64,7 +64,7 @@ struct replace_nans_functor {
 
   template <typename T, typename... Args>
   std::unique_ptr<column> operator()(Args&&...)
-    requires(!cuda::std::floating_point<T>)
+    requires(not cuda::std::floating_point<T>)
   {
     CUDF_FAIL("NAN is not supported in a Non-floating point type column");
   }

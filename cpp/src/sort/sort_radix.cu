@@ -135,7 +135,7 @@ struct sort_radix_fn {
 
   template <cudf::concepts::fixed_width T>
   void operator()()
-    requires(!cudf::concepts::chrono<T> and !cuda::std::floating_point<T>)
+    requires(not cudf::concepts::chrono<T> and not cuda::std::floating_point<T>)
   {
     sort_radix<T>();
   }

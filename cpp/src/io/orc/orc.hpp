@@ -206,7 +206,7 @@ int static constexpr encode_field_number_base(int field_number) noexcept
 
 template <typename T>
 int constexpr encode_field_number(int field_number) noexcept
-  requires(!std::is_class_v<T> or cuda::std::same_as<T, std::string>)
+  requires(not std::is_class_v<T> or cuda::std::same_as<T, std::string>)
 {
   return encode_field_number_base<T>(field_number);
 }
@@ -311,7 +311,7 @@ class protobuf_reader {
   template <typename T>
   void read_field(T& value, uint8_t const* end)
     requires(cuda::std::same_as<T, std::vector<typename T::value_type>> and
-             !cuda::std::same_as<std::string, typename T::value_type>)
+             not cuda::std::same_as<std::string, typename T::value_type>)
   {
     auto const size = read_field_size(end);
     value.emplace_back();

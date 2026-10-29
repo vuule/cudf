@@ -265,7 +265,7 @@ struct dispatch_round {
 
   template <typename Timestamp, typename... Args>
   std::unique_ptr<cudf::column> operator()(Args&&...)
-    requires(!cudf::concepts::timestamp<Timestamp>)
+    requires(not cudf::concepts::timestamp<Timestamp>)
   {
     CUDF_FAIL("Must be cudf::timestamp");
   }
@@ -326,7 +326,7 @@ std::unique_ptr<column> apply_datetime_op(column_view const& column,
 struct add_calendrical_months_functor {
   template <typename Element, typename... Args>
   std::unique_ptr<column> operator()(Args&&...) const
-    requires(!cudf::concepts::timestamp<Element>)
+    requires(not cudf::concepts::timestamp<Element>)
   {
     CUDF_FAIL("Cannot extract datetime component from non-timestamp column.");
   }
