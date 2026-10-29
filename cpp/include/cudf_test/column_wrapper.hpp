@@ -182,8 +182,8 @@ rmm::device_buffer make_elements(InputIterator begin,
  * @param mr Memory resources used to allocate the returned buffer
  * @return rmm::device_buffer Buffer containing all elements in the range `[begin,end)`
  */
-template <typename ElementTo, typename ElementFrom, typename InputIterator>
-  requires(not cudf::concepts::fixed_point<ElementFrom> and cudf::concepts::fixed_point<ElementTo>)
+template <cudf::concepts::fixed_point ElementTo, typename ElementFrom, typename InputIterator>
+  requires(not cudf::concepts::fixed_point<ElementFrom>)
 rmm::device_buffer make_elements(InputIterator begin,
                                  InputIterator end,
                                  cuda::stream_ref stream,
